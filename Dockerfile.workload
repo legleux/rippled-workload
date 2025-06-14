@@ -3,13 +3,15 @@ FROM python:3.13-slim
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /opt/antithesis/catalog/workload
-
 COPY workload /opt/antithesis/catalog/workload
 
-RUN pip install .
+RUN --mount=from=ghcr.io/astral-sh/uv,source=/uv,target=/bin/uv \
+    uv sync
 
 COPY test_composer/tc_commands /opt/antithesis/catalog/tc_commands
 
 COPY test_composer/all_transactions /opt/antithesis/test/v1/all_transactions
+
+ENV PATH="/opt/antithesis/catalog/workload/.venv/bin:/opt/antithesis/test/v1/all_transactions:$PATH"
 
 CMD ["python", "-m", "workload"]
