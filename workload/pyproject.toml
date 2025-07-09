@@ -1,6 +1,6 @@
 [project]
     name = "workload"
-    version = "0.1.0"
+    version = "0.1.1"
     description = "Add your description here"
     authors = [
         { name = "Michael Legleux", email = "mlegleux@ripple.com" }
@@ -10,6 +10,7 @@
         "antithesis>=0.1.17",
         "requests>=2.32.4",
         "anyio>=4.9.0",
+        "ruamel-yaml>=0.18.14",
 ]
     readme = "README.md"
     requires-python = ">= 3.13"
