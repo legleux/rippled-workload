@@ -15,7 +15,7 @@ RUN <<EOF
     set -ex
     conan remote add --index 0 ripple http://18.143.149.228:8081/artifactory/api/conan/dev
     echo "core.download:parallel=$(nproc)" > "$(conan config home)/global.conf"
-    ## Ninja make OOM CI machines
+    ## Ninja may make CI machines OOM
     #echo "tools.build:jobs=$(($(nproc) * 4/5))" > "$(conan config home)/global.conf"
 EOF
 
@@ -71,4 +71,4 @@ RUN ln -s /opt/ripple/bin/rippled /usr/local/bin/rippled
 RUN mkdir -p /etc/opt && ln -s /opt/ripple/etc/ /etc/opt/ripple
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN set -ex; apt-get update && apt-get install --yes curl procps && rm -rf /var/lib/apt/lists/*
+RUN set -ex; apt-get update && apt-get install --yes curl jq procps && rm -rf /var/lib/apt/lists/*
