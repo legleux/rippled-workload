@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN <<EOF
     set -ex
-    conan remote add --index 0 ripple http://18.143.149.228:8081/artifactory/api/conan/dev
+    conan remote add --index 0 ripple https://conan.ripplex.io
     echo "core.download:parallel=$(nproc)" > "$(conan config home)/global.conf"
     ## Ninja may make CI machines OOM
     #echo "tools.build:jobs=$(($(nproc) * 4/5))" > "$(conan config home)/global.conf"
