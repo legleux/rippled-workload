@@ -9,7 +9,6 @@ COPY workload /opt/antithesis/catalog/workload
 # RUN --mount=from=ghcr.io/astral-sh/uv,source=/uv,target=/bin/uv \
 #     uv sync
 RUN uv sync
-COPY test_composer/tc_commands /opt/antithesis/catalog/tc_commands
 
 COPY test_composer/all_transactions /opt/antithesis/test/v1/all_transactions
 
