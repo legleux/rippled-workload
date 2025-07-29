@@ -10,6 +10,8 @@ from xrpl.models import IssuedCurrency
 import asyncio
 import httpx
 from asyncio import TaskGroup
+from xrpl.models.transactions import NFTokenBurn
+
 from xrpl.asyncio.account import get_next_valid_seq_number
 from xrpl.asyncio.clients import AsyncJsonRpcClient
 from xrpl.asyncio.ledger import get_latest_validated_ledger_sequence
@@ -302,13 +304,18 @@ class Workload:
         return nftoken_offer_create_txn_response.result
 
     async def create_random_nft_offer(self):
+        if not self.nfts:
+            logger.info("No NFTs to make offers on!")
+            return
         nft = choice(self.nfts)
         res = await self.nftoken_create_offer(nft.owner.address, nft.nftoken_id, nft.owner.wallet)
         logger.info(res)
         return None
 
     async def nft_burn_random(self):
-        from xrpl.models.transactions import NFTokenBurn
+        if not self.nfts:
+            logger.info("No NFTs to burn!")
+            return
         nft = choice(self.nfts)
         nft_owner = nft.owner
         nftburn_txn = NFTokenBurn(account=nft_owner.address, nftoken_id=nft.nftoken_id)
