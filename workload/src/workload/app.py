@@ -78,7 +78,6 @@ class Workload:
     def load_initial_accounts(self):
         try:
             accounts = json.loads(Path("/accounts.json").read_text())
-            print(json.dumps(self.account_data, indent=2))
         except FileNotFoundError:
             logger.error("accounts.json not found.")
             if True:
@@ -91,6 +90,7 @@ class Workload:
             for idx, i in enumerate(accounts):
                 logger.info(f"{idx}: {i}")
         self.account_data = accounts
+        print(json.dumps(self.account_data, indent=2))
 
         default_algo = CryptoAlgorithm[conf_file["workload"]["accounts"]["default_crypto_algorithm"]]
 
