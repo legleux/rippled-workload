@@ -5,6 +5,13 @@ from xrpl.wallet import Wallet
 
 def short_address(address):
     return "..".join([address[:6], address[-5:]])
+
+@dataclass
+class NFT:
+    owner: UserAccount
+    nftoken_id: str
+
+
 @dataclass
 class Account:
     wallet: Wallet
@@ -31,7 +38,23 @@ class Gateway(Account):
 @dataclass
 class UserAccount(Account):
     balances: dict = field(default_factory=dict)
+    _tickets: set = field(default_factory=set)
+    _nfts: set = field(default_factory=set)
 
+    @property
+    def nfts(self) -> set:
+        return self._nfts
+
+    @nfts.setter
+    def nfts(self, value: set) -> None:
+        self._nfts = value
+    @property
+    def tickets(self) -> set:
+        return self._tickets
+
+    @tickets.setter
+    def tickets(self, value: set) -> None:
+        self._tickets = value
 @dataclass
 class Amm:
     account: str
