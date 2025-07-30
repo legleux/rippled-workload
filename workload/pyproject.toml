@@ -11,7 +11,6 @@ dependencies = [
     "requests>=2.32.4",
     "anyio>=4.9.0",
     "ruamel-yaml>=0.18.14",
-    "legleux-generate-ledger>=0.0.1",
     "fastapi>=0.116.1",
     "uvicorn>=0.35.0",
 ]
@@ -43,3 +42,7 @@ select = [
 ]
 
 ignore = []
+
+# [tool.uv.sources]
+# xrpl-py = { path = "../../xrpl-py" }
+# legleux-generate-ledger = { path = "../../generate_ledger"}
