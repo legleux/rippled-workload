@@ -1,49 +1,42 @@
+import httpx
 import json
 import os
-import pathlib
 import time
-from antithesis import lifecycle
+from pathlib import Path
 from typing import Any
+
+import uvicorn
+import xrpl
+
+from workload import logger
 from workload.check_rippled_sync_state import is_rippled_synced # TODO:git use rippled_sync.py
-from workload.create import create_accounts
-from xrpl.models import IssuedCurrency
-import asyncio
-import httpx
+from workload.config import conf_file, config_file
+from workload.models import UserAccount
+from workload.nft import mint_nft
+from workload.randoms import sample, choice
+
+from antithesis import lifecycle
 from asyncio import TaskGroup
-from xrpl.models.transactions import NFTokenBurn
+from fastapi import FastAPI, Depends
 
 from xrpl.asyncio.account import get_next_valid_seq_number
 from xrpl.asyncio.clients import AsyncJsonRpcClient
 from xrpl.asyncio.ledger import get_latest_validated_ledger_sequence
+from xrpl.asyncio.transaction import submit_and_wait, sign_and_submit
+from xrpl.constants import CryptoAlgorithm
 from xrpl.core.binarycodec import encode_for_signing, encode
 from xrpl.core.keypairs import sign
-from xrpl.models.transactions import Payment
-from xrpl.constants import CryptoAlgorithm
+from xrpl.models import IssuedCurrency
+from xrpl.models.transactions import (
+    NFTokenCreateOffer,
+    NFTokenCreateOfferFlag,
+    NFTokenBurn,
+    Payment,
+    )
 from xrpl.wallet import Wallet
-from workload.models import UserAccount
-from xrpl.account import does_account_exist
-from xrpl.asyncio.clients import AsyncJsonRpcClient
-from xrpl.asyncio.transaction.reliable_submission import XRPLReliableSubmissionException
-import sys
-import xrpl
-from xrpl.asyncio.transaction import submit_and_wait, sign_and_submit
-from xrpl.models.transactions import NFTokenCreateOffer, NFTokenCreateOfferFlag
-
-import json
-# from xrpl.transaction import sign_and_submit, submit_and_wait
-from workload.balances import get_account_tokens
-from workload.config import conf_file, config_file
-from workload.randoms import sample, choice
-from workload import utils, logger
-from pathlib import Path
-from fastapi import FastAPI, Depends
-import uvicorn
-from workload.nft import mint_nft
 
 class Workload:
     def __init__(self, conf: dict[str, Any]):
-        print("Starting workload")
-
         self.config = conf
         self.accounts = {}
         # TODO: Lookup account by nfts owned, tickets, etc
@@ -59,38 +52,30 @@ class Workload:
         logger.info("Connecting to rippled at: %s", self.rippled)
         self.load_initial_accounts()
         self.client = AsyncJsonRpcClient(self.rippled)
-        # self.wait_for_network(self.rippled)
+        self.wait_for_network(self.rippled)
+        utils.check_validator_proposing() or sys.exit("All validators not in 'proposing' state!")
 
-
-        # utils.check_validator_proposing() or sys.exit("All validators not in 'proposing' state!")
-
-        account_type = xrpl.models.requests.LedgerEntryType.ACCOUNT
-        ledger_data_request = xrpl.models.requests.LedgerData(type=account_type)
-
-        logger.info("%s after %ss", "Workload initialization complete", int(time.time() - self.start_time))
-        logger.info("Workload going to sleep...")
-        # local_path = pathlib.Path(__file__).parents[3] / "tc/workload.json"
         workload_ready_msg =  "Workload initialization complete"
+        logger.info("%s after %ss", workload_ready_msg, int(time.time() - self.start_time))
         lifecycle.setup_complete(details={"message": workload_ready_msg})
-        print('{"antithesis_setup": { "status": "complete", "details": "" }}')
-        logger.info("Called lifecycle setup_complete()")
+        # print('{"antithesis_setup": { "status": "complete", "details": "" }}')
+        # logger.info("Called lifecycle setup_complete()")
 
     def load_initial_accounts(self):
         try:
             accounts = json.loads(Path("/accounts.json").read_text())
         except FileNotFoundError:
             logger.error("accounts.json not found.")
-            if True:
+            if True: # TODO: Fix this for some kind of local testing
                 local_path = "accounts.json"
             # local_path = input("Enter local file path:")
             accounts_json = Path(local_path)
-            logger.info(f"Using {accounts_json.resolve()}")
+            logger.info(f"Using accounts.json at: {accounts_json.resolve()}")
             accounts = json.loads(accounts_json.read_text())
             logger.info(f"{len(accounts)} accounts found!")
             for idx, i in enumerate(accounts):
-                logger.info(f"{idx}: {i}")
+                logger.debug(f"{idx}: {i}")
         self.account_data = accounts
-        print(json.dumps(self.account_data, indent=2))
 
         default_algo = CryptoAlgorithm[conf_file["workload"]["accounts"]["default_crypto_algorithm"]]
 
@@ -101,76 +86,6 @@ class Workload:
             wallet = generate_wallet_from_seed(seed)
             self.accounts[wallet.address] = UserAccount(wallet=wallet)
         logger.info(f"Loaded {len(self.accounts)} initial accounts")
-
-    # def configure_gateways(self, number: int, balance: str) -> None:
-    #     """Configure the gateways for the network.
-
-    #     Creates the accounts, enables default_ripple and creates some initial currencies.
-    #     """
-    #     logger.info("Configuring %s gateways", number)
-    #     # BUG: Configuring 2 gateways causes error in xrpl-py
-    #     gateway_config_start = time.time()
-    #     gateway_wallets, responses = create_accounts(number=number, client=self.client, amount=balance)
-    #     self.gateways = [Gateway(wallet) for idx, wallet in enumerate(gateway_wallets)]
-    #     for gateway in self.gateways:
-    #         logger.info("Setting up gateway %s", gateway.address)
-    #         # Enable rippling on gateway's trustlines so tokens can be transferred
-    #         accountset_txn = AccountSet(
-    #             account=gateway.address,
-    #             set_flag=AccountSetAsfFlag.ASF_DEFAULT_RIPPLE,
-    #         )
-    #         utils.wait_for_ledger_close(self.client)
-    #         response = submit_and_wait(accountset_txn, self.client, gateway.wallet)
-
-        #     for ic in utils.issue_currencies(gateway.address, self.currency_codes):
-        #         gateway.issued_currencies[ic.currency] = ic
-        #         self.currencies.append(ic)
-        # logger.info("%s gateways configured in %ss", len(self.gateways), int(time.time() - gateway_config_start))
-
-    # def configure_accounts(self, number: int, balance: str) -> None:
-    #     # TODO: Too many variables, too complex
-    #     trustset_limit = self.config["transactions"]["trustset"]["limit"]
-    #     logger.info("Configuring %s accounts", number)
-    #     account_create_start = time.time()
-    #     wallets, responses = create_accounts(number=number, client=self.client, amount=balance)
-    #     self.accounts = [UserAccount(wallet=wallet) for wallet in wallets]
-    #     for account in self.accounts:
-    #         does_account_exist(account.address, self.client)
-    #     logger.debug("%s accounts created in %s ms", number, time.time() - account_create_start)
-    #     utils.wait_for_ledger_close(self.client)
-    #     accounts = self.accounts
-    #     trustset_txns = []
-    #     c = 1
-    #     utils.wait_for_ledger_close(self.client)
-    #     for gateway in self.gateways:
-    #         for ic in gateway.issued_currencies.values():
-    #             for account in accounts:
-    #                 trustset_txns.append((account, TrustSet(account=account.address, limit_amount=ic.to_amount(value=trustset_limit))))
-    #                 c += 1
-    #     trustset_responses = []
-    #     for account, txn in trustset_txns:
-    #         trustset_responses.append(sign_and_submit(txn, self.client, account.wallet))
-    #     # Simulate the accounts have bought tokens from the gateways
-    #     payments = []
-    #     for gateway in self.gateways:
-    #         for account in accounts:
-    #             for ic in gateway.issued_currencies.values():
-    #                 # TODO: Get rid of magic numbers
-    #                 usd_deposit = 10e3
-    #                 rate = self.config["currencies"]["rate"][ic.currency]
-    #                 token_disbursement = str(round(usd_deposit * 1e6 / int(rate), 10))
-    #                 payment_amount = ic.to_amount(value=token_disbursement)
-    #                 logger.info("Account %s depositing %s fiat USD for %s",
-    #                             account.address, usd_deposit, utils.format_currency(payment_amount)
-    #                 )
-    #                 payments.append((gateway, Payment(account=gateway.address,
-    #                                          amount=payment_amount,
-    #                                          destination=account.address)))
-    #     payment_responses = []
-    #     for gw, txn in payments:
-    #         payment_responses.append(sign_and_submit(txn, self.client, gw.wallet))
-    #     for idx, account in enumerate(self.accounts):
-    #         self.accounts[idx].balances = get_account_tokens(self.accounts[idx], self.client)["held"] # TODO: Fix
 
     @classmethod
     def issue_currencies(cls, issuer: str, currency_code: list[str]) -> list[IssuedCurrency]:
@@ -391,6 +306,55 @@ class Workload:
         )
         return await submit_and_wait(payment_txn, self.client, src.wallet)
 
+    async def random_batch(self):
+        from xrpl.models import Batch, BatchFlag, Payment
+        amount = 1_000_000
+        src_address, dst = sample(list(self.accounts), 2)
+        sequence = await get_next_valid_seq_number(src_address, self.client)
+        src = self.accounts[src_address]
+        num_txns = 8
+        batch_flag = choice(list(BatchFlag))
+        logger.info(f"Submitting Batch txn {batch_flag.name} ")
+        raw_transactions = [Payment(
+            account=src.address,
+            # amount=("1000000" if idx < 3 else "10000000000000"), # have a until_failure fail
+            amount=str(amount),
+            flags=xrpl.models.TransactionFlag.TF_INNER_BATCH_TXN,
+            destination=dst,
+            sequence=sequence + idx + 1,
+            fee="0",
+            signing_pub_key=""
+        ) for idx in range(num_txns)]
+
+        batch_txn = Batch(
+            account=src.address,
+            flags=batch_flag,
+            raw_transactions=[*raw_transactions],
+            sequence=sequence,
+        )
+
+        response = await submit_and_wait(batch_txn, self.client, src.wallet)
+        result = response.result
+        logger.info(json.dumps(result, indent=2))
+
+    async def mpt_create(self):
+        from xrpl.models import MPTokenIssuanceCreate
+        # src_address, dst = sample(list(self.accounts), 2)
+        src_address = choice(list(self.accounts))
+        sequence = await get_next_valid_seq_number(src_address, self.client)
+        src = self.accounts[src_address]
+
+        mpt_txn = MPTokenIssuanceCreate(
+            account=src.address,
+            # asset_scale="2",
+            # maximum_amount="100000000",
+            # mptoken_metadata=b"cool".hex()
+        )
+        response = await submit_and_wait(mpt_txn, self.client, src.wallet)
+        result = response.result
+        logger.info(json.dumps(result, indent=2))
+
+
 def create_app(workload: Workload) -> FastAPI:
     app = FastAPI()
 
@@ -439,6 +403,13 @@ def create_app(workload: Workload) -> FastAPI:
     async def use_random_ticket(w: Workload = Depends(get_workload)):
         return await w.use_random_ticket()
 
+    @app.get("/batch/random")
+    async def batch(w: Workload = Depends(get_workload)):
+        return await w.random_batch()
+
+    @app.get("/mpt/create") # TODO: mpt/issuance/create
+    async def mpt_create(w: Workload = Depends(get_workload)):
+        return await w.mpt_create()
     ## This requires issued currencies
     # @app.get("/offers/create/random")
     # async def cancel_create_random_offer(w: Workload = Depends(get_workload)):
@@ -454,7 +425,6 @@ def create_app(workload: Workload) -> FastAPI:
     # def
 
 def main():
-    print("IN main()")
     logger.info("Loaded config from %s", config_file)
     conf = conf_file["workload"]
     logger.info("Config %s", json.dumps(conf, indent=2))
