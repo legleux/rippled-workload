@@ -123,7 +123,7 @@ def encode_nft_id(
     logger.debug("Decoded %s", nftoken_id)
     return nftoken_id
 
-async def mint_nft(account, sequence, client):
+async def mint_nft(account, sequence, client, submit=True):
     taxon = 0
     memo_msg = "Some really cool info no doubt"
     memo = Memo(memo_data=memo_msg.encode("utf-8").hex())
@@ -142,9 +142,12 @@ async def mint_nft(account, sequence, client):
     log.debug("Minting NFT %s", nft_mint_txn)
     nft_mint_txn_signed = await autofill_and_sign(transaction=nft_mint_txn, client=client, wallet=account.wallet)
     # nft_id = encode_nft_id(flags, transfer_fee, account.address, taxon, sequence)
-    nft_mint_txn_response = await submit_and_wait(transaction=nft_mint_txn_signed, client=client)
-    if nft_mint_txn_response.status == "success":
-        nftoken_id = nft_mint_txn_response.result["meta"]["nftoken_id"]
-        msg = f"{account.address} minted NFT ID {nftoken_id}"
-        log.info(msg)
-    return nft_mint_txn_response.result
+    if submit:
+        nft_mint_txn_response = await submit_and_wait(transaction=nft_mint_txn_signed, client=client)
+        if nft_mint_txn_response.status == "success":
+            nftoken_id = nft_mint_txn_response.result["meta"]["nftoken_id"]
+            msg = f"{account.address} minted NFT ID {nftoken_id}"
+            log.info(msg)
+        return nft_mint_txn_response.result
+    else:
+        return nft_mint_txn_signed

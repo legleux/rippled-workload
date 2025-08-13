@@ -168,10 +168,39 @@ class Workload:
         dst_address = dst[0]
         src_wallet = Wallet.from_secret(src_secret, algorithm=CryptoAlgorithm.SECP256K1)
         responses = await self.submit_payments(100, src_wallet, dst_address)
-        for i in responses:
-            print(i)
+        # for i in responses:
+        #     print(i)
 
-        return {"cool": "beans"}
+        return {}
+
+    async def pay2(self):
+        accounts = sample(list(self.accounts), 20)
+        # for a in accounts:
+        accounts_sequences = [await get_next_valid_seq_number(a, self.client) for a in accounts]
+        aa = zip(accounts, accounts_sequences)
+        txns = []
+        for i in aa:
+            print(i)
+        # for i in range(20):
+            sequence = i[1]
+            account = self.accounts[i[0]]
+            txns.append(await mint_nft(account, sequence, self.client, submit=False))
+        from xrpl.asyncio.transaction import submit
+
+        # for t in txns:
+
+            # print(t)
+        async with TaskGroup() as tg:
+            for t in txns:
+                tg.create_task(submit(t, self.client))
+        # responses = await self.submit_payments(30, src_wallet, dst_address)
+        # for i in range(30):
+        #     await self.mint_random_nft()
+        # responses = await self.submit_payments(30, src_wallet, dst_address)
+        # for i in responses:
+        #     print(i)
+
+        return {}
 
     async def mint_random_nft(self):
         account_id = choice(list(self.accounts))
@@ -239,11 +268,11 @@ class Workload:
     async def payment_random(self):
         amount = str(1_000_000)
         src, dst = sample(list(self.accounts), 2)
-        sequence = await get_next_valid_seq_number(src.address, self.client)
-        payment_txn = Payment(account=src.address, amount=amount, destination=dst.address, sequence=sequence)
-        response = await sign_and_submit(payment_txn, self.client, src.wallet)
-        logger.debug("Payment from %s to %s for %s submitted.", src.address, dst.address, amount)
-        return response, src.address, dst.address, amount
+        sequence = await get_next_valid_seq_number(src, self.client)
+        payment_txn = Payment(account=src, amount=amount, destination=dst, sequence=sequence)
+        response = await sign_and_submit(payment_txn, self.client, self.accounts[src].wallet)
+        logger.debug("Payment from %s to %s for %s submitted.", src, dst, amount)
+        return response, src, dst, amount
 
     async def create_ticket(self):
         ticket_count = 5
@@ -430,8 +459,9 @@ def create_app(workload: Workload) -> FastAPI:
     async def payment_random(w: Workload = Depends(get_workload)):
         return await w.pay()
 
-    @app.get("/payment/")
-
+    @app.get("/pay2")
+    async def make_many_random_payments(w: Workload = Depends(get_workload)):
+        return await w.pay2()
 
     @app.get("/payment/random")
     async def make_payment(w: Workload = Depends(get_workload)):
