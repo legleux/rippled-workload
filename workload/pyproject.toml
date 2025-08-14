@@ -11,7 +11,7 @@ dependencies = [
     "requests>=2.32.4",
     "anyio>=4.9.0",
     "ruamel-yaml>=0.18.14",
-    "fastapi>=0.116.1",
+    "fastapi[standard]>=0.116.1",
     "uvicorn>=0.35.0",
 ]
 readme = "README.md"
@@ -19,7 +19,8 @@ requires-python = ">= 3.13"
 license = { text = "MIT" }
 
 [project.scripts]
-workload = "workload.app:main"
+# workload = "workload.app:main"
+workload = "workload:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -27,21 +28,30 @@ build-backend = "hatchling.build"
 
 [tool.ruff]
 target-version = "py313"
-select = [
-    "ANN201", # methods must have return types
-    "COM812", # Remove whenever Ruff formatter being used
-]
+line-length = 120
+# select = [
+#     "ANN201", # methods must have return types
+#     "COM812", # Remove whenever Ruff formatter being used
+# ]
 exclude = [
     ".git",
 ]
 
 [tool.ruff.lint]
 select = [
+    "ANN201", # methods must have return types
+    "COM812", # Remove whenever Ruff formatter being used
     "E",
     "F",
-]
 
+]
+extend-select = [
+    "I",
+    # "B",
+    # "Q",
+    ]
 ignore = []
+
 
 # [tool.uv.sources]
 # xrpl-py = { path = "../../xrpl-py" }

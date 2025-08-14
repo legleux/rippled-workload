@@ -1,0 +1,45 @@
+services:
+  workload:
+    build:
+      context: .
+      dockerfile: Dockerfile.workload.v2
+    image: workload_latest:test
+    # stdin_open: true # docker run -i
+    # tty: true        # docker run -t
+    # command: ["workload"]
+    working_dir: /opt/antithesis/catalog/workload/src/workload
+    command: ["workload"]
+    # command: ["ls", "."]
+    # command: ["fastapi", "dev", "--host", "0.0.0.0", "--port", "8000", "src/workload/app.py"]
+
+    # command: uvicorn workload.app:main --host 0.0.0.0 --reload
+    # restart: on-failure
+    ports:
+      - 8000:8000
+    networks:
+      - antithesis_net
+    volumes:
+      - ./workload/accounts.json:/accounts.json
+    container_name: workload
+    hostname: workload
+    environment:
+      - DEBUG=1
+      - RIPPLED_NAME=rippled  # defaults to "rippled"
+      - PYTHON_UNBUFFERED=1 # Should be set already
+      - VALIDATOR_NAME=val # defaults to "val"
+      - NUM_VALIDATORS=5 # default 5
+    develop:
+      watch:
+        - action: sync+restart
+        # - action: sync
+          path: workload
+          target: /opt/antithesis/catalog/workload
+          ignore:
+            - .venv/
+        - action: rebuild
+          path: ./workload/pyproject.toml
+
+networks:
+  antithesis_net:
+    external: true
+    name: antithesis_net

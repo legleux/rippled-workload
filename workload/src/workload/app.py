@@ -1,39 +1,39 @@
-import httpx
 import json
 import os
 import time
+from asyncio import TaskGroup
 from pathlib import Path
 from typing import Any
 
+import httpx
 import uvicorn
 import xrpl
-
-from workload import logger, utils
-from workload.check_rippled_sync_state import is_rippled_synced # TODO:git use rippled_sync.py
-from workload.config import conf_file, config_file
-from workload.models import UserAccount
-from workload.nft import mint_nft
-from workload.randoms import sample, choice
-
 from antithesis import lifecycle
-from asyncio import TaskGroup
-from fastapi import FastAPI, Depends
-
+from fastapi import Depends, FastAPI
+from pydantic import BaseModel
 from xrpl.asyncio.account import get_next_valid_seq_number
 from xrpl.asyncio.clients import AsyncJsonRpcClient
 from xrpl.asyncio.ledger import get_latest_validated_ledger_sequence
-from xrpl.asyncio.transaction import submit_and_wait, sign_and_submit
+from xrpl.asyncio.transaction import sign_and_submit, submit, submit_and_wait
 from xrpl.constants import CryptoAlgorithm
-from xrpl.core.binarycodec import encode_for_signing, encode
+from xrpl.core.binarycodec import encode, encode_for_signing
 from xrpl.core.keypairs import sign
 from xrpl.models import IssuedCurrency
 from xrpl.models.transactions import (
+    NFTokenBurn,
     NFTokenCreateOffer,
     NFTokenCreateOfferFlag,
-    NFTokenBurn,
     Payment,
-    )
+)
 from xrpl.wallet import Wallet
+
+from workload import logger
+from workload.check_rippled_sync_state import is_rippled_synced  # TODO:git use rippled_sync.py
+from workload.config import conf_file, config_file
+from workload.models import UserAccount
+from workload.nft import mint_nft
+from workload.randoms import choice, sample
+
 
 class Workload:
     def __init__(self, conf: dict[str, Any]):
@@ -52,9 +52,9 @@ class Workload:
         logger.info("Connecting to rippled at: %s", self.rippled)
         self.load_initial_accounts()
         self.client = AsyncJsonRpcClient(self.rippled)
-        self.wait_for_network(self.rippled)
+        # self.wait_for_network(self.rippled)
 
-        workload_ready_msg =  "Workload initialization complete"
+        workload_ready_msg = "Workload initialization complete"
         logger.info("%s after %ss", workload_ready_msg, int(time.time() - self.start_time))
         lifecycle.setup_complete(details={"message": workload_ready_msg})
         # print('{"antithesis_setup": { "status": "complete", "details": "" }}')
@@ -65,7 +65,7 @@ class Workload:
             accounts = json.loads(Path("/accounts.json").read_text())
         except FileNotFoundError:
             logger.error("accounts.json not found.")
-            if True: # TODO: Fix this for some kind of local testing
+            if True:  # TODO: Fix this for some kind of local testing
                 local_path = "accounts.json"
             # local_path = input("Enter local file path:")
             accounts_json = Path(local_path)
@@ -78,9 +78,13 @@ class Workload:
 
         default_algo = CryptoAlgorithm[conf_file["workload"]["accounts"]["default_crypto_algorithm"]]
 
-        def generate_wallet_from_seed(seed: str, algorithm: CryptoAlgorithm = default_algo) -> Wallet:
+        def generate_wallet_from_seed(
+            seed: str,
+            algorithm: CryptoAlgorithm = default_algo,
+        ) -> Wallet:
             wallet = Wallet.from_seed(seed=seed, algorithm=algorithm)
             return wallet
+
         for _, seed in self.account_data:
             wallet = generate_wallet_from_seed(seed)
             self.accounts[wallet.address] = UserAccount(wallet=wallet)
@@ -133,7 +137,7 @@ class Workload:
                 sequence=seq + i,
                 fee="500",
                 last_ledger_sequence=latest_ledger + 10,
-                signing_pub_key=wallet.public_key
+                signing_pub_key=wallet.public_key,
             ).to_xrpl()
 
             signing_blob = encode_for_signing(tx_json)
@@ -151,10 +155,7 @@ class Workload:
         return responses
 
     async def submit_via_http(self, blob: str, responses: list):
-        payload = {
-            "method": "submit",
-            "params": [{"tx_blob": blob}]
-        }
+        payload = {"method": "submit", "params": [{"tx_blob": blob}]}
         async with httpx.AsyncClient() as client:
             try:
                 resp = await client.post(self.rippled, json=payload)
@@ -181,15 +182,14 @@ class Workload:
         txns = []
         for i in aa:
             print(i)
-        # for i in range(20):
+            # for i in range(20):
             sequence = i[1]
             account = self.accounts[i[0]]
             txns.append(await mint_nft(account, sequence, self.client, submit=False))
-        from xrpl.asyncio.transaction import submit
 
         # for t in txns:
 
-            # print(t)
+        # print(t)
         async with TaskGroup() as tg:
             for t in txns:
                 tg.create_task(submit(t, self.client))
@@ -213,6 +213,7 @@ class Workload:
         nft_owner = result["tx_json"]["Account"]
         nftoken_id = result["meta"]["nftoken_id"]
         from workload.models import NFT
+
         nft = NFT(owner=account.address, nftoken_id=nftoken_id)
         self.nfts.append(nft)
         account.nfts.add(nftoken_id)
@@ -230,6 +231,11 @@ class Workload:
     def get_accounts(self):
         return self.accounts
 
+    def get_random_accounts(self, num_accounts: int = 2) -> UserAccount:
+        account_ids = sample(list(self.accounts), num_accounts)
+        accounts = [self.accounts[aid] for aid in account_ids]
+        return accounts
+
     def get_nfts(self):
         return self.nfts
 
@@ -243,7 +249,11 @@ class Workload:
             flags=NFTokenCreateOfferFlag.TF_SELL_NFTOKEN,
         )
         logger.debug(json.dumps(nftoken_offer_create_txn.to_xrpl(), indent=2))
-        nftoken_offer_create_txn_response = await submit_and_wait(transaction=nftoken_offer_create_txn, client=self.client, wallet=wallet)
+        nftoken_offer_create_txn_response = await submit_and_wait(
+            transaction=nftoken_offer_create_txn,
+            client=self.client,
+            wallet=wallet,
+        )
         return nftoken_offer_create_txn_response.result
 
     async def create_random_nft_offer(self):
@@ -262,7 +272,11 @@ class Workload:
         nft = choice(self.nfts)
         nft_owner = nft.owner
         nftburn_txn = NFTokenBurn(account=nft_owner.address, nftoken_id=nft.nftoken_id)
-        nftburn_txn_response = await submit_and_wait(transaction=nftburn_txn, client=self.client, wallet=nft_owner.wallet)
+        nftburn_txn_response = await submit_and_wait(
+            transaction=nftburn_txn,
+            client=self.client,
+            wallet=nft_owner.wallet,
+        )
         return nftburn_txn_response.result
 
     async def payment_random(self):
@@ -277,7 +291,7 @@ class Workload:
     async def create_ticket(self):
         ticket_count = 5
         logger.info(choice(list(self.accounts)))
-        account_id  = choice(list(self.accounts))
+        account_id = choice(list(self.accounts))
         logger.info(f"{account_id=}")
         account = self.accounts[account_id]
         logger.info(f"Chose account: {account}")
@@ -336,6 +350,7 @@ class Workload:
 
     async def random_batch(self):
         from xrpl.models import Batch, BatchFlag, Payment
+
         amount = 1_000_000
         src_address, dst = sample(list(self.accounts), 2)
         sequence = await get_next_valid_seq_number(src_address, self.client)
@@ -343,16 +358,19 @@ class Workload:
         num_txns = 8
         batch_flag = choice(list(BatchFlag))
         logger.info(f"Submitting Batch txn {batch_flag.name} ")
-        raw_transactions = [Payment(
-            account=src.address,
-            # amount=("1000000" if idx < 3 else "10000000000000"), # have a until_failure fail
-            amount=str(amount),
-            flags=xrpl.models.TransactionFlag.TF_INNER_BATCH_TXN,
-            destination=dst,
-            sequence=sequence + idx + 1,
-            fee="0",
-            signing_pub_key=""
-        ) for idx in range(num_txns)]
+        raw_transactions = [
+            Payment(
+                account=src.address,
+                # amount=("1000000" if idx < 3 else "10000000000000"), # have a until_failure fail
+                amount=str(amount),
+                flags=xrpl.models.TransactionFlag.TF_INNER_BATCH_TXN,
+                destination=dst,
+                sequence=sequence + idx + 1,
+                fee="0",
+                signing_pub_key="",
+            )
+            for idx in range(num_txns)
+        ]
 
         batch_txn = Batch(
             account=src.address,
@@ -367,6 +385,7 @@ class Workload:
 
     async def mpt_create(self):
         from xrpl.models import MPTokenIssuanceCreate
+
         # src_address, dst = sample(list(self.accounts), 2)
         src_address = choice(list(self.accounts))
         sequence = await get_next_valid_seq_number(src_address, self.client)
@@ -395,15 +414,18 @@ class Workload:
     async def make_payment(self, payment_data):
         logger.info(f"got payment_data: {payment_data}")
 
+    async def fill_ledger(self, transactions):
+
+
 def create_app(workload: Workload) -> FastAPI:
     app = FastAPI()
-    from pydantic import BaseModel
 
     class Item(BaseModel):
         name: str
         description: str | None = None
         price: float
         tax: float | None = None
+
     class PaymentM(BaseModel):
         default_amount: int = 100
         account: str
@@ -413,19 +435,23 @@ def create_app(workload: Workload) -> FastAPI:
     def get_workload():
         return workload
 
+    @app.get("/test")
+    def test(w: Workload = Depends(get_workload)):
+        # accounts = w.test()
+        return "beans"  # neat
+
     @app.post("/items/")
     async def create_item(item: Item):
         return item
 
     @app.post("/payment")
     async def payment(payment_data: PaymentM, w: Workload = Depends(get_workload)):
-        from xrpl.models.transactions import Payment
-        """
-        """
+        # async def payment(payment_data: PaymentM, w: Workload = Depends(get_workload)):
+        """ """
 
         logger.info("Hit payment")
         logger.info(payment_data)
-        payment_response = w.make_payment(payment_data)
+        payment_response = await w.make_payment(payment_data)
         logger.info(payment_response)
         return payment_response
 
@@ -434,7 +460,7 @@ def create_app(workload: Workload) -> FastAPI:
         accounts = w.get_accounts()
         for a in accounts:
             logger.info(a)
-        return {}
+        return "cool"  # neat
 
     @app.get("/nft/list")
     def get_nfts(w: Workload = Depends(get_workload)):
@@ -461,7 +487,11 @@ def create_app(workload: Workload) -> FastAPI:
 
     @app.get("/pay2")
     async def make_many_random_payments(w: Workload = Depends(get_workload)):
-        return await w.pay2()
+        accounts = w.get_random_accounts(4)
+        for i in accounts:
+            print(i)
+
+        # return await w.pay2()
 
     @app.get("/payment/random")
     async def make_payment(w: Workload = Depends(get_workload)):
@@ -479,13 +509,14 @@ def create_app(workload: Workload) -> FastAPI:
     async def batch(w: Workload = Depends(get_workload)):
         return await w.random_batch()
 
-    @app.get("/mpt/create") # TODO: mpt/issuance/create
+    @app.get("/mpt/create")  # TODO: mpt/issuance/create
     async def mpt_create(w: Workload = Depends(get_workload)):
         return await w.mpt_create()
 
     @app.get("/request")
     async def request(w: Workload = Depends(get_workload), body: str = ""):
         return await w.make_request(body)
+
     ## This requires issued currencies
     # @app.get("/offers/create/random")
     # async def cancel_create_random_offer(w: Workload = Depends(get_workload)):
@@ -496,14 +527,21 @@ def create_app(workload: Workload) -> FastAPI:
 
     return app
 
-
     # @app.get("/ticket/use")
     # def
 
-def main():
-    logger.info("Loaded config from %s", config_file)
-    conf = conf_file["workload"]
-    logger.info("Config %s", json.dumps(conf, indent=2))
-    workload = Workload(conf)
-    app = create_app(workload)
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+logger.info("Loaded config from %s", config_file)
+conf = conf_file["workload"]
+logger.info("Config %s", json.dumps(conf, indent=2))
+workload = Workload(conf)
+app = create_app(workload)
+uvicorn.run(app, host="0.0.0.0", port=8000, log_level="debug")
+
+# def main():
+#     logger.info("Loaded config from %s", config_file)
+#     conf = conf_file["workload"]
+#     logger.info("Config %s", json.dumps(conf, indent=2))
+#     workload = Workload(conf)
+#     app = create_app(workload)
+#     uvicorn.run(app, host="0.0.0.0", port=8000)
