@@ -19,7 +19,7 @@ services:
     networks:
       - antithesis_net
     volumes:
-      - ./workload/accounts.json:/accounts.json
+      - ./testnet/accounts.json:/accounts.json
     container_name: workload
     hostname: workload
     environment:

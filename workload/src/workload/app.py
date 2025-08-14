@@ -14,16 +14,24 @@ from pydantic import BaseModel
 from xrpl.asyncio.account import get_next_valid_seq_number
 from xrpl.asyncio.clients import AsyncJsonRpcClient
 from xrpl.asyncio.ledger import get_latest_validated_ledger_sequence
-from xrpl.asyncio.transaction import sign_and_submit, submit, submit_and_wait
+from xrpl.asyncio.transaction import sign_and_submit, submit, submit_and_wait, sign, autofill_and_sign
 from xrpl.constants import CryptoAlgorithm
 from xrpl.core.binarycodec import encode, encode_for_signing
-from xrpl.core.keypairs import sign
-from xrpl.models import IssuedCurrency
+from xrpl.models import (
+    Transaction,
+    IssuedCurrency,
+    AccountSetAsfFlag,
+    NFTokenMintFlag
+)
 from xrpl.models.transactions import (
     NFTokenBurn,
     NFTokenCreateOffer,
     NFTokenCreateOfferFlag,
+    NFTokenMint,
+    TrustSet,
+    AccountSet,
     Payment,
+
 )
 from xrpl.wallet import Wallet
 
@@ -32,7 +40,7 @@ from workload.check_rippled_sync_state import is_rippled_synced  # TODO:git use 
 from workload.config import conf_file, config_file
 from workload.models import UserAccount
 from workload.nft import mint_nft
-from workload.randoms import choice, sample
+from workload.randoms import choice, sample, randrange
 
 
 class Workload:
@@ -141,7 +149,7 @@ class Workload:
             ).to_xrpl()
 
             signing_blob = encode_for_signing(tx_json)
-            signature = sign(signing_blob, wallet.private_key)
+            signature = xrpl.core.keypairs.sign(signing_blob, wallet.private_key)
             tx_json["TxnSignature"] = signature
 
             signed_blob = encode(tx_json)
@@ -348,7 +356,7 @@ class Workload:
         )
         return await submit_and_wait(payment_txn, self.client, src.wallet)
 
-    async def random_batch(self):
+    async def random_batch(self, submit=True):
         from xrpl.models import Batch, BatchFlag, Payment
 
         amount = 1_000_000
@@ -378,12 +386,15 @@ class Workload:
             raw_transactions=[*raw_transactions],
             sequence=sequence,
         )
+        if submit:
+            response = await submit_and_wait(batch_txn, self.client, src.wallet)
+            result = response.result
+            logger.info(json.dumps(result, indent=2))
+        else:
+            signed_batch = await autofill_and_sign(transaction=batch_txn, client=self.client, wallet=src.wallet)
+            return signed_batch
 
-        response = await submit_and_wait(batch_txn, self.client, src.wallet)
-        result = response.result
-        logger.info(json.dumps(result, indent=2))
-
-    async def mpt_create(self):
+    async def mpt_create(self, submit=True):
         from xrpl.models import MPTokenIssuanceCreate
 
         # src_address, dst = sample(list(self.accounts), 2)
@@ -397,9 +408,12 @@ class Workload:
             # maximum_amount="100000000",
             # mptoken_metadata=b"cool".hex()
         )
-        response = await submit_and_wait(mpt_txn, self.client, src.wallet)
-        result = response.result
-        logger.info(json.dumps(result, indent=2))
+        if submit:
+            response = await submit_and_wait(mpt_txn, self.client, src.wallet)
+            result = response.result
+            logger.info(json.dumps(result, indent=2))
+        else:
+            return await autofill_and_sign(mpt_txn, self.client, src.wallet)
 
     async def make_request(self, request):
         logger.info(f"got request: {request}")
@@ -414,7 +428,61 @@ class Workload:
     async def make_payment(self, payment_data):
         logger.info(f"got payment_data: {payment_data}")
 
-    async def fill_ledger(self, transactions):
+    async def get_destination(self, accounts, ignore_account):
+        accounts_list = list(accounts.keys())
+        accounts_list.remove(ignore_account)
+        destination = choice(accounts_list)
+        return destination
+
+    async def build_payment(self, wallet, destination=None) -> Transaction:
+        DEFAULT_FEE = 10
+        DEFAULT_PAYMENT_AMOUNT = "1000000"
+        if destination is None:
+            destination = await self.get_destination(accounts=self.accounts, ignore_account=wallet.address)
+        sequence = await get_next_valid_seq_number(address=wallet.address, client=self.client)
+        payment = Payment(
+            account=wallet.address,
+            amount=DEFAULT_PAYMENT_AMOUNT,
+            fee=str(DEFAULT_FEE),
+            sequence=sequence,
+            destination=destination,
+        )
+        return sign(transaction=payment, wallet=wallet)
+
+    async def make_wallets(self, accounts):
+        wallets = await self.generate_wallets(accounts)
+        return wallets
+
+    async def submit_txn(self, txn, client, responses):
+        response = await submit(transaction=txn, client=client)
+        responses.append(response)
+
+    async def fill_ledger(self, n):
+        ## Generate/collect the accounts the transactions will use
+        txns = []
+        async with TaskGroup() as tg:
+            for account in self.accounts.values():
+                txns.append(tg.create_task(self.build_payment(wallet=account.wallet)))
+        txns = [t.result() for t in txns]
+        if randrange(2):
+            logger.info("doing few")
+            mpt_txn = await self.mpt_create(submit=False)
+            batch_txn = await self.random_batch(submit=False)
+            txns.insert(randrange(len(txns)), batch_txn)
+            txns.insert(randrange(len(txns)), mpt_txn)
+        else:
+            logger.info("doing many")
+            batch_txns = [await self.random_batch(submit=False) for _ in range(10)]
+            mpt_txns = [ await self.mpt_create(submit=False) for _ in range(10)]
+            l = len(txns)
+            n = randrange(l)
+            txns = txns[:n] + batch_txns + mpt_txns + txns[n:]
+
+        responses = []
+        async with TaskGroup() as tg:
+            for txn in txns:
+                tg.create_task(self.submit_txn(txn=txn, client=self.client, responses=responses))
+
 
 
 def create_app(workload: Workload) -> FastAPI:
@@ -434,6 +502,11 @@ def create_app(workload: Workload) -> FastAPI:
 
     def get_workload():
         return workload
+
+    @app.get("/fill")
+    async def fill(w: Workload = Depends(get_workload)):
+        accounts = await w.fill_ledger(len(w.accounts))
+        return "beans"  # neat
 
     @app.get("/test")
     def test(w: Workload = Depends(get_workload)):

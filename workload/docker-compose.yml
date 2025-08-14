@@ -11,8 +11,9 @@ services:
     depends_on:
       rippled:
         condition: service_healthy
+    ports:
+      - 8000:8000
     volumes:
       - ./accounts.json:/accounts.json
-      - ./ledger.json:/ledger.json
     networks:
       antithesis_net:
