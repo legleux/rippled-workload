@@ -60,7 +60,7 @@ class Workload:
         logger.info("Connecting to rippled at: %s", self.rippled)
         self.load_initial_accounts()
         self.client = AsyncJsonRpcClient(self.rippled)
-        # self.wait_for_network(self.rippled)
+        self.wait_for_network(self.rippled)
 
         workload_ready_msg = "Workload initialization complete"
         logger.info("%s after %ss", workload_ready_msg, int(time.time() - self.start_time))
@@ -131,6 +131,7 @@ class Workload:
             wait_time = 10
             time.sleep(wait_time)
         logger.info("rippled ready...")
+        time.sleep(60)
 
     async def submit_payments(self, n: int, wallet: Wallet, destination_address: str):
         seq = await get_next_valid_seq_number(wallet.address, client=self.client)
