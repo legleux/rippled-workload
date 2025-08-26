@@ -6,9 +6,24 @@ from xrpl.models.amounts import IssuedCurrencyAmount
 from xrpl.models.currencies import IssuedCurrency
 from xrpl.ledger import get_latest_validated_ledger_sequence
 from xrpl.clients import JsonRpcClient
-
+from workload.randoms import sample, choice
 import time
 from workload import logger
+from typing import Any, Sequence, TypeVar
+from collections.abc import Sequence
+from typing import Any
+from xrpl.models.transactions.transaction import Transaction
+
+T = TypeVar("T")
+
+def sample_omit(seq: Sequence[Any], k: int, omit: Any):
+    return sample([x for x in seq if x != omit], k)
+
+def choice_omit(seq: Sequence[T], omit: T) -> T:
+    pool = [x for x in seq if x != omit]
+    if not pool:
+        raise ValueError(f"no choices from {seq} after omitting {omit}")
+    return choice(pool)
 
 def short_address(address: str) -> str:
     length = 7

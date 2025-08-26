@@ -29,8 +29,13 @@ class Account:
             print("checking...")
             # log.info("Checking %s balance of %s", self.address, c)
 
-    def __str__(self) -> str:
+    @property
+    def short(self):
         return short_address(self.address)
+
+
+    def __str__(self) -> str:
+        return self.address
 @dataclass
 class Gateway(Account):
     issued_currencies: dict = field(default_factory=dict)

@@ -22,7 +22,9 @@
             "token_distribution": 1000000,
             "codes": [
                 "USD",
-                "BTC"
+                "BTC",
+                "CNY",
+                "GBP"
             ],
             "rate":{
                 "USD": "1_000000",
@@ -30,15 +32,26 @@
             }
         },
         "transactions": {
+            "available": [
+                "Payment",
+                "NFTokenMint",
+                "TrustSet",
+                "AccountSet"
+            ],
+            "mptoken": {
+                "issuance_create": {
+                    "transfer_fee": 1000
+                }
+            },
             "payment": {
-                "default_amount": "100000000"
+                "amount": "100000000"
             },
             "trustset": {
                 "limit": "1000000000000000"
             }
         },
         "rippled": {
-            "local": "172.17.0.3",
+            "local": "rippled",
             "json_rpc_port": 5005,
             "ws_port": 6006,
             "timeout": 600

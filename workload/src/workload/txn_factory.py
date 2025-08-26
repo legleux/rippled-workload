@@ -1,25 +1,42 @@
-from dataclasses import dataclass
-from pprint import pprint
-from typing import Callable, Dict, Any, Optional
+import json
 
-from xrpl.account import get_next_valid_seq_number
+from dataclasses import dataclass, field
+from typing import Callable, Dict, Any, Sequence
+
 from xrpl.models import IssuedCurrency
-from xrpl.models.transactions.transaction import Memo
-from xrpl.transaction import submit_and_wait
+from xrpl.models.transactions.transaction import Memo, Transaction
 from xrpl.models.transactions import (
-    AccountSetAsfFlag,
-    Payment,
-    NFTokenMint,
-    NFTokenMintFlag,
     AccountSet,
+    MPTokenIssuanceCreate,
+    NFTokenMint,
+    Payment,
     TrustSet,
 )
-from workload import randoms
-from workload.create import generate_wallet_from_seed
-from workload.randoms import sample, choice
+from xrpl.models import IssuedCurrency
+
+from workload import logger
+from workload.randoms import choice
+from workload.transactions.mptoken import metadata as token_metadata
+from workload.utils import choice_omit
+
+@dataclass
+class TxnSpec:
+    model: type
+    builder: Callable[["TxnContext"], dict]
+
+REGISTRY: Dict[str, TxnSpec] = {}
+
+def register_txn(model_cls: type):
+    """
+    Decorator to register a txn builder against its XRPL model.
+    """
+    def wrap(fn: Callable[["TxnContext"], dict]):
+        REGISTRY[model_cls.__name__] = TxnSpec(model=model_cls, builder=fn)
+        return fn
+    return wrap
+
 
 def deep_update(base: dict, override: dict) -> dict:
-    """Deep-merge override into base and return base."""
     for k, v in override.items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
             deep_update(base[k], v)
@@ -27,93 +44,108 @@ def deep_update(base: dict, override: dict) -> dict:
             base[k] = v
     return base
 
-def rand_amount(rng: randoms.SystemRandom) -> str:
-    # XRP drops, string per XRPL JSON conventions
-    return str(randoms.randint(10, 1_000_000))
-
-def rand_address(account_list) -> str:
-    return randoms.choice(account_list)
-
 @dataclass
 class TxnContext:
-    account: str
-    fee: str = "10"
-    limit_amount_value = "10000000000000"
-    addresses: Optional[list] = None
-    def get_address(self) -> randoms.SystemRandom:
-        return choice(self.addresses)
+    accounts: Sequence[str]
+    currencies: Sequence[IssuedCurrency]
+    fee: str
+    defaults: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
+    def rand_account(self, omit: str | None = None) -> str:
+        return choice_omit(self.accounts, omit=omit) if omit else choice(self.accounts)
+
+    def rand_currency(self) -> IssuedCurrency:
+        return choice(self.currencies)
+
+@register_txn(Payment)
 def build_payment(ctx: TxnContext) -> dict:
-    address = ctx.get_address()
-
+    acct = ctx.rand_account()
+    dest = ctx.rand_account(omit=acct)
     return {
         "TransactionType": "Payment",
-        "Account": ctx.account,
-        "Fee": ctx.fee,
-        "Destination": ctx.get_address(),
+        "Account": acct,
+        "Destination": dest,
+        # Amount is either the default or call-specific
     }
 
+@register_txn(TrustSet)
 def build_trustset(ctx: TxnContext) -> dict:
+    cur = ctx.rand_currency()
+    acct = ctx.rand_account(omit=cur.issuer)
     return {
         "TransactionType": "TrustSet",
-        "Account": ctx.account,
-        "Fee": ctx.fee,
+        "Account": acct,
+        "LimitAmount": {
+            "currency": cur.currency,
+            "issuer": cur.issuer,
+            # no "value" here — defaults/overrides will supply it
+        },
     }
 
+@register_txn(AccountSet)
 def build_accountset(ctx: TxnContext) -> dict:
-    rng = ctx.get_address()
-    # TODO: Use ASFlags
+    acct = ctx.rand_account()
     return {
-        "Account": ctx.account,
-        "Fee": ctx.fee,
-        "SetFlag": randoms.choice(list(AccountSetAsfFlag)),
-        # "Domain": ""
+        "TransactionType": "AccountSet",
+        "Account": acct,
+        # SetFlag #TODO: Figure out if SetFlag can even be randomized meaningfully.
     }
 
+@register_txn(NFTokenMint)
 def build_nftoken_mint(ctx: TxnContext) -> dict:
-    address = ctx.get_address()
+    acct = ctx.rand_account()
     memo_msg = "Some really cool info no doubt"
     memo = Memo(memo_data=memo_msg.encode("utf-8").hex())
-    taxon = 0
-    nftoken_mint_dict = {
-        "Account": ctx.account,
-        "NFTokenTaxon": taxon,
-        "flags": NFTokenMintFlag.TF_TRANSFERABLE,
+    return {
+        "TransactionType": "NFTokenMint",
+        "Account": acct,
+        "NFTokenTaxon": 0,
         "memos": [memo],
     }
-    return nftoken_mint_dict
 
-_BUILDERS: Dict[str, Callable[[TxnContext], dict]] = {
-    "Payment": build_payment,
-    "TrustSet": build_trustset,
-    "AccountSet": build_accountset,
-    "NFTokenMint": build_nftoken_mint,
-}
+@register_txn(MPTokenIssuanceCreate)
+def build_mptoken_issuance_create(ctx: TxnContext) -> dict:
+    acct = ctx.rand_account()
+    metadata_hex = json.dumps(choice(token_metadata)).encode("utf-8").hex()
+    return {
+        "TransactionType": "MPTokenIssuanceCreate",
+        "Account": acct,
+        "MPTokenMetadata": metadata_hex,
+    }
 
-TXN_FACTORY = {
-    "Payment": Payment,
-    "TrustSet": TrustSet,
-    "AccountSet": AccountSet,
-    "NFTokenMint": NFTokenMint,
-}
+def update_transaction(transaction: Transaction, **kwargs) -> Transaction:
+    payload = transaction.to_xrpl()
+    payload.update(kwargs)
+    return type(transaction).from_xrpl(payload)
 
-def generate_txn(
-    txn_type: str,
-    ctx: TxnContext,
-    **overrides: Any,
-) -> dict:
-    """
-    Build a transaction of the given type using randomized defaults and deep-merge any overrides.
-    """
-    try:
-        builder = _BUILDERS[txn_type]
-    except KeyError:
-        raise ValueError(f"Unsupported txn_type: {txn_type!r}") from None
+async def generate_txn(txn_type: str, ctx: TxnContext, **overrides: Any) -> dict:
+    spec = REGISTRY.get(txn_type)
+    if not spec:
+        raise ValueError(f"Unsupported txn_type: {txn_type!r}")
 
-    base = builder(ctx)
-    updated_txn = deep_update(base, overrides)
-    try:
-        new_txn = TXN_FACTORY[txn_type].from_xrpl(updated_txn)
-        return new_txn
-    except Exception as e:
-        print(f"error: {e}")
+    logger.info("Building %s", txn_type)
+
+    # Start with defaults (global + per-type)
+    composed: dict = {}
+    deep_update(composed, ctx.defaults.get("*", {}))
+    deep_update(composed, ctx.defaults.get(txn_type, {}))
+
+    # Add the builder’s random fields
+    derived = spec.builder(ctx)
+    deep_update(composed, derived)
+
+    # Merge any explicit overrides
+    if overrides:
+        deep_update(composed, overrides)
+        logger.info("Overriding: %s", {k: v for k, v in overrides.items()})
+
+    if composed.get("Fee") is None:
+        composed["Fee"] = ctx.fee
+
+    for k, v in composed.items():
+        logger.info("%s: %s", k, v)
+
+    txn = spec.model.from_xrpl(composed)
+    logger.info("Generated %s", txn_type)
+    logger.info(json.dumps(txn.to_xrpl(), indent=2))
+    return txn
