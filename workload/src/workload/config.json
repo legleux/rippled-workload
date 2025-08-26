@@ -38,7 +38,7 @@
             }
         },
         "rippled": {
-            "local": "172.17.0.3",
+            "local": "rippled",
             "json_rpc_port": 5005,
             "ws_port": 6006,
             "timeout": 600

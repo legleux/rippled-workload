@@ -1,0 +1,46 @@
+services:
+  workload:
+    image: $WORKLOAD_IMAGE
+    build:
+      # context: workload
+      dockerfile: Dockerfile.workloadv2
+      network: antithesis_net
+    container_name: workload
+    hostname: workload
+    entrypoint: ["workload"]
+    # environment:
+    #   - RIPPLED_NAME=rippled  # defaults to "rippled"
+    #   - VALIDATOR_NAME=val # defaults to "val"
+    #   - NUM_VALIDATORS=5 # default 5
+    # depends_on:
+    #   rippled:
+    #     condition: service_healthy
+    ports:
+      - 8000:8000
+    volumes:
+      - ./workload/accounts.json:/accounts.json
+      - ./workload/ledger.json:/ledger.json
+    networks:
+      antithesis_net:
+
+    develop:
+      # Create a `watch` configuration to update the app
+      #
+      watch:
+        # Sync the working directory with the `/app` directory in the container
+        - action: sync
+          path: workload
+          target: /opt/antithesis/catalog/workload
+          # Exclude the project virtual environment
+          ignore:
+            - .venv/
+
+        # Rebuild the image on changes to the `pyproject.toml`
+        - action: rebuild
+          path: ./pyproject.toml
+
+
+
+networks:
+  antithesis_net:
+    external: true
