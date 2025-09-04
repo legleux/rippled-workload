@@ -210,7 +210,7 @@ class Workload:
         # TODO: Doesn't need to be in workload
         try:
             accounts_json = Path(accounts_json)
-            logger.info(f"Loading accounts from {accounts_json}")
+            logger.debug(f"Loading accounts from {accounts_json}")
             accounts = json.loads(accounts_json.read_text())
         except FileNotFoundError:
             logger.error("accounts.json not found.")
@@ -218,9 +218,9 @@ class Workload:
                 local_path = "accounts.json"
             # local_path = input("Enter local file path:")
             accounts_json = Path(local_path)
-            logger.info(f"Using accounts.json at: {accounts_json.resolve()}")
+            logger.debug(f"Using accounts.json at: {accounts_json.resolve()}")
             accounts = json.loads(accounts_json.read_text())
-            logger.info(f"{len(accounts)} accounts found!")
+            logger.debug(f"{len(accounts)} accounts found!")
             for idx, i in enumerate(accounts):
                 logger.debug(f"{idx}: {i}")
         self.account_data = accounts
@@ -234,7 +234,7 @@ class Workload:
         for _, seed in self.account_data:
             wallet = generate_wallet_from_seed(seed)
             self.accounts[wallet.address] = UserAccount(wallet=wallet)
-        logger.info(f"Loaded {len(self.accounts)} initial accounts")
+        logger.debug(f"Loaded {len(self.accounts)} initial accounts")
 
     @classmethod
     def issue_currencies(cls, issuer: str, currency_code: list[str]) -> list[IssuedCurrency]:
@@ -258,17 +258,17 @@ class Workload:
     def wait_for_network(self, rippled) -> None:
         timeout = self.config["rippled"]["timeout"]  # Wait at most 10 minutes
         wait_start = time.time()
-        logger.info("Waiting %ss for rippled at %s to be running.", timeout, rippled)
+        logger.debug("Waiting %ss for rippled at %s to be running.", timeout, rippled)
         while not (is_rippled_synced(rippled)):
             irs = is_rippled_synced(rippled)
-            logger.info(f"is_rippled_synced returning: {irs}")
+            logger.debug(f"is_rippled_synced returning: {irs}")
 
             if (rippled_ready_time := int(time.time() - self.start_time)) > timeout:
-                logger.info("rippled ready after %ss", rippled_ready_time)
-            logger.info("Waited %ss so far", int(time.time() - wait_start))
+                logger.debug("rippled ready after %ss", rippled_ready_time)
+            logger.debug("Waited %ss so far", int(time.time() - wait_start))
             wait_time = 10
             time.sleep(wait_time)
-        logger.info("rippled ready...")
+        logger.debug("rippled ready...")
 
     async def gen_payment(self, src, dst, amount):
         source = self.accounts[src]
@@ -288,24 +288,24 @@ class Workload:
 
         Returns: The response from the
         """
-        logger.info(txn)
+        logger.debug(txn)
         submit_method = submit_and_wait if wait else sign_and_submit
         source = self.accounts[txn.account]
-        logger.info(source)
+        logger.debug(source)
         wallet = source.wallet
         response = await submit_method(transaction=txn, client=self.client, wallet=wallet)
-        logger.info(response)
+        logger.debug(response)
         return response
 
     async def make_payment(self, payment_data):
-        logger.info("hit make_payment()")
-        logger.info(f"{payment_data=}")
+        logger.debug("hit make_payment()")
+        logger.debug(f"{payment_data=}")
         account = payment_data.account
         destination = payment_data.destination
         amount = payment_data.amount
         txn = await self.gen_payment(account, destination, str(amount))
         result = await self.submit_txn(txn)
-        logger.info(f"got result: {result}")
+        logger.debug(f"got result: {result}")
 
     async def submit_payments(self, n: int, wallet: Wallet, destination_address: str):
         seq = await get_next_valid_seq_number(wallet.address, client=self.client)
@@ -363,9 +363,9 @@ class Workload:
         account = self.accounts[account_id]
         sequence = await get_next_valid_seq_number(account.address, self.client)
         result = await mint_nft(account, sequence, self.client)
-        logger.info(json.dumps(result, indent=2))
-        logger.info(json.dumps(result["meta"]["nftoken_id"], indent=2))
-        logger.info(json.dumps(result["tx_json"]["Account"], indent=2))
+        logger.debug(json.dumps(result, indent=2))
+        logger.debug(json.dumps(result["meta"]["nftoken_id"], indent=2))
+        logger.debug(json.dumps(result["tx_json"]["Account"], indent=2))
         nft_owner = result["tx_json"]["Account"]
         nftoken_id = result["meta"]["nftoken_id"]
         from workload.models import NFT
@@ -377,12 +377,12 @@ class Workload:
         #     if a.address == nft_owner:
         #         nft = NFT(owner=a, nftoken_id=nftoken_id)
         #         self.nfts.append(nft)
-        #         logger.info(f"Added NFT {nftoken_id} with ownder {a}")
+        #         logger.debug(f"Added NFT {nftoken_id} with ownder {a}")
         #         break
 
-        logger.info(f"Account {account.address}'s NFTs:")
+        logger.debug(f"Account {account.address}'s NFTs:")
         for idx, nft in enumerate(account.nfts):
-            logger.info(f"{idx}: {nft}")
+            logger.debug(f"{idx}: {nft}")
 
     def get_accounts(self):
         return self.accounts
@@ -407,7 +407,7 @@ class Workload:
 
     async def create_random_nft_offer(self):
         if not self.nfts:
-            logger.info("No NFTs to make offers on!")
+            logger.debug("No NFTs to make offers on!")
             return
         nft = choice(self.nfts)
         owner = self.accounts[nft.owner]
@@ -457,7 +457,7 @@ class Workload:
         tix = [ticket_seq for ticket_seq in range(ticket_seq, ticket_seq + ticket_count)]
         account.tickets.update(tix)
         logger.debug(f"Account {account.address} tickets: {account.tickets=}")
-        # logger.info(f"Created tickets: {tickets}")
+        # logger.debug(f"Created tickets: {tickets}")
         # self.accounts
         return None
 
@@ -508,7 +508,7 @@ class Workload:
         src = self.accounts[src_address]
         num_txns = 8
         batch_flag = choice(list(BatchFlag))
-        logger.info(f"Submitting Batch txn {batch_flag.name} ")
+        logger.debug(f"Submitting Batch txn {batch_flag.name} ")
         raw_transactions = [
             Payment(
                 account=src.address,
@@ -532,7 +532,7 @@ class Workload:
 
         response = await submit_and_wait(batch_txn, self.client, src.wallet)
         result = response.result
-        logger.info(json.dumps(result, indent=2))
+        logger.debug(json.dumps(result, indent=2))
 
     async def mpt_create(self):
         from xrpl.models import MPTokenIssuanceCreate
@@ -550,7 +550,7 @@ class Workload:
         )
         response = await submit_and_wait(mpt_txn, self.client, src.wallet)
         result = response.result
-        logger.info(json.dumps(result, indent=2))
+        logger.debug(json.dumps(result, indent=2))
 
     async def fill_ledger(self, max_txns: int | None = None):
         """Attempt to fill the ledger up to max_txns random txns"""
@@ -567,7 +567,7 @@ class Workload:
         for txn in txns:
             sequence = next_sequences[txn.account]
             inter_txn = update_transaction(txn, sequence=sequence)
-            logger.info(json.dumps(inter_txn.to_dict(), indent=2))
+            logger.debug(json.dumps(inter_txn.to_dict(), indent=2))
             txn = tsign(transaction=inter_txn, wallet=self.accounts[txn.account].wallet)
             updated_txns.append(txn)
             # txn = await autofill_and_sign(transaction=txn, client=self.client, wallet=self.accounts[txn.account])
@@ -587,16 +587,31 @@ class Workload:
                 dir(e)
                 print("handled other error:", e)
 
+    async def do_txn(self, txn_type: str):
+        try:
+            logger.debug(f"Generating a {txn_type} transaction")
+            txn = await txn_factory.generate_txn(
+                txn_type,
+                self.txn_ctx,
+            )
+            tt = txn.transaction_type.name.title().replace("_", "")
+            logger.debug(f"Generated a {tt} transaction")
+            response = await self.submit_txn(txn)
+        except Exception as e:
+            logger.exception("Error: %s", e)
+            response = e
+        return response
+
     async def make_random_txn(self):
         # Get the transactions we have available
         txn_type = choice(self.config["transactions"]["available"])
-        logger.info(f"Generating a {txn_type} transaction")
+        logger.debug(f"Generating a {txn_type} transaction")
         txn = await txn_factory.generate_txn(
             txn_type,
             self.txn_ctx,
         )
         tt = txn.transaction_type.name.title().replace("_", "")
-        logger.info(f"Generated a {tt} transaction")
+        logger.debug(f"Generated a {tt} transaction")
         return txn
 
     async def make_random_txns(self, n) -> Transaction:
@@ -639,14 +654,14 @@ def create_app(workload: Workload) -> FastAPI:
     def get_accounts(w: Workload = Depends(get_workload)):
         accounts = w.addresses
         for a in accounts:
-            logger.info(a)
+            logger.debug(a)
         return accounts
 
     @app.get("/nft/list")
     def get_nfts(w: Workload = Depends(get_workload)):
         nfts = w.get_nfts()
         for n in nfts:
-            logger.info(n)
+            logger.debug(n)
 
     @app.get("/nft/mint/random")
     async def mint_random_nft(w: Workload = Depends(get_workload)):
@@ -710,10 +725,11 @@ async def init_workload(config_file):
     logger.info("Loaded config")
     logger.info(json.dumps(config_file, indent=2))
     w = Workload(config_file["workload"])
-    return await w.configure_txn_context()
+    await w.configure_txn_context()
+    return w
 
 
 def main():
     workload = asyncio.run(init_workload(conf_file))
     app = create_app(workload)
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
