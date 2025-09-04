@@ -26,6 +26,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.ruff]
+line-length = 120
 target-version = "py313"
 select = [
     "ANN201", # methods must have return types

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import time
@@ -5,14 +6,7 @@ from asyncio import TaskGroup
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from xrpl.models.transactions.transaction import Transaction
-import asyncio
-from xrpl.models.transactions import (
-    AccountSetAsfFlag,
-    Payment,
-    NFTokenMintFlag,
-    MPTokenIssuanceCreateFlag,
-)
+
 import httpx
 import uvicorn
 import xrpl
@@ -21,12 +15,12 @@ from fastapi import Depends, FastAPI
 from xrpl.asyncio.account import get_next_valid_seq_number
 from xrpl.asyncio.clients import AsyncJsonRpcClient
 from xrpl.asyncio.ledger import get_latest_validated_ledger_sequence
+from xrpl.asyncio.transaction import sign as tsign
 from xrpl.asyncio.transaction import (
     sign_and_submit,
     submit,
     submit_and_wait,
 )
-from workload.txn_factory import update_transaction
 from xrpl.constants import CryptoAlgorithm
 from xrpl.core.binarycodec import encode, encode_for_signing
 from xrpl.core.keypairs import sign
@@ -35,14 +29,16 @@ from xrpl.models.requests import Fee, ServerInfo
 from xrpl.models.response import ResponseStatus
 from xrpl.models.transactions import (
     AccountSetAsfFlag,
+    MPTokenIssuanceCreateFlag,
     NFTokenBurn,
     NFTokenCreateOffer,
     NFTokenCreateOfferFlag,
     NFTokenMintFlag,
     Payment,
 )
+from xrpl.models.transactions.transaction import Transaction
 from xrpl.wallet import Wallet
-from xrpl.asyncio.transaction import sign as tsign
+
 from workload import logger, txn_factory
 from workload.check_rippled_sync_state import is_rippled_synced
 from workload.config import conf_file
@@ -50,6 +46,8 @@ from workload.create import generate_wallet_from_seed, generate_wallets
 from workload.models import UserAccount
 from workload.nft import mint_nft
 from workload.randoms import choice, sample
+from workload.txn_factory import update_transaction
+
 
 @dataclass
 class AccountGenerator:
@@ -57,23 +55,17 @@ class AccountGenerator:
     client: AsyncJsonRpcClient
     default_balance: int
 
-    async def generate_accounts(
-        self, num_accounts: int, amount: int | None = None, wait=True
-    ):
+    async def generate_accounts(self, num_accounts: int, amount: int | None = None, wait=True):
         submit_method = submit_and_wait if wait else sign_and_submit
         # submit_method = submit_and_wait if wait else submit
         amount = amount or self.default_balance
         txns = []
         wallets = generate_wallets(num_accounts)
-        seq = await get_next_valid_seq_number(
-            address=self.source.address, client=self.client
-        )
+        seq = await get_next_valid_seq_number(address=self.source.address, client=self.client)
         wallet_list = list(enumerate(wallets))
         for idx, wallet in wallet_list:
             if self.source.address == wallet.address:
-                logger.exception(
-                    "Generated source and destination same"
-                )  # TODO: Fix selecting src != dst
+                logger.exception("Generated source and destination same")  # TODO: Fix selecting src != dst
                 continue
             txns.append(
                 Payment(
@@ -90,13 +82,7 @@ class AccountGenerator:
         try:
             async with TaskGroup() as tg:
                 for txn in txns:
-                    tasks.append(
-                        tg.create_task(
-                            submit_method(
-                                transaction=txn, client=self.client, wallet=self.source
-                            )
-                        )
-                    )
+                    tasks.append(tg.create_task(submit_method(transaction=txn, client=self.client, wallet=self.source)))
             responses = [t.result() for t in tasks]
             elapsed = time.time() - start
             logger.debug(f"wait took: {elapsed}")
@@ -107,7 +93,11 @@ class AccountGenerator:
 
 
 class Workload:
-    def __init__(self, conf: dict[str, Any], running: bool=False, ):
+    def __init__(
+        self,
+        conf: dict[str, Any],
+        running: bool = False,
+    ):
         self.config = conf
         self.accounts = {}
         self.gateways = []
@@ -122,13 +112,11 @@ class Workload:
         self.running = running
         self.start_time = time.time()
         rippled_host = os.environ.get("RIPPLED_NAME", conf["rippled"]["local"])
-        rippled_rpc_port = os.environ.get(
-            "RIPPLED_RPC_PORT", conf["rippled"]["json_rpc_port"]
-        )
+        rippled_rpc_port = os.environ.get("RIPPLED_RPC_PORT", conf["rippled"]["json_rpc_port"])
         self.rippled = f"http://{rippled_host}:{rippled_rpc_port}"
         self.client = AsyncJsonRpcClient(self.rippled)
         logger.info("Connecting to rippled at: %s", self.rippled)
-        use_ledger = True # Whether to use ledger.json as the initial state.
+        use_ledger = True  # Whether to use ledger.json as the initial state.
         # if Path("/.dockerenv").is_file() and use_ledger:
         accounts_json = Path("/accounts.json")
         # else:
@@ -142,26 +130,20 @@ class Workload:
             self.funding_wallet = fw.wallet
             # self.funding_wallet = generate_wallet_from_seed(self.config["genesis_account"]["master_seed"])
         else:
-            self.funding_wallet = generate_wallet_from_seed(
-                self.config["genesis_account"]["master_seed"]
-            )
+            self.funding_wallet = generate_wallet_from_seed(self.config["genesis_account"]["master_seed"])
 
         ### Configure the "txn context" for random default transactions
         ic = Workload.issue_currencies(self.funding_wallet.address, self.config["currencies"]["codes"])
         self.currencies = ic
 
         self.account_generator = AccountGenerator(
-            source=self.funding_wallet,
-            client=self.client,
-            default_balance=self.config["accounts"]["default_balance"]
+            source=self.funding_wallet, client=self.client, default_balance=self.config["accounts"]["default_balance"]
         )
         if not running:
             self.wait_for_network(self.rippled)
 
             workload_ready_msg = "Workload initialization complete"
-            logger.info(
-                "%s after %ss", workload_ready_msg, int(time.time() - self.start_time)
-            )
+            logger.info("%s after %ss", workload_ready_msg, int(time.time() - self.start_time))
             lifecycle.setup_complete(details={"message": workload_ready_msg})
 
     async def configure_txn_context(self, defaults=None):
@@ -172,11 +154,11 @@ class Workload:
             fee=await self.get_ref_fee(),
             # TODO: Absorb these defaults whole from the config file. Might need some flag fanciness.
             defaults={
-                "*": { "Fee": None },
-                "Payment": { "Amount": default["payment"]["amount"] },
-                "TrustSet": { "LimitAmount": {"value": default["trustset"]["limit"]} },
-                "AccountSet": { "SetFlag": AccountSetAsfFlag.ASF_DEFAULT_RIPPLE },
-                "NFTokenMint": { "flags": NFTokenMintFlag.TF_TRANSFERABLE },
+                "*": {"Fee": None},
+                "Payment": {"Amount": default["payment"]["amount"]},
+                "TrustSet": {"LimitAmount": {"value": default["trustset"]["limit"]}},
+                "AccountSet": {"SetFlag": AccountSetAsfFlag.ASF_DEFAULT_RIPPLE},
+                "NFTokenMint": {"flags": NFTokenMintFlag.TF_TRANSFERABLE},
                 "MPTokenIssuanceCreate": {
                     "TransferFee": 1000,
                     "Flags": MPTokenIssuanceCreateFlag.TF_MPT_CAN_TRANSFER,
@@ -193,9 +175,7 @@ class Workload:
         logger.debug("Starting generate accounts()")
         olf = await self.fee()
         open_ledger_fee = int(olf["drops"]["open_ledger_fee"])
-        for result, wallet in await self.account_generator.generate_accounts(
-            n, wait=wait
-        ):
+        for result, wallet in await self.account_generator.generate_accounts(n, wait=wait):
             if result.status == ResponseStatus.SUCCESS:
                 account = UserAccount(wallet)
                 self.accounts[account.address] = account
@@ -245,13 +225,9 @@ class Workload:
                 logger.debug(f"{idx}: {i}")
         self.account_data = accounts
 
-        default_algo = CryptoAlgorithm[
-            conf_file["workload"]["accounts"]["default_crypto_algorithm"]
-        ]
+        default_algo = CryptoAlgorithm[conf_file["workload"]["accounts"]["default_crypto_algorithm"]]
 
-        def generate_wallet_from_seed(
-            seed: str, algorithm: CryptoAlgorithm = default_algo
-        ) -> Wallet:
+        def generate_wallet_from_seed(seed: str, algorithm: CryptoAlgorithm = default_algo) -> Wallet:
             wallet = Wallet.from_seed(seed=seed, algorithm=algorithm)
             return wallet
 
@@ -261,9 +237,7 @@ class Workload:
         logger.info(f"Loaded {len(self.accounts)} initial accounts")
 
     @classmethod
-    def issue_currencies(
-        cls, issuer: str, currency_code: list[str]
-    ) -> list[IssuedCurrency]:
+    def issue_currencies(cls, issuer: str, currency_code: list[str]) -> list[IssuedCurrency]:
         """Use a fixed set of currency codes to create IssuedCurrencies for a specific gateway.
 
         Args:
@@ -274,10 +248,7 @@ class Workload:
             list[IssuedCurrency]: List of IssuedCurrencies a gateway provides
 
         """
-        issued_currencies = [
-            IssuedCurrency.from_dict(dict(issuer=issuer, currency=cc))
-            for cc in currency_code
-        ]
+        issued_currencies = [IssuedCurrency.from_dict(dict(issuer=issuer, currency=cc)) for cc in currency_code]
         logger.debug("Issued %s currencies", len(issued_currencies))
         if True:
             for c in issued_currencies:
@@ -311,7 +282,7 @@ class Workload:
         return txn
 
     async def submit_txn(self, txn, wait=True):
-        """ Submit an already formed transaction.
+        """Submit an already formed transaction.
 
         Relies on the xrpl-py library's "Reliable Transmission" if wait=True
 
@@ -322,9 +293,7 @@ class Workload:
         source = self.accounts[txn.account]
         logger.info(source)
         wallet = source.wallet
-        response = await submit_method(
-            transaction=txn, client=self.client, wallet=wallet
-        )
+        response = await submit_method(transaction=txn, client=self.client, wallet=wallet)
         logger.info(response)
         return response
 
@@ -442,9 +411,7 @@ class Workload:
             return
         nft = choice(self.nfts)
         owner = self.accounts[nft.owner]
-        res = await self.nftoken_create_offer(
-            owner.address, nft.nftoken_id, owner.wallet
-        )
+        res = await self.nftoken_create_offer(owner.address, nft.nftoken_id, owner.wallet)
         logger.debug(res)
         return None
 
@@ -466,13 +433,9 @@ class Workload:
         src_address, dst = sample(list(self.accounts), 2)
         sequence = await get_next_valid_seq_number(src_address, self.client)
         src = self.accounts[src_address]
-        payment_txn = Payment(
-            account=src.address, amount=amount, destination=dst, sequence=sequence
-        )
+        payment_txn = Payment(account=src.address, amount=amount, destination=dst, sequence=sequence)
         response = await sign_and_submit(payment_txn, self.client, src.wallet)
-        logger.debug(
-            "Payment from %s to %s for %s submitted.", src.address, dst, amount
-        )
+        logger.debug("Payment from %s to %s for %s submitted.", src.address, dst, amount)
         return response, src.address, dst, amount
 
     async def create_ticket(self):
@@ -491,9 +454,7 @@ class Workload:
         logger.debug(json.dumps(result, indent=2))
 
         ticket_seq = result["tx_json"]["Sequence"] + 1
-        tix = [
-            ticket_seq for ticket_seq in range(ticket_seq, ticket_seq + ticket_count)
-        ]
+        tix = [ticket_seq for ticket_seq in range(ticket_seq, ticket_seq + ticket_count)]
         account.tickets.update(tix)
         logger.debug(f"Account {account.address} tickets: {account.tickets=}")
         # logger.info(f"Created tickets: {tickets}")
@@ -509,9 +470,7 @@ class Workload:
             len_tickets = len(self.accounts[aid].tickets)
             if len_tickets > 0:
                 account_id = aid
-                logger.debug(
-                    f"Found {aid} to have {len_tickets} tickets {self.accounts[aid].tickets}"
-                )
+                logger.debug(f"Found {aid} to have {len_tickets} tickets {self.accounts[aid].tickets}")
                 break
             else:
                 logger.debug(f"removing {aid} from list")
@@ -593,8 +552,8 @@ class Workload:
         result = response.result
         logger.info(json.dumps(result, indent=2))
 
-    async def fill_ledger(self, max_txns: int|None = None ):
-        """ Attempt to fill the ledger up to max_txns random txns"""
+    async def fill_ledger(self, max_txns: int | None = None):
+        """Attempt to fill the ledger up to max_txns random txns"""
         # While the number of transactions we've submitted is less than the expected number of txns in a ledger, keep
         # submitting txns till we fill it.
         expected_ledger_size = await self.expected_ledger_size()
@@ -619,9 +578,7 @@ class Workload:
         try:
             async with TaskGroup() as tg:
                 for txn in updated_txns:
-                    tasks.append(
-                        tg.create_task(submit(transaction=txn, client=self.client))
-                    )
+                    tasks.append(tg.create_task(submit(transaction=txn, client=self.client)))
             responses = [t.result() for t in tasks]
             elapsed = time.time() - start
             # return zip(responses, wallets)
@@ -748,11 +705,13 @@ def create_app(workload: Workload) -> FastAPI:
     #     return await w.cancel_random_offer()
     return app
 
+
 async def init_workload(config_file):
-    logger.info("Loaded config from %s", config_file)
-    w = Workload(config_file["workload"], running=True)
-    await w.configure_txn_context()
-    return w
+    logger.info("Loaded config")
+    logger.info(json.dumps(config_file, indent=2))
+    w = Workload(config_file["workload"])
+    return await w.configure_txn_context()
+
 
 def main():
     workload = asyncio.run(init_workload(conf_file))
