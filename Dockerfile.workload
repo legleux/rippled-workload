@@ -8,19 +8,18 @@ WORKDIR /opt/antithesis/catalog/workload
 
 RUN apt-get update && apt-get install -y curl
 
-
-# Install dependencies
+# Install dependencies in a separate layer
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=workload/uv.lock,target=uv.lock \
     --mount=type=bind,source=workload/pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-install-project
+    uv sync \
+        --no-install-project
 
 # Copy the project into the image
 ADD workload /opt/antithesis/catalog/workload
 
 # Sync the project
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked
+    uv sync
 
 COPY test_composer/all_transactions /opt/antithesis/test/v1/all_transactions
 
