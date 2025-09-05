@@ -732,4 +732,4 @@ async def init_workload(config_file):
 def main():
     workload = asyncio.run(init_workload(conf_file))
     app = create_app(workload)
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
