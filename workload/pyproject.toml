@@ -49,11 +49,11 @@ lint.select = [
     "B",
     "E",
     "F",
-    "D",
+    # "D",
     "Q",
 ]
 
-lint.extend-select = ["D"]
+# lint.extend-select = ["D"]
 
 [tool.ruff.format]
 quote-style = "double"

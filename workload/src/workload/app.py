@@ -15,7 +15,7 @@ from xrpl.models import (
 
 from workload.logging_config import setup_logging
 
-from workload.workload_core import Workload, periodic_finality_check
+from workload.workload import Workload, periodic_finality_check
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,12 +50,14 @@ LEDGERS_TO_WAIT = 0
 
 log = logging.getLogger("workload.app")
 
+
 async def _probe_rippled(url: str) -> None:
     # NOTE: Rely on workload from communication?
     payload = {"method": "server_info", "params": [{}]}
     async with httpx.AsyncClient(timeout=TIMEOUT) as http:
         r = await http.post(url, json=payload)
         r.raise_for_status()
+
 
 async def wait_for_ledgers(url: str, count: int) -> None:
     """
@@ -76,6 +78,7 @@ async def wait_for_ledgers(url: str, count: int) -> None:
     except Exception as e:
         log.error(f"Failed to wait for ledgers via WebSocket: {e}")
         raise # Fail startup if we can't confirm network status
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -108,6 +111,7 @@ async def lifespan(app: FastAPI):
             await app.state.finality_task
         log.info("Shutdown complete")
 
+
 app = FastAPI(
     title="XRPL Workload",
     lifespan=lifespan,
@@ -133,9 +137,15 @@ r_accounts = APIRouter(prefix="/accounts", tags=["Accounts"])
 r_pay = APIRouter(prefix="/payments", tags=["Payments"])
 r_txn = APIRouter(prefix="/transaction", tags=["Transactions"])
 r_state = APIRouter(prefix="/state", tags=["State"])
+app.include_router(r_accounts)
+app.include_router(r_pay)
+app.include_router(r_txn)
+app.include_router(r_state)
+
 
 class TxnReq(BaseModel):
     type: str
+
 
 class CreateAccountReq(BaseModel):
     seed: str | None = None
@@ -144,6 +154,7 @@ class CreateAccountReq(BaseModel):
     algorithm: str | None = None
     wait: bool | None = False
 
+
 class CreateAccountResp(BaseModel):
     address: str
     seed: str | None = None
@@ -151,29 +162,35 @@ class CreateAccountResp(BaseModel):
     tx_hash: str | None = None
     # algorithm: str
 
+
 class PaymentReq(BaseModel):
     sender_address: str = cfg["funding_account"]["address"]
     receiver_address: str = xrpl.wallet.Wallet.create().address
     drops: PositiveInt = 10
 
+
 @app.get("/health")
 def health():
     return {"status": "ok"} # Not the most thorough of healthchecks...
 
-@app.post("/accounts/create", response_model=CreateAccountResp)
+
+@r_accounts.post("/create", response_model=CreateAccountResp)
 async def accounts_create(req: CreateAccountReq):
     data = req.model_dump(exclude_unset=True)
     return await app.state.workload.create_account(data, wait=req.wait)
 
-@app.post("/accounts/create/random", response_model=CreateAccountResp)
+
+@r_accounts.post("/create/random", response_model=CreateAccountResp)
 async def accounts_create_random():
     return await app.state.workload.create_account({}, wait=False)
 
-@app.get("/transaction/random")
+
+@r_txn.get("/random")
 async def transaction_random():
     w = app.state.workload
     res = await w.submit_random_txn()
     return res
+
 
 @app.get("/create/{transaction}")
 async def create(transaction: str):
@@ -181,6 +198,7 @@ async def create(transaction: str):
     log.info(f"Creating a {transaction}")
     r = await w.create_transaction(transaction)
     return r
+
 
 @app.post("/debug/fund")
 async def debug_fund(dest: str):
@@ -201,26 +219,30 @@ async def debug_fund(dest: str):
     print("Submit result:", res)
     return res
 
-@app.get("/state/summary")
+
+@r_state.get("/summary")
 async def state_summary():
     return app.state.workload.snapshot_stats()
 
-@app.get("/state/pending")
+@r_state.get("/pending")
 async def state_pending():
     return {"pending": app.state.workload.snapshot_pending()}
 
-@app.get("/state/failed")
+
+@r_state.get("/failed")
 async def state_failed():
     return {"failed": app.state.workload.snapshot_failed()}
 
-@app.get("/state/tx/{tx_hash}")
+
+@r_state.get("/tx/{tx_hash}")
 async def state_tx(tx_hash: str):
     data = app.state.workload.snapshot_tx(tx_hash)
     if not data:
         raise HTTPException(404, "tx not tracked")
     return data
 
-@app.get("/state/accounts")
+
+@r_state.get("/accounts")
 async def state_accounts():
     wl = app.state.workload
     return {
