@@ -1,2 +1,7 @@
-.git/
+.git
 **/.venv/
+.devcontainer
+.venv
+node_modules
+__pycache__
+*.pyc
