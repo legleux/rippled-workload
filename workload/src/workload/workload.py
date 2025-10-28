@@ -40,7 +40,7 @@ log = logging.getLogger("workload.core")
 C = SimpleNamespace(
     default_create_amount=int(100 * 1e6),
     max_create_amount=int(100e6 * 1e6), # alot?
-    horizon=20, # If it's not validated/failed after 20 ledgers it's gone...
+    horizon=20,  # If it's not validated/failed after 20 ledgers it's gone...
     rpc_timeout=2.0,
     submit_timeout=20,
     lock_timeout=2.0,
@@ -236,7 +236,7 @@ class Workload:
     async def _open_ledger_fee(self) -> int:
         ss = await self._rpc(ServerState(), t=2.0)
         base = float(ss.result["state"]["validated_ledger"]["base_fee"])
-        return int(base * 10) # TODO: Tie this down, need to be able to handle fee elevation.
+        return int(base * 10)  # TODO: Tie this down, need to be able to handle fee elevation.
 
     async def _last_ledger_sequence_offset(self, off: int) -> int:
         ss = await self._rpc(ServerState(), t=2.0)
@@ -406,7 +406,7 @@ class Workload:
             r = await self.client.request(AccountInfo(account=address, ledger_index="validated"))
             return r.is_successful()
         except Exception:
-            return False # TODO: Say something?
+            return False  # TODO: Say something?
 
     async def _fund_if_needed(self, wallet: Wallet, amt_drops: str):
         """Fund the wallet from the funding_wallet account if it isn't active yet."""
@@ -455,8 +455,10 @@ class Workload:
         await self.submit_pending(p0)
 
         flags = []
-        if require_auth:   flags.append(AccountSetAsfFlag.ASF_REQUIRE_AUTH)
-        if default_ripple: flags.append(AccountSetAsfFlag.ASF_DEFAULT_RIPPLE)
+        if require_auth:
+            flags.append(AccountSetAsfFlag.ASF_REQUIRE_AUTH)
+        if default_ripple:
+            flags.append(AccountSetAsfFlag.ASF_DEFAULT_RIPPLE)
 
         pendings = []
         for f in flags:
@@ -648,7 +650,6 @@ class Workload:
         if req_auth or def_ripple:
             await self._apply_gateway_flags(req_auth=req_auth, def_ripple=def_ripple)
         return {"gateways": out_gw, "users": out_us}
-
 
     # ============================================== #
     # =============== Utility Stuff ================ #

@@ -77,7 +77,7 @@ async def wait_for_ledgers(url: str, count: int) -> None:
                         break
     except Exception as e:
         log.error(f"Failed to wait for ledgers via WebSocket: {e}")
-        raise # Fail startup if we can't confirm network status
+        raise  # Fail startup if we can't confirm network status
 
 
 @asynccontextmanager

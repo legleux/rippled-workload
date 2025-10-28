@@ -23,16 +23,16 @@ They stay simple, type-safe, and import-light, while `workload` and `txn_factory
 
 
 ## TODO
+- [ ] Once a txn is submitted, add it to subscritions. When the txn is seen. Send antithesis lifecycle event.
 - [ ] Precommit linting and formatting with ruff.
-- [ ] Package & CI.
-- [ ] Don't need to wait N ledgers when we know it's running and ready (development.)
 - [ ] Move all the TODOs for default constants.
 - [ ] Allow specifying which node you're sending a txn to.
 - [ ] Integrate the sidecar into the workload.
+- [ ] Don't need to wait N ledgers when we know it's running and ready (development.)
 - [ ] API endpoint that modulates the amount of traffic.
 - [ ] Overlapping UNLs (try to mess with consensus).
 - [ ] Start the run with M of N validators runnings and bring them up during the run
-
+- [ ] Package & CI.
 
 ## Research
 
