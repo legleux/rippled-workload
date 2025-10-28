@@ -49,7 +49,7 @@ huge
 0
 
 [peer_private]
-0
+${peer_private}
 
 [signing_support]
 ${signing_support}
@@ -73,7 +73,7 @@ ${validator_list_keys}
 ${validation_seed}
 
 [voting]
-reference_fee = 10
-account_reserve = 1000000
-owner_reserve = 2000000
+reference_fee = ${voting["reference_fee"]}
+account_reserve = ${voting["account_reserve"]}
+owner_reserve = ${voting["owner_reserve"]}
 % endif

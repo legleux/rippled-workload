@@ -13,3 +13,8 @@ edges = [
     ["val5", "val8"],
     ["val3", "val9"],
 ]
+
+private_peers = [
+    "val1",
+    "val4"
+]

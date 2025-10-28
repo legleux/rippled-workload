@@ -1,6 +1,7 @@
+import os
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
-import os, tomllib
 
 _PREFIX = "GL_"
 
@@ -58,7 +59,7 @@ def _parse_env(defaults: dict) -> dict:
         _set_in(out, parts, coerced)
     return out
 
-# ---------- public API ----------
+
 def settings(**overrides):
     # 1) defaults (single source of truth for shapes and types)
     defaults = {
@@ -74,8 +75,8 @@ def settings(**overrides):
         # General network info
         "network": {
             "network_dir_name": "testnet",
-            "num_validators": 5,
-            "num_peers": 1,
+            "num_validators": 11,
+            "num_peers": 2,
             "use_unl": True,
             "validator_list_sites": "http://unl",
             "validator_name": "val",
@@ -87,7 +88,12 @@ def settings(**overrides):
                 "rpc_admin_local": 5005,
                 "peer": 2459,
                 "ws_admin_local": 6006,
-            }
+            },
+            "voting": {
+                "reference_fee": 10,
+                "account_reserve": 1000000,
+                "owner_reserve": 2000000,
+            },
         },
         # compose.yml
         "compose_config": {
