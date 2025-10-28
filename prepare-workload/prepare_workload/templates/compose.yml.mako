@@ -1,6 +1,10 @@
 services:
-${validators}
-${peers}
+% for v in validators:
+${v}
+% endfor
+% for p in peers:
+${p}
+% endfor
 % if use_unl:
 ${unl_service}
 % endif

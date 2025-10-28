@@ -48,7 +48,10 @@ def get_node_configs(settings):
         n_v = settings.network.num_validators
         n_p = settings.network.num_peers
         all_v = [f"{settings.network.validator_name}{pad(i, n_v)}" for i in range(n_v)]
-        all_p = [f"{settings.network.peer_name}{pad(i, n_p)}" for i in range(n_p)]
+        if n_p > 1:
+            all_p = [f"{settings.network.peer_name}{pad(i, n_p)}" for i in range(n_p)]
+        else:
+            all_p = [f"{settings.network.peer_name}"]
         all_ = all_v + all_p
         peers = {n: sorted([i for i in all_ if i != n]) for n in all_}
     else:
@@ -61,12 +64,19 @@ def get_node_configs(settings):
         private_peers = spec.get("private_peers", [])
         if len(peers) != len(all_):
             logging.exception("%s doesn't fully define the network.", settings.network_file)
-    return {n:
-                {
-                    "name": n,
-                    "peers": peers[n],
-                    "peer_private": str(n in private_peers).lower(),
-                    "is_validator": n.startswith(settings.network.validator_name),
-                }
-                for n in peers
+
+    node_configs = {"validators": [], "peers": []}
+    for n in peers:
+        is_validator = n.startswith(settings.network.validator_name)
+        cfg = {
+                "name": n,
+                "peers": peers[n],
+                "peer_private": str(n in private_peers).lower(),
+                "is_validator": is_validator,
             }
+        if is_validator:
+            node_configs["validators"].append(cfg)
+        else:
+            node_configs["peers"].append(cfg)
+    pass
+    return node_configs

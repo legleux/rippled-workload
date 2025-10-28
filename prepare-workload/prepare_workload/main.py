@@ -1,7 +1,6 @@
 import argparse
 import json
 import shutil
-import sys
 from pathlib import Path
 
 from mako.template import Template
@@ -10,11 +9,10 @@ import prepare_workload.generate_unl as gl
 from prepare_workload import node_config as nc
 from prepare_workload.compose import render_compose
 from prepare_workload.generate_unl import generate_unl_data
-from prepare_workload.settings import settings as get_settings
+from prepare_workload.settings import get_settings
 
 
 def write_config(node_data, settings):
-
     s = settings
     node = s.node_config
     is_validator = node_data["is_validator"]
@@ -22,16 +20,15 @@ def write_config(node_data, settings):
     node_config_data = {
         "ports": node.ports,
         "node_config_template": s.node_config_template,
-        "validator_public_keys": "\n".join(node_data["validator_public_keys"]),
-        # REVIEW: Do we want peers in ips_fixed also?
+        "validator_public_keys": "\n".join(s.validator_public_keys),
         "ips_fixed": "\n".join([f"{p} {settings.node_config.ports['peer']}" for p in node_data["peers"]]),
         **node_data,
     }
     if is_validator:
-        # Assume validators don't sign
+        # Assuming validators won't sign
         node_config_data["validation_seed"] = node_data["keys"]["master_seed"]
         node_config_data["voting"] = s.node_config.voting
-    node_config_data["signing_support"] = str(is_validator).lower()
+    node_config_data["signing_support"] = str(not is_validator).lower()
 
     config_template = Template(filename=str(s.node_config_template))
     node_config = config_template.render(**node_config_data)
@@ -41,9 +38,9 @@ def write_config(node_data, settings):
     config_file.write_text(node_config)
 
 
-def write_compose(settings):
+def write_compose(node_config, settings):
+    compose_data = render_compose.render_compose_data(node_config, settings)
     compose_file = settings.network_dir_path / settings.compose_yml_file
-    compose_data = render_compose.render_compose_data(settings)
     compose_file.write_text(compose_data)
 
 
@@ -108,19 +105,20 @@ def main():
     s = get_settings(**overrides(args))
     s.network_dir_path.mkdir(parents=True, exist_ok=True)
 
-    # Parse the network config (if any) to get some default configs.
+    # Parse the network config (if any) to get some default configs
     node_configs = nc.get_node_configs(s)
+    all_configs = [*node_configs["validators"], *node_configs["peers"]]
 
+    # If we're using a UNL we need a publisher
     if s.network.use_unl:
         publisher = gl.gen_validator()
 
+    # Generate all the configs for the nodes in the network
     validator_public_keys = []
     validators = []
-    for config in node_configs.values():
-
+    for config in all_configs:
         if config["is_validator"]:
             config["keys"] = gl.gen_validator()
-            # config["validation_seed"] = config["keys"]["master_seed"]
             validators.append(config["keys"])
             validator_public_keys.append(config["keys"]["node_public_key"])
 
@@ -129,17 +127,18 @@ def main():
             config["validator_list_keys"] = publisher["master_pubkey"]
             config["validator_list_sites"] = s.network.validator_list_sites
 
+    s.validator_public_keys = validator_public_keys
+
     # Write eacho node's config file
-    for config in node_configs.values():
-        config["validator_public_keys"] = "\n".join(validator_public_keys)
+    for config in all_configs:
         write_config(config, s)
 
     # Write the compose file
-    write_compose(s)
+    write_compose(node_configs, s)
 
     # Write the UNL
     if s.network.use_unl:
-        unl_data = generate_unl_data(validators, publisher)
+        unl_data = generate_unl_data(validators, publisher, sequence=1)
         unl_json_file = s.network_dir_path / s.unl_file
         unl_json_file.write_text(json.dumps(unl_data))
         # copy the server to the network dir
