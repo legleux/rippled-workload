@@ -1,0 +1,19 @@
+{
+    "build": {
+      "context": "..",
+        "dockerfile": "../workload/Dockerfile"
+    },
+    "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+    "init": true,
+    "initializeCommand": "./prepare-workload/main.py && docker compose -f prepare-workload/testnet/compose.yml up -d",
+  "runArgs": ["--network=xrpl_net"],
+    "forwardPorts": [8000],
+    "customizations": {
+       "vscode": {
+          "extensions": [
+              "ms-python.python",
+              "ms-python.debugpy"
+          ]
+       }
+    }
+}
