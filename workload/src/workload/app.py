@@ -15,7 +15,7 @@ from xrpl.models import (
 
 from workload.logging_config import setup_logging
 
-from workload.workload import Workload, periodic_finality_check
+from workload.workload_core import Workload, periodic_finality_check
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -126,21 +126,19 @@ app = FastAPI(
         "operationsSorter": "alpha", # checkout "method"
     },
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
 
 r_accounts = APIRouter(prefix="/accounts", tags=["Accounts"])
 r_pay = APIRouter(prefix="/payments", tags=["Payments"])
-r_txn = APIRouter(prefix="/transaction", tags=["Transactions"])
+r_transaction = APIRouter(prefix="/transaction", tags=["Transactions"])
 r_state = APIRouter(prefix="/state", tags=["State"])
-app.include_router(r_accounts)
-app.include_router(r_pay)
-app.include_router(r_txn)
-app.include_router(r_state)
+
 
 
 class TxnReq(BaseModel):
@@ -180,19 +178,19 @@ async def accounts_create(req: CreateAccountReq):
     return await app.state.workload.create_account(data, wait=req.wait)
 
 
-@r_accounts.post("/create/random", response_model=CreateAccountResp)
+@r_accounts.get("/create/random", response_model=CreateAccountResp)
 async def accounts_create_random():
     return await app.state.workload.create_account({}, wait=False)
 
 
-@r_txn.get("/random")
+@r_transaction.get("/random")
 async def transaction_random():
     w = app.state.workload
     res = await w.submit_random_txn()
     return res
 
 
-@app.get("/create/{transaction}")
+@r_transaction.get("/create/{transaction}")
 async def create(transaction: str):
     w: Workload = app.state.workload
     log.info(f"Creating a {transaction}")
@@ -249,6 +247,11 @@ async def state_accounts():
         "count": len(wl.accounts),
         "addresses": list(wl.accounts.keys()),
     }
+
+app.include_router(r_accounts)
+app.include_router(r_pay)
+app.include_router(r_transaction)
+app.include_router(r_state)
 
 # @app.get("/validator/{n}", response=HTMLResponse)
 # async def validator_state(n):

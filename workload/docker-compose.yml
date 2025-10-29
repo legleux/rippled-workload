@@ -1,10 +1,9 @@
-include:
-  - prepare-workload/testnet/compose.yml
+# include:
+#   - prepare-workload/testnet/compose.yml
 services:
   workload:
     image: workload:dev
     build:
-      # context: ../workload
       dockerfile: Dockerfile
     container_name: workload
     hostname: workload
@@ -12,14 +11,14 @@ services:
     # command: >
     #   uv run uvicorn workload.app:app --host 0.0.0.0 --port 8000 --reload
     volumes:
-      - ./workload:/workload:cached
+      - ./workload:/opt/antithesis/catalog/workload
     # volumes:
       # - ./accounts.json:/accounts.json
       # - ./workload/ledger.json:/ledger.json
     # stop_signal: SIGINT
     init: true
     # depends_on: [rippled]
-    # networks: { xrpl_net: {} }
+    networks: { xrpl_net: {} }
 
     develop:
       watch:
@@ -28,10 +27,9 @@ services:
         - action: rebuild
           path: ./Dockerfile
 
-# networks:
-#   xrpl_net:
-#     name: xrpl_net
-#     external: true
+networks:
+  xrpl_net:
+    external: true
   # proxy:
   #   cap_add: [NET_ADMIN]
   #   container_name: workload_proxy

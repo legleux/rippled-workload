@@ -1,0 +1,10 @@
+{
+    "build": {
+        "dockerfile": "../workload/Dockerfile"
+    },
+    "init": true,
+    "initializeCommand": "docker compose -f prepare-workload/testnet/compose.yml up -d",
+    "runArgs": [
+        "--network=name=xrpl_net"
+    ]
+}
