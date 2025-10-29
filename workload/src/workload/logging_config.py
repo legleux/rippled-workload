@@ -1,5 +1,3 @@
-# workload/logging_config.py
-
 import logging
 import logging.config
 import os
@@ -56,5 +54,4 @@ LOGGING_CONFIG = {
 def setup_logging():
     """ Apply the logging configuration. """
     logging.config.dictConfig(LOGGING_CONFIG)
-    # Ensure output is unbuffered, essential for containers
     os.environ.setdefault("PYTHONUNBUFFERED", "1")

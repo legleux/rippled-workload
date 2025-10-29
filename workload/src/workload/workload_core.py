@@ -2,10 +2,12 @@ import asyncio
 import hashlib
 import time
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import StrEnum, auto
 import httpx
-from typing import Protocol, Optional, Dict, Tuple, List
+from typing import Protocol
 import xrpl
+from collections import Counter, deque
+import time
 from xrpl.core.binarycodec import encode, encode_for_signing
 from xrpl.core.keypairs import sign
 from xrpl.asyncio.clients import AsyncJsonRpcClient
@@ -20,7 +22,8 @@ from xrpl.models.transactions import (
     Payment,
 )
 from typing import Any
-from types import SimpleNamespace
+from xrpl.models.transactions import AccountSet, AccountSetAsfFlag
+from typing import Any
 from xrpl.models.requests import (
     AccountInfo,
     Ledger,
@@ -31,34 +34,28 @@ import sys
 import logging
 from workload.txn_factory.builder import TxnContext, TxnDefaults, generate_txn
 import multiprocessing
+import workload.constants as C
+
 num_cpus = multiprocessing.cpu_count()
 
 log = logging.getLogger("workload.core")
 
 
-# TODO: Temporary constant store
-C = SimpleNamespace(
-    default_create_amount=int(100 * 1e6),
-    max_create_amount=int(100e6 * 1e6), # alot?
-    horizon=20,  # If it's not validated/failed after 20 ledgers it's gone...
-    rpc_timeout=2.0,
-    submit_timeout=20,
-    lock_timeout=2.0,
-)
+# # TODO: Temporary constant store
+# C = SimpleNamespace(
+#     default_create_amount=int(100 * 1e6),
+#     max_create_amount=int(100e6 * 1e6), # alot?
+#     horizon=20,  # If it's not validated/failed after 20 ledgers it's gone...
+#     rpc_timeout=2.0,
+#     submit_timeout=20,
+#     lock_timeout=2.0,
+# )
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(asctime)s %(levelname)s %(message)s")
 
 log = logging.getLogger("workload")
 
-
-class TxState(StrEnum):
-    CREATED = "CREATED"
-    SUBMITTED = "SUBMITTED"
-    RETRYABLE = "RETRYABLE"
-    VALIDATED = "VALIDATED"
-    REJECTED = "REJECTED"
-    EXPIRED = "EXPIRED"
-    FAILED_NET = "FAILED_NET"
+FINAL_STATES = {"VALIDATED", "REJECTED", "EXPIRED"}
 
 
 @dataclass(slots=True)
@@ -66,72 +63,148 @@ class PendingTx:
     tx_hash: str
     signed_blob_hex: str
     account: str
-    sequence: Optional[int]
+    sequence: int | None
     last_ledger_seq: int
+    transaction_type: C.TxType | None
     created_ledger: int
-    state: TxState = TxState.CREATED
+    state: C.TxState = C.TxState.CREATED
     attempts: int = 0
-    engine_result_first: Optional[str] = None
-    validated_ledger: Optional[int] = None
-    meta_txn_result: Optional[str] = None
+    engine_result_first: str | None = None
+    validated_ledger: int | None = None
+    meta_txn_result: str | None= None
     created_at: float = field(default_factory=time.time)
-    finalized_at: Optional[float] = None
+    finalized_at: float | None = None
 
 
 class Store(Protocol):
     async def upsert(self, p: PendingTx) -> None: ...
-    async def get(self, tx_hash: str) -> Optional[PendingTx]: ...
+    async def get(self, tx_hash: str) -> PendingTx | None: ...
     async def mark(self, tx_hash: str, **fields) -> None: ...
     async def rekey(self, old_hash: str, new_hash: str) -> None: ...
-    async def find_by_state(self, *states: TxState) -> List[PendingTx]: ...
-    async def all(self) -> List[PendingTx]: ...
+    async def find_by_state(self, *states: C.TxState) -> list[PendingTx]: ...
+    async def all(self) -> list[PendingTx]: ...
 
 
 class InMemoryStore:
+    """Current snapshot of transaction states and validation history for metrics."""
+
     def __init__(self) -> None:
-        self._d: Dict[str, PendingTx] = {}
         self._lock = asyncio.Lock()
+        self._records: dict[str, dict] = {}
+        self.validations: deque[ValidationRecord] = deque(maxlen=5000)
+        self.count_by_state: dict[str, int] = {}
+        self.validated_by_source: dict[str, int] = {}
 
-    async def upsert(self, p: PendingTx) -> None:
-        async with self._lock:
-            self._d[p.tx_hash] = p
+    def _recount(self) -> None:
+        # per-state tallies
+        self.count_by_state = Counter(rec.get("state", "UNKNOWN") for rec in self._records.values())
+        # how many VALIDATEDs came from which path
+        self.validated_by_source = Counter(v.src for v in self.validations)
 
-    async def get(self, tx_hash: str) -> Optional[PendingTx]:
+    async def update_record(self, tx: dict) -> None:
+        """Insert or update a flat transaction record and recompute metrics."""
+        txh = tx.get("tx_hash")
+        if not txh:
+            raise ValueError("update_record() requires 'tx_hash'")
         async with self._lock:
-            return self._d.get(tx_hash)
+            self._records[txh] = tx
+            self._recount()
 
-    async def mark(self, tx_hash: str, **fields) -> None:
+    async def get(self, tx_hash: str) -> dict | None:
         async with self._lock:
-            p = self._d.get(tx_hash)
-            if not p:
-                return
-            for k, v in fields.items():
-                setattr(p, k, v)
-            if getattr(p, "state", None) in {TxState.VALIDATED, TxState.REJECTED, TxState.EXPIRED}:
-                p.finalized_at = p.finalized_at or time.time()
+            return self._records.get(tx_hash)
+
+    async def mark(self, tx_hash: str, *, source: str | None = None, **fields) -> None:
+        """
+        Update or insert a transaction record.
+
+        tx_hash:
+            Unique transaction identifier.
+        source:
+            Origin of the update ("ws", "poll", etc.).
+        **fields:
+            Additional fields to merge (e.g., state, validated_ledger, meta_txn_result).
+
+        Behavior:
+        - Creates/updates the flat record under tx_hash.
+        - On first transition to a final state (VALIDATED/REJECTED/EXPIRED), stamps 'finalized_at'.
+        - When state == VALIDATED, appends a ValidationRecord(txn, ledger, src).
+        - Recomputes per-state and per-source counters.
+        """
+        async with self._lock:
+            rec = self._records.get(tx_hash, {})
+            rec.update(fields)
+            if source is not None:
+                rec["source"] = source
+
+            state = rec.get("state")
+            if isinstance(state, C.TxState):        # normalize enum to string
+                state = state.name
+                rec["state"] = state
+
+            if state in FINAL_STATES:
+                rec.setdefault("finalized_at", time.time())
+                # Only VALIDATED gets validation history
+                if state == "VALIDATED":
+                    self.validations.append(
+                        ValidationRecord(
+                            txn=tx_hash,
+                            seq=rec.get("validated_ledger") or 0,
+                            src=source or rec.get("source", "unknown"),
+                        )
+                    )
+
+            self._records[tx_hash] = rec
+            self._recount()
 
     async def rekey(self, old_hash: str, new_hash: str) -> None:
+        """
+        Replace a record's key when a tx's canonical hash changes.
+        - Moves the flat record from old_hash -> new_hash.
+        - Updates inner 'tx_hash' field if present.
+        - No-op if old_hash doesn't exist.
+        """
         async with self._lock:
-            p = self._d.pop(old_hash, None)
-            if p:
-                p.tx_hash = new_hash
-                self._d[new_hash] = p
+            rec = self._records.pop(old_hash, None)
+            if rec is None:
+                return
+            rec["tx_hash"] = new_hash
+            self._records[new_hash] = rec
+            # (no recount needed unless you want to)
 
-    async def find_by_state(self, *states: TxState) -> List[PendingTx]:
+    # Snapshot-oriented queries (flat dicts). Live PendingTx queries belong on Workload.
+    async def find_by_state(self, *states: C.TxState | str) -> list[dict]:
+        """Return flat records whose 'state' matches any of the given states."""
+        wanted = {s.name if isinstance(s, C.TxState) else s for s in states}
         async with self._lock:
-            S = set(states)
-            return [p for p in self._d.values() if p.state in S]
+            return [rec for rec in self._records.values() if rec.get("state") in wanted]
 
-    async def all(self) -> List[PendingTx]:
+    async def all_records(self) -> list[dict]:
         async with self._lock:
-            return list(self._d.values())
+            return list(self._records.values())
 
+    def snapshot_stats(self) -> dict:
+        return {
+            "by_state": dict(self.count_by_state),
+            "validated_by_source": dict(self.validated_by_source),
+            "total_tracked": len(self._records),
+            "recent_validations": len(self.validations),
+        }
 
 @dataclass
 class AccountRecord:
     lock: asyncio.Lock
-    next_seq: Optional[int] = None
+    next_seq: int | None = None
 
+class ValidationSrc(StrEnum):
+    POLL = auto()
+    WS = auto()
+
+@dataclass
+class ValidationRecord:
+    txn: str
+    seq: int
+    src: str
 
 def _sha512half(b: bytes) -> bytes:
     return hashlib.sha512(b).digest()[:32]
@@ -151,7 +224,6 @@ class Workload:
     def __init__(self, config: dict, client: AsyncJsonRpcClient, *, store: Store | None = None):
         self.config = config
         self.client = client
-        self.store: Store = store or InMemoryStore()
 
         # TODO: Load from pre-generated accounts.json
         self.funding_wallet = Wallet.from_seed("snoPBrXtMeMyMHUVTgbuqAfg1SUTb", algorithm=xrpl.CryptoAlgorithm.SECP256K1)
@@ -161,9 +233,13 @@ class Workload:
         self.gateways: list[Wallet] = []
         self.users:    list[Wallet] = []
 
+        # Live txns that are going on. Not finalized yet. Go to self.store after we figure it out.
         self.pending: dict[str, PendingTx] = {}
 
-        self._fee_cache: Optional[int] = None
+        # tracks the recorded state of all transactions (past and present)—
+        self.store: Store = store or InMemoryStore()
+
+        self._fee_cache: int | None = None
         self._fee_lock = asyncio.Lock()
 
         # Configure the initial currencies available.
@@ -172,7 +248,8 @@ class Workload:
         # Finally, set up the txn_context for generic txn use.
         self.ctx = self.configure_txn_context(wallets=self.wallets,
                                               funding_wallet=self.funding_wallet,
-                                              defaults=None)
+                                              defaults=None,
+                                              )
 
     # Set up the txn_context if we want random transactons
     def configure_txn_context(
@@ -218,7 +295,7 @@ class Workload:
             self.accounts[addr] = rec
         return rec
 
-    async def _rpc(self, req, *, t=C.rpc_timeout):
+    async def _rpc(self, req, *, t=C.RPC_TIMEOUT):
         return await asyncio.wait_for(self.client.request(req), timeout=t)
 
     async def alloc_seq(self, addr: str) -> int:
@@ -249,8 +326,12 @@ class Workload:
     async def record_created(self, p: PendingTx) -> None:
         # store pending txn keyed by local hash
         self.pending[p.tx_hash] = p
-        p.state = TxState.CREATED
-        await self.store.upsert(p)
+        p.state = C.TxState.CREATED
+        await self.store.update_record({
+            "tx_hash": p.tx_hash,
+            "state": p.state.name,
+            "created_ledger": p.created_ledger,
+        })
 
     async def record_submitted(self, p: PendingTx, engine_result: str | None, srv_txid: str | None):
         old = p.tx_hash
@@ -259,31 +340,49 @@ class Workload:
             self.pending[new_hash] = self.pending.pop(old, p)
             p.tx_hash = new_hash
             await self.store.rekey(old, new_hash)
-        p.state = TxState.SUBMITTED
+        p.state = C.TxState.SUBMITTED
         p.engine_result_first = p.engine_result_first or engine_result
         self.pending[new_hash] = p
-        await self.store.mark(new_hash, state=TxState.SUBMITTED, engine_result_first=p.engine_result_first)
+        await self.store.mark(new_hash, state=C.TxState.SUBMITTED, engine_result_first=p.engine_result_first)
 
-    async def record_validated(self, tx_hash: str, ledger_index: int, meta_result: str):
-        if tx_hash in self.pending:
-            p = self.pending[tx_hash]
-            p.state = TxState.VALIDATED
-            p.validated_ledger = ledger_index
+    async def record_validated(self, rec: ValidationRecord, meta_result: str | None = None) -> dict:
+        """Apply validation to live tx (if present) and always persist to the store."""
+        p = self.pending.get(rec.txn)
+        if p:
+            p.state = C.TxState.VALIDATED
+            p.validated_ledger = rec.seq
             p.meta_txn_result = meta_result
-            await self.store.mark(tx_hash,
-                                  state=TxState.VALIDATED,
-                                  validated_ledger=ledger_index,
-                                  meta_txn_result=meta_result)
+        else:
+            log.debug("record_validated: tx not in pending (race or already finalized): %s", rec.txn)
+
+        await self.store.mark(
+            rec.txn,
+            state=C.TxState.VALIDATED,
+            validated_ledger=rec.seq,
+            meta_txn_result=meta_result,
+            source=rec.src,
+        )
+        log.info("txn %s validated at ledger %s via %s", rec.txn, rec.seq, rec.src)
+        return {
+            "tx_hash": rec.txn,
+            "ledger_index": rec.seq,
+            "source": rec.src,
+            "meta_result": meta_result,
+        }
+
 
     async def record_expired(self, tx_hash: str):
         if tx_hash in self.pending:
             p = self.pending[tx_hash]
-            p.state = TxState.EXPIRED
-            await self.store.mark(tx_hash, state=TxState.EXPIRED)
+            p.state = C.TxState.EXPIRED
+            await self.store.mark(tx_hash, state=C.TxState.EXPIRED)
             # self.pending.pop(tx_hash, None) # see if this gets out of hand?
 
-    async def build_sign_and_track(self, txn: Transaction, wallet: Wallet, horizon: int = C.horizon) -> PendingTx:
-        created_li = (await self._rpc(ServerState(), t=2.0)).result["state"]["validated_ledger"]["seq"]
+    def find_by_state(self, *states: C.TxState) -> list[PendingTx]:
+        return [p for p in self.pending.values() if p.state in set(states)]
+
+    async def build_sign_and_track(self, txn: Transaction, wallet: Wallet, horizon: int = C.HORIZON) -> PendingTx:
+        created_li = (await self._rpc(ServerState(), t=2.0)).result["state"]["validated_ledger"]["seq"] #TODO: Constant
         lls = created_li + horizon
         tx = txn.to_xrpl()
         if tx.get("Flags") == 0:
@@ -296,7 +395,7 @@ class Workload:
         fee = await self._open_ledger_fee() if need_fee else int(tx["Fee"])
 
         rec = self.accounts[wallet.address]
-        async with asyncio.timeout(C.lock_timeout):
+        async with asyncio.timeout(C.LOCK_TIMEOUT):
             log.debug("lock enter %s", wallet.address)
             async with rec.lock:
                 if need_seq:
@@ -319,14 +418,15 @@ class Workload:
             account=tx["Account"],
             sequence=tx.get("Sequence"),
             last_ledger_seq=lls,
+            transaction_type=tx.get("TransactionType"),
             created_ledger=created_li,
         )
         await self.record_created(p)
         return p
 
-    async def submit_pending(self, p: PendingTx, timeout: float = C.submit_timeout) -> dict | None:
+    async def submit_pending(self, p: PendingTx, timeout: float = C.SUBMIT_TIMEOUT) -> dict | None:
         # If the txn is in this state already we've got nothing to do but why are we here in the first place?
-        if p.state in {TxState.VALIDATED, TxState.REJECTED, TxState.EXPIRED}:
+        if p.state in {C.TxState.VALIDATED, C.TxState.REJECTED, C.TxState.EXPIRED}:
             log.debug("%s not active txn!", p)
             return None
 
@@ -340,9 +440,9 @@ class Workload:
                 p.engine_result_first = er
 
             if isinstance(er, str) and er.startswith(("tem", "tef")):
-                p.state = TxState.REJECTED
+                p.state = C.TxState.REJECTED
             else:
-                p.state = TxState.SUBMITTED
+                p.state = C.TxState.SUBMITTED
                 log.debug("Submitted")
                 log.debug("%s", p)
 
@@ -354,25 +454,34 @@ class Workload:
             return res
 
         except asyncio.TimeoutError:
-            p.state = TxState.FAILED_NET
+            p.state = C.TxState.FAILED_NET
             log.error("timeout")
             self.pending[p.tx_hash] = p
             return {"engine_result": "timeout"}
         except Exception as e:
-            p.state = TxState.FAILED_NET
+            p.state = C.TxState.FAILED_NET
             self.pending[p.tx_hash] = p
             log.error("submit error tx=%s: %s", p.tx_hash, e)
             return {"engine_result": "error", "message": str(e)}
 
+    def log_validation(self, tx_hash, ledger_index, result, validation_src):
+        log.info("Validated via %s tx=%s li=%s result=%s", validation_src, tx_hash, ledger_index, result) # FIX: DEbug only...
+
     # TODO: Default constants
-    async def check_finality(self, p: PendingTx, grace: int = 2) -> Tuple[TxState, Optional[int]]:
+    async def check_finality(self, p: PendingTx, grace: int = 2) -> tuple[C.TxState, int | None]:
         try:
             txr = await self.client.request(Tx(transaction=p.tx_hash))
             if txr.is_successful() and txr.result.get("validated"):
                 li = int(txr.result["ledger_index"])
-                res = txr.result["meta"]["TransactionResult"]
-                await self.store.mark(p.tx_hash, state=TxState.VALIDATED, validated_ledger=li, meta_txn_result=res)
-                p.state, p.validated_ledger, p.meta_txn_result = TxState.VALIDATED, li, res
+                result = txr.result["meta"]["TransactionResult"]
+                await self.store.mark(
+                    p.tx_hash,
+                    state=C.TxState.VALIDATED,
+                    validated_ledger=li,
+                    meta_txn_result=result,
+                    )
+                p.state, p.validated_ledger, p.meta_txn_result = C.TxState.VALIDATED, li, result
+                await self.record_validated(ValidationRecord(p.tx_hash, li, ValidationSrc.POLL), result)
                 return p.state, li
         except Exception:
             log.error("Houston, we have a %s", "major problem", exc_info=True)
@@ -380,16 +489,16 @@ class Workload:
 
         latest_val = await self._latest_validated_ledger()
         if latest_val > (p.last_ledger_seq + grace):
-            await self.store.mark(p.tx_hash, state=TxState.EXPIRED)
-            p.state = TxState.EXPIRED
+            await self.store.mark(p.tx_hash, state=C.TxState.EXPIRED)
+            p.state = C.TxState.EXPIRED
             return p.state, None
 
-        if p.state != TxState.SUBMITTED:
-            p.state = TxState.RETRYABLE
+        if p.state != C.TxState.SUBMITTED:
+            p.state = C.TxState.RETRYABLE
             await self.store.mark(p.tx_hash, state=p.state)
         return p.state, None
 
-    async def submit_signed_tx_blobs(self, items: List):
+    async def submit_signed_tx_blobs(self, items: list):
         def _to_blob(x):
             if isinstance(x, str): return x
             if isinstance(x, (tuple, list)): return x[0]
@@ -408,7 +517,7 @@ class Workload:
         except Exception:
             return False  # TODO: Say something?
 
-    async def _fund_if_needed(self, wallet: Wallet, amt_drops: str):
+    async def _ensure_funded(self, wallet: Wallet, amt_drops: str):
         """Fund the wallet from the funding_wallet account if it isn't active yet."""
         if await self._is_account_active(wallet.address):
             return
@@ -472,8 +581,6 @@ class Workload:
 
     async def _apply_gateway_flags(self, *, req_auth: bool, def_ripple: bool) -> dict[str, Any]:
         """Apply per-gateway account flags. XRPL allows one asf per AccountSet, so we send one tx per flag."""
-        from typing import Any
-        from xrpl.models.transactions import AccountSet, AccountSetAsfFlag
 
         flags: list[AccountSetAsfFlag] = []
         if req_auth:
@@ -580,11 +687,11 @@ class Workload:
             self.wallets[address] = wallet
             self._record_for(address)
 
-        drops = int(amount) if amount is not None else C.default_create_amount
+        drops = int(amount) if amount is not None else C.DEFAULT_CREATE_AMOUNT
         if drops < 0:
             raise ValueError("amount can't be negative!")
-        if drops > C.max_create_amount:
-            drops = C.max_create_amount
+        if drops > C.MAX_CREATE_AMOUNT:
+            drops = C.MAX_CREATE_AMOUNT
 
         funded = False
         tx_hash: str | None = None
@@ -602,7 +709,7 @@ class Workload:
 
             if wait and tx_hash:
                 log.info("Waiting for transaction to be validated.")
-                final = await self.wait_until_validated(tx_hash, overall=15.0, per_rpc=2.0)
+                final = await self.wait_until_validated(tx_hash, overall=15.0, per_rpc=2.0) # TODO: Constantes
                 validated = bool(final.get("validated"))
                 ledger_index = final.get("ledger_index") or final.get("ledger_index_min")
                 meta = final.get("meta")
@@ -634,7 +741,7 @@ class Workload:
             w = Wallet.create()
             self.wallets[w.address] = w
             self._record_for(w.address)
-            await self._fund_if_needed(w, self.config["gateways"]["default_balance"])
+            await self._ensure_funded(w, self.config["gateways"]["default_balance"])
             self.gateways.append(w)
             out_gw.append(w.address)
 
@@ -643,7 +750,7 @@ class Workload:
             w = Wallet.create()
             self.wallets[w.address] = w
             self._record_for(w.address)
-            await self._fund_if_needed(w, self.config["users"]["default_balance"])
+            await self._ensure_funded(w, self.config["users"]["default_balance"])
             self.users.append(w)
             out_us.append(w.address)
 
@@ -682,7 +789,7 @@ class Workload:
         return f"http://{val_ip}:{rpc_port}"
 
     def snapshot_pending(self, *, open_only: bool = True) -> list[dict]:
-        OPEN_STATES = {TxState.CREATED, TxState.SUBMITTED, TxState.RETRYABLE, TxState.FAILED_NET}
+        OPEN_STATES = {C.TxState.CREATED, C.TxState.SUBMITTED, C.TxState.RETRYABLE, C.TxState.FAILED_NET} # TODO: Move
         out = []
         for txh, p in self.pending.items():
             if open_only and p.state not in OPEN_STATES:
@@ -702,7 +809,7 @@ class Workload:
         return out
 
     def snapshot_finalized(self) -> list[dict]:
-        FINAL_STATES = {TxState.VALIDATED, TxState.REJECTED, TxState.EXPIRED}
+        FINAL_STATES = {C.TxState.VALIDATED, C.TxState.REJECTED, C.TxState.EXPIRED}
         return [r for r in self.snapshot_pending(open_only=False) if r["state"] in {s.name for s in FINAL_STATES}]
 
     def snapshot_failed(self) -> list[dict[str, Any]]:
@@ -743,11 +850,14 @@ class Workload:
 async def periodic_finality_check(w: Workload, interval: int = 5):
     while True:
         try:
-            pendings = await w.store.find_by_state(TxState.SUBMITTED, TxState.RETRYABLE)
-            if pendings:
-                async with asyncio.TaskGroup() as tg:
-                    for p in pendings:
-                        tg.create_task(w.check_finality(p))
-        except Exception as e:
-            print(f"[finality] error: {e}")
-        await asyncio.sleep(interval)
+            for p in w.find_by_state(C.TxState.SUBMITTED):
+                try:
+                    await w.check_finality(p)
+                except Exception:
+                    log.exception("[finality] check failed for %s", getattr(p, "tx_hash", p))
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("[finality] outer loop error; continuing")
+            await asyncio.sleep(0.5)

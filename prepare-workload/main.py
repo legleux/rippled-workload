@@ -1,3 +1,11 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "mako",
+#     "xrpl-py",
+# ]
+# ///
 import argparse
 import json
 import shutil
