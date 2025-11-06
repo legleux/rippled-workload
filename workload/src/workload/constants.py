@@ -27,6 +27,8 @@ class TxState(StrEnum):
     EXPIRED    = "EXPIRED"
     FAILED_NET = "FAILED_NET"
 
+
+
 # TODO: organize these
 DEFAULT_CREATE_AMOUNT = int(100 * 1e6)
 MAX_CREATE_AMOUNT = int(100e6 * 1e6) # alot?
@@ -42,6 +44,7 @@ __all__ = [
     "MAX_CREATE_AMOUNT",
     "RPC_TIMEOUT",
     "SUBMIT_TIMEOUT",
+
     ######
     "TxType",
     "TxState",

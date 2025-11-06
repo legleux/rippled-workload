@@ -40,7 +40,8 @@ async def ws_listener(stop: asyncio.Event, ws_url: str) -> None:
         except Exception as e:
             log.error("WS error: %s", e)
 
-        if stop.is_set(): break
+        if stop.is_set():
+            break
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, RECONNECT_MAX)
 

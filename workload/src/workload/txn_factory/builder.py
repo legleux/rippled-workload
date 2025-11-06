@@ -1,7 +1,7 @@
 from collections.abc import Sequence, Iterable, Callable, Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from random import choice, sample
-from typing import TYPE_CHECKING, TypeVar, Any
+from typing import TypeVar, Any
 import json
 from dataclasses import dataclass
 from xrpl.wallet import Wallet
@@ -28,14 +28,16 @@ T = TypeVar("T")
 
 
 # Need to map the class names to lowercase for when the come in from API for now. Might be a better way.
-available_txns = {t.lower():t for t in [
-    # "Batch",
-    "MPTokenIssuanceCreate",
-    "Payment",
-    "NFTokenMint",
-    "TrustSet",
-    "AccountSet"
-]}
+available_txns = {
+    t.lower(): t for t in [
+        "MPTokenIssuanceCreate",
+        "Payment",
+        "NFTokenMint",
+        "TrustSet",
+        "AccountSet",
+        # "Batch",  # enable when ready
+    ]
+}
 
 def choice_omit(seq: Sequence[T], omit: Iterable[T]) -> T:
     pool = [x for x in seq if x not in omit]
@@ -60,13 +62,13 @@ class TxnDefaults:
 @dataclass(slots=True)
 class TxnContext:
     funding_wallet: "Wallet"
-    wallets: dict[str, "Wallet"]
+    wallets: Sequence["Wallet"]                     # <-- sequence, not dict    currencies: Sequence[IssuedCurrency]
     currencies: Sequence[IssuedCurrency]
-    defaults: TxnDefaults
-    base_fee_drops: AwaitInt
-    next_sequence: AwaitSeq
+    defaults: "TxnDefaults"
+    base_fee_drops: "AwaitInt"
+    next_sequence: "AwaitSeq"
 
-    def rand_account(self, omit: Wallet | None = None) -> Wallet:
+    def rand_account(self, omit: Wallet | None = None) -> "Wallet":
         return choice_omit(self.wallets, omit=[omit] if omit else [])
 
     def rand_currency(self) -> IssuedCurrency:
@@ -75,7 +77,7 @@ class TxnContext:
         return choice(self.currencies)
 
     def derive(self, **overrides) -> "TxnContext":
-        return self.model_copy(update=overrides)
+        return replace(self, **overrides)
 
     @classmethod
     def build(
@@ -135,65 +137,65 @@ def deep_update(base: dict, override: dict) -> dict:
 
 @register_txn(Payment)
 def build_payment(ctx: TxnContext) -> dict:
-    acct = ctx.rand_account()
-    dest = ctx.rand_account(omit=acct)
-    return {
-        "TransactionType": "Payment",
-        "Account": acct,
-        "Destination": dest,
-    }
+    wl = list(ctx.wallets)
+    if len(wl) >= 2:
+        src, dst = sample(wl, 2)
+    else:
+        # one or zero wallets: use funding wallet as dst; allow self as last resort
+        src = wl[0] if wl else ctx.funding_wallet
+        dst = ctx.funding_wallet if ctx.funding_wallet is not src else src
+    return {"TransactionType": "Payment", "Account": src.address, "Destination": dst.address}
 
 @register_txn(TrustSet)
 def build_trustset(ctx: TxnContext) -> dict:
     cur = ctx.rand_currency()
-    acct = ctx.rand_account()
+    src = ctx.rand_account()
     return {
         "TransactionType": "TrustSet",
-        "Account": acct,
+        "Account": src.address,
         "LimitAmount": {"currency": cur.currency, "issuer": cur.issuer},
     }
 
 @register_txn(AccountSet)
 def build_accountset(ctx: TxnContext) -> dict:
-    acct = ctx.rand_account()
-    return {"TransactionType": "AccountSet", "Account": acct}
+    src = ctx.rand_account()
+    return {"TransactionType": "AccountSet", "Account": src.address}
+
 
 @register_txn(NFTokenMint)
 def build_nftoken_mint(ctx: TxnContext) -> dict:
-    acct = ctx.rand_account()
+    src = ctx.rand_account()
     memo_msg = "Some really cool info no doubt"
     memo = Memo(memo_data=memo_msg.encode("utf-8").hex())
-    return {"TransactionType": "NFTokenMint", "Account": acct, "NFTokenTaxon": 0, "memos": [memo]}
+    return {"TransactionType": "NFTokenMint", "Account": src.address, "NFTokenTaxon": 0, "memos": [memo]}
+
 
 @register_txn(MPTokenIssuanceCreate)
 def build_mptoken_issuance_create(ctx: TxnContext) -> dict:
-    acct = ctx.rand_account()
+    src = ctx.rand_account()
     metadata_hex = json.dumps(choice(token_metadata)).encode("utf-8").hex()
-    return {"TransactionType": "MPTokenIssuanceCreate", "Account": acct, "MPTokenMetadata": metadata_hex}
+    return {"TransactionType": "MPTokenIssuanceCreate", "Account": src.address, "MPTokenMetadata": metadata_hex}
 
 @register_txn(Batch)
 def build_batch(ctx: TxnContext) -> dict:
-    """This might be easier to pass back as dict (since txns are frozen) to to fill in sequences of the inner txns
-    otherwise we need a client in the txn_factory, which may not be such a bad idea anyway.
-    """
-    acct = ctx.rand_account()
-    potential_inner = ["Payment"]
-    # compose some random inner txns, let's only deal with payments for now.
-    # and make them all from the same account
-    payments = [{"RawTransaction":Payment(
-        account=acct.address,
-        destination=choice_omit(ctx.wallets, acct),
-        amount="10000000",
-        fee="0",
-        flags=TransactionFlag.TF_INNER_BATCH_TXN,
-        sequence=0,
-        signing_pub_key="")} for _ in range(randrange(1, 9))]
+    src = ctx.rand_account()
+    payments = [{
+        "RawTransaction": Payment(
+            account=src.address,
+            destination=choice_omit(ctx.wallets, [src]).address,   # omit list, address out
+            amount="10000000",
+            fee="0",
+            flags=TransactionFlag.TF_INNER_BATCH_TXN,
+            sequence=0,
+            signing_pub_key="",
+        )
+    } for _ in range(randrange(1, 9))]
     return {
         "TransactionType": "Batch",
-        "Account": acct,
-        "Flags": BatchFlag,
+        "Account": src.address,
+        "Flags": BatchFlag,  # TODO: set explicit bitfield if needed
         "RawTransactions": payments,
-        }
+    }
 
 def update_transaction(transaction: Transaction, **kwargs) -> Transaction:
     payload = transaction.to_xrpl()
@@ -201,12 +203,12 @@ def update_transaction(transaction: Transaction, **kwargs) -> Transaction:
     return type(transaction).from_xrpl(payload)
 
 async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides: Any) -> Transaction:
-    # If no specific txn_type is passed just pick a random frmo the ones we support.
+    # Choose or normalize the type name
     if txn_type is None:
         txn_type = choice(list(available_txns.values()))
-    # txn_type = available_txns.get(txn_type) if txn_type not in available_txns.values() else txn_type
-    # That's a little convoluted...it's either non-existent and we'll get a random one or you wanted a random one.
-    # txn_type = txn_type or choice(list(available_txns.values())) # NOTE: probably make this an enum for easier lookup
+    else:
+        txn_type = available_txns.get(str(txn_type).lower(), txn_type)
+
     log.info("Generating %s txn", txn_type)
     spec = REGISTRY.get(txn_type)
     if not spec:

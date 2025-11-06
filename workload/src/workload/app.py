@@ -65,14 +65,12 @@ WS = "ws://rippled:6006"
 
 # LEDGERS_TO_WAIT = to["initial_ledgers"]
 
-
 async def _probe_rippled(url: str) -> None:
     # NOTE: Rely on workload from communication?
     payload = {"method": "server_info", "params": [{}]}
     async with httpx.AsyncClient(timeout=TIMEOUT) as http:
         r = await http.post(url, json=payload)
         r.raise_for_status()
-
 
 async def wait_for_ledgers(url: str, count: int) -> None:
     """
@@ -107,22 +105,27 @@ async def _dump_tasks(tag: str):
 async def lifespan(app: FastAPI):
     check_interval = 5
     stop = asyncio.Event()
-    # --- startup probes ---
+    # Startup probes to make sure network is ready
     async with asyncio.timeout(OVERALL_STARTUP_TIMEOUT):
         log.info("Probing RPC endpoint...")
         await _probe_rippled(RPC)
         log.info("RPC OK. Waiting for network to be ready (seeing ledger progress)")
         await wait_for_ledgers(WS, LEDGERS_TO_WAIT)
 
-    # --- init workload ---
     log.info("Network is ready. Initializing workload...")
+    # Initialize workload
     client = AsyncJsonRpcClient(RPC)
     app.state.workload = Workload(cfg, client)
     app.state.stop = stop
+    # if not Path("/running").is_file():
     gw, u = cfg["gateways"], cfg["users"]
     log.info("Initializing participants (gateways=%s, users=%s)...", gw, u)
     init_result = await app.state.workload.init_participants(gateway_cfg=gw, user_cfg=u)
+    app.state.workload.update_txn_context()  # refresh ctx with our brand new users and gateways
     log.info("Accounts initialized: %s gateways, %s users.", len(init_result["gateways"]), len(init_result["users"]))
+    #else:
+    #    log.info("Looks like the network is already initialized and running. Skipping initialization.")
+    # Send Antithesis lifecycle event to start fuzzing here
 
     # --- concurrent services via TaskGroup ---
     app.state.ws_stop_event = asyncio.Event()
@@ -157,19 +160,11 @@ app = FastAPI(
     },
 )
 
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
-
 r_accounts = APIRouter(prefix="/accounts", tags=["Accounts"])
 r_pay = APIRouter(prefix="/payments", tags=["Payments"])
 # r_transaction = APIRouter(prefix="/transaction", tags=["Transactions"])
 r_transaction = APIRouter(tags=["Transactions"])
 r_state = APIRouter(prefix="/state", tags=["State"])
-
 
 
 class TxnReq(BaseModel):
@@ -202,6 +197,9 @@ class PaymentReq(BaseModel):
 def health():
     return {"status": "ok"} # Not the most thorough of healthchecks...
 
+@r_accounts.get("/create")
+async def api_create_account():
+    return await app.state.workload.create_account()
 
 @r_accounts.post("/create", response_model=CreateAccountResp)
 async def accounts_create(req: CreateAccountReq):
@@ -228,7 +226,6 @@ async def create(transaction: str):
     r = await w.create_transaction(transaction)
     return r
 
-
 @app.post("/debug/fund")
 async def debug_fund(dest: str):
     """Manually fund an address from the workload's configured `funding_account` and return the unvalidated result."""
@@ -253,6 +250,7 @@ async def debug_fund(dest: str):
 async def state_summary():
     return app.state.workload.snapshot_stats()
 
+
 @r_state.get("/pending")
 async def state_pending():
     return {"pending": app.state.workload.snapshot_pending()}
@@ -269,6 +267,7 @@ async def state_tx(tx_hash: str):
     if not data:
         raise HTTPException(404, "tx not tracked")
     return data
+
 
 @r_state.get("/accounts")
 async def state_accounts():
@@ -289,6 +288,11 @@ async def state_validations(limit: int = 100):
     """
     vals = list(app.state.workload.store.validations)[-limit:]
     return [{"txn": v.txn, "ledger": v.seq, "source": v.src} for v in reversed(vals)]
+
+@r_state.get("/wallets")
+def api_state_wallets():
+    ws = app.state.workload.wallets
+    return {"count": len(ws), "addresses": list(ws.keys())}
 
 @r_state.get("/finality")
 async def check_finality():
