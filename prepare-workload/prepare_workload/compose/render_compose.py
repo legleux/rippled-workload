@@ -28,6 +28,7 @@ def render_peer(idx, data):
 
 def render_validator(idx, data):
     val_data = {
+        "is_validator": True,
         "service_name": data["name"],
         "container_name": data["name"],
         "hostname": data["name"],

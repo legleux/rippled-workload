@@ -27,6 +27,7 @@ def write_config(node_data, settings):
 
     node_config_data = {
         "ports": node.ports,
+        "need_features": node.need_features,
         "node_config_template": s.node_config_template,
         "validator_public_keys": "\n".join(s.validator_public_keys),
         "ips_fixed": "\n".join([f"{p} {settings.node_config.ports['peer']}" for p in node_data["peers"]]),
@@ -66,18 +67,28 @@ def parse_args():
                         type=int,
                         help="Number of validators to create.",
                         )
+    parser.add_argument("--need-features", # TODO: Fix this hack
+                        default=True,
+                        action="store_true",
+                        help="Put the [features] block in all configs. This is just a hack if ledger.json not provied",
+                        )
     return parser.parse_args()
 
 
 def overrides(a) -> dict:
     o: dict = {}
     net = {}
+    nc = {}
     if a.testnet_dir is not None:
         o["testnet_dir"] = a.testnet_dir
     if a.num_validators is not None:
         net["num_validators"] = a.num_validators
     if net:
         o["network"] = net
+    if a.need_features:
+        nc["need_features"] = a.need_features
+    if nc:
+        o["node_config"] = nc
     return o
 
 

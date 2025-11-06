@@ -12,6 +12,7 @@ from xrpl.models import (
     Subscribe,
     StreamParameter
 )
+from workload.ws import ws_listener
 from xrpl.models import Subscribe, StreamParameter
 from xrpl.asyncio.clients import AsyncWebsocketClient
 from contextlib import asynccontextmanager
@@ -60,68 +61,9 @@ TIMEOUT = 3.0
 OVERALL = to["overall"]
 OVERALL_STARTUP_TIMEOUT = to["startup"]
 LEDGERS_TO_WAIT = 0
+WS = "ws://rippled:6006"
+
 # LEDGERS_TO_WAIT = to["initial_ledgers"]
-
-# Maybe move these models...
-class WSUrl(AnyUrl):
-    allowed_schemes = {"ws", "wss"}
-
-class WSAddReq(BaseModel):
-    url: WSUrl
-
-@dataclass
-class WSListener:
-    url: str
-    task: asyncio.Task
-
-
-def _ensure_ws_state(app: FastAPI) -> None:
-    if not hasattr(app.state, "ws_listeners"):
-        app.state.ws_listeners = {}
-
-
-async def _ws_loop(url: str, workload):
-    await tx_stream_listener(workload, url)
-
-"""
-async def _start_ws(app: FastAPI, url: str) -> None:
-    _ensure_ws_state(app)
-    if url in app.state.ws_listeners:
-        return
-    w = app.state.workload
-    task = asyncio.create_task(_ws_loop(url, w), name=f"ws:{url}")
-    app.state.ws_listeners[url] = WSListener(url=url, task=task)
-"""
-
-async def _start_ws(app: FastAPI, url: str) -> None:
-    _ensure_ws_state(app)
-    if url in app.state.ws_listeners:
-        return
-    w = app.state.workload
-    # attach new listener into the running TaskGroup
-    task = app.state.tg.create_task(tx_stream_listener(w, url), name=f"ws:{url}")
-    app.state.ws_listeners[url] = WSListener(url, task)
-
-"""
-async def _stop_ws(app: FastAPI, url: str) -> bool:
-    _ensure_ws_state(app)
-    item = app.state.ws_listeners.pop(url, None)
-    if not item:
-        return False
-    item.task.cancel()
-    with contextlib.suppress(Exception):
-        await item.task
-    return True
-"""
-async def _stop_ws(app: FastAPI, url: str) -> bool:
-    _ensure_ws_state(app)
-    item = app.state.ws_listeners.pop(url, None)
-    if not item:
-        return False
-    item.task.cancel()
-    with contextlib.suppress(Exception):
-        await item.task
-    return True
 
 
 async def _probe_rippled(url: str) -> None:
@@ -152,167 +94,52 @@ async def wait_for_ledgers(url: str, count: int) -> None:
         log.error(f"Failed to wait for ledgers via WebSocket: {e}")
         raise  # Fail startup if we can't confirm network status
 
-
-# async def stream_listener(w: Workload, ws_url: str, type_: StreamParameter):
-#     log.info("Listening for %s at %s", type_, ws_url)
-
-"""
-async def tx_stream_listener(w: Workload, ws_url: str):
-    log.info("Listening for %s at %s", StreamParameter. ws_url)
-    async with AsyncWebsocketClient(ws_url) as client:
-        await client.send(Subscribe(streams=[StreamParameter.TRANSACTIONS]))
-        async for msg in client:
-            if msg.get("type") != "transaction":
-                continue
-            if not msg.get("validated"):
-                continue
-            tx = msg.get("transaction", {}) or {}
-            meta = msg.get("meta", {}) or {}
-            txh = tx.get("hash")
-            li = msg.get("ledger_index") or meta.get("ledger_index")
-            tr = meta.get("TransactionResult")
-            if isinstance(txh, str):
-                await w.record_validated(txh, ledger_index=int(li) if li else 0, meta_result=tr or "")
-                log.info("Validated via ws tx stream tx=%s li=%s result=%s", txh, li, tr)
-"""
-
-async def account_stream_listener(w: Workload, url: str, accounts: set[str]):
-    """Subscribe to txs affecting these classic addresses only."""
-    from xrpl.asyncio.clients import AsyncWebsocketClient
-    from xrpl.models import Subscribe
-
-    addrs = sorted(accounts)  # deterministic
-    w.log.info("WS %s subscribing to %d accounts", url, len(addrs))
-
-    while True:
-        try:
-            async with AsyncWebsocketClient(url) as c:
-                # subscribe ONLY to these accounts (no global transactions stream)
-                await c.send(Subscribe(accounts=addrs))
-
-                async for msg in c:
-                    try:
-                        if msg.get("type") != "transaction" or not msg.get("validated"):
-                            continue
-                        tx  = msg.get("transaction") or {}
-                        meta = msg.get("meta") or {}
-                        txh = tx.get("hash")
-                        li  = msg.get("ledger_index") or meta.get("ledger_index") or 0
-                        tr  = meta.get("TransactionResult") or ""
-                        if isinstance(txh, str):
-                            await w.record_validated(ValidationRecord(txh, int(li), "ws"), meta_result=tr)
-                            w.log.info("validated via WS(accounts) tx=%s li=%s res=%s", txh, li, tr)
-                    except Exception:
-                        w.log.exception("[ws:accounts] handler error")
-        except asyncio.CancelledError:
-            w.log.info("[ws:accounts %s] cancelled", url); return
-        except Exception as e:
-            w.log.exception("[ws:accounts %s] error: %s; reconnecting", url, e)
-            await asyncio.sleep(1)
-
-async def tx_stream_listener(w: Workload, url: str):
-    # from xrpl.asyncio.clients import AsyncWebsocketClient
-    # from xrpl.models import Subscribe, StreamParameter
-    while True:
-        try:
-            async with AsyncWebsocketClient(url) as c:
-                await c.send(Subscribe(streams=[StreamParameter.TRANSACTIONS]))
-                async for msg in c:
-                    try:
-                        if msg.get("type") != "transaction" or not msg.get("validated"):
-                            continue
-                        # This sucks bc we need to dig throught the ledger data
-                        tx = msg.get("transaction") or {}
-                        meta = msg.get("meta") or {}
-                        txh = tx.get("hash")
-                        li = msg.get("ledger_index") or meta.get("ledger_index") or 0
-                        tr = meta.get("TransactionResult") or ""
-                        if isinstance(txh, str):
-                            # update store and log
-                            await w.record_validated(
-                                ValidationRecord(txh, int(li), "ws"), meta_result=tr
-                            )
-                            w.log.info("validated via WS tx=%s li=%s res=%s", txh, li, tr)
-                    except Exception:
-                        w.log.exception("[ws] handler error")
-        except asyncio.CancelledError:
-            w.log.info("[ws %s] cancelled", url)
-            return
-        except Exception as e:
-            w.log.exception("[ws %s] error: %s; reconnecting", url, e)
-            await asyncio.sleep(1)
-
+async def _dump_tasks(tag: str):
+    log.warning("=== TASK DUMP: %s ===", tag)
+    for t in asyncio.all_tasks():
+        if t is asyncio.current_task():
+            continue
+        log.warning("task %r done=%s cancelled=%s", t.get_name(), t.done(), t.cancelled())
+        for frame in t.get_stack(limit=5):
+            log.warning("  at %s:%s in %s", frame.f_code.co_filename, frame.f_lineno, frame.f_code.co_name)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # probe + wait (unchanged)
+    check_interval = 5
+    stop = asyncio.Event()
+    # --- startup probes ---
     async with asyncio.timeout(OVERALL_STARTUP_TIMEOUT):
         log.info("Probing RPC endpoint...")
         await _probe_rippled(RPC)
         log.info("RPC OK. Waiting for network to be ready (seeing ledger progress)")
         await wait_for_ledgers(WS, LEDGERS_TO_WAIT)
 
-    # initialize workload
+    # --- init workload ---
     log.info("Network is ready. Initializing workload...")
     client = AsyncJsonRpcClient(RPC)
     app.state.workload = Workload(cfg, client)
+    app.state.stop = stop
     gw, u = cfg["gateways"], cfg["users"]
     log.info("Initializing participants (gateways=%s, users=%s)...", gw, u)
-    try:
-        init_result = await app.state.workload.init_participants(gateway_cfg=gw, user_cfg=u)
-        log.info("Accounts initialized: %s gateways, %s users.",
-                 len(init_result["gateways"]), len(init_result["users"]))
-    except Exception as e:
-        log.error("Failed to initialize participants during startup: %s", e)
-        raise
+    init_result = await app.state.workload.init_participants(gateway_cfg=gw, user_cfg=u)
+    log.info("Accounts initialized: %s gateways, %s users.", len(init_result["gateways"]), len(init_result["users"]))
 
-    _ensure_ws_state(app)
-
-    # TODO: Move interval
-    check_interval = 15 #seconds
+    # --- concurrent services via TaskGroup ---
+    app.state.ws_stop_event = asyncio.Event()
     async with asyncio.TaskGroup() as tg:
         app.state.tg = tg
-        tg.create_task(periodic_finality_check(app.state.workload, check_interval), name="finality")
-        tg.create_task(tx_stream_listener(app.state.workload, WS), name=f"ws:{WS}")
+        tg.create_task(periodic_finality_check(app.state.workload, app.state.stop, check_interval), name="finality")
+        tg.create_task(ws_listener(app.state.stop, WS), name="ws")
         log.info("Startup OK. Ready to accept requests.")
-        log.info("Sending rpc to: %s", RPC)
-        log.info("Listening on: %s", WS)
-        yield  # on shutdown, TaskGroup cancels/awaits children automatically
-
-
-""" # TODO: Normalize this with the replacement above...
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # os.environ.setdefault("PYTHONUNBUFFERED", "1")
-    async with asyncio.timeout(OVERALL_STARTUP_TIMEOUT):
-        log.info("Probing RPC endpoint...")
-        await _probe_rippled(RPC)
-        log.info("RPC OK. Waiting for network to be ready (seeing ledger progress)")
-        await wait_for_ledgers(WS, LEDGERS_TO_WAIT)
-
-    log.info("Network is ready. Initializing workload...")
-    client = AsyncJsonRpcClient(RPC)
-    app.state.workload = Workload(cfg, client)
-    gw, u = cfg["gateways"], cfg["users"]
-    log.info(f"Initializing participants (gateways={gw}, users={u})...")
-    try:
-        init_result = await app.state.workload.init_participants(gateway_cfg=gw, user_cfg=u)
-        log.info(f"Accounts initialized: {len(init_result['gateways'])} gateways, {len(init_result['users'])} users.")
-    except Exception as e:
-        log.error(f"Failed to initialize participants during startup: {e}")
-        raise
-
-    app.state.finality_task = asyncio.create_task(periodic_finality_check(app.state.workload, interval=5))
-    app.state.tx_stream_task = asyncio.create_task(tx_stream_listener(app.state.workload, WS))
-    log.info("Startup OK. Ready to accept requests. rpc=%s", RPC)
-    try:
-        yield
-    finally:
-        app.state.finality_task.cancel()
-        with contextlib.suppress(Exception):
-            await app.state.finality_task
-        log.info("Shutdown complete")
-"""
+        try:
+            yield
+            stop.set()
+        finally:
+            # For debugging
+            await _dump_tasks("begin shutdown")
+            app.state.ws_stop_event.set()
+            # exiting the TaskGroup cancels any still-running tasks after the stop signal
+    await _dump_tasks("end shutdown")
 
 app = FastAPI(
     title="XRPL Workload",
@@ -339,7 +166,8 @@ app = FastAPI(
 
 r_accounts = APIRouter(prefix="/accounts", tags=["Accounts"])
 r_pay = APIRouter(prefix="/payments", tags=["Payments"])
-r_transaction = APIRouter(prefix="/transaction", tags=["Transactions"])
+# r_transaction = APIRouter(prefix="/transaction", tags=["Transactions"])
+r_transaction = APIRouter(tags=["Transactions"])
 r_state = APIRouter(prefix="/state", tags=["State"])
 
 
@@ -462,40 +290,44 @@ async def state_validations(limit: int = 100):
     vals = list(app.state.workload.store.validations)[-limit:]
     return [{"txn": v.txn, "ledger": v.seq, "source": v.src} for v in reversed(vals)]
 
-
+@r_state.get("/finality")
+async def check_finality():
+    wl = app.state.workload
+    await wl.check_finality
 ## Websocket listener maintainence
 # TODO: Add to router
-@app.get("/ws/listeners")
-async def ws_list():
-    _ensure_ws_state(app)
-    return [
-        {
-            "url": url,
-            "done": t.task.done(),
-            "cancelled": t.task.cancelled(),
-            "exception": (repr(t.task.exception())
-                          if t.task.done() and not t.task.cancelled()
-                          else None),
-        }
-        for url, t in app.state.ws_listeners.items()
-    ]
+# @app.get("/ws/listeners")
+# async def ws_list():
+#     _ensure_ws_state(app)
+#     return [
+#         {
+#             "url": url,
+#             "done": t.task.done(),
+#             "cancelled": t.task.cancelled(),
+#             "exception": (repr(t.task.exception())
+#                           if t.task.done() and not t.task.cancelled()
+#                           else None),
+#         }
+#         for url, t in app.state.ws_listeners.items()
+#     ]
 
-@app.post("/ws/listeners")
-async def ws_add(req: WSAddReq):
-    await _start_ws(app, str(req.url))
-    return {"added": str(req.url)}
+# @app.post("/ws/listeners")
+# async def ws_add(req: WSAddReq):
+#     await _start_ws(app, str(req.url))
+#     return {"added": str(req.url)}
 
-@app.delete("/ws/listeners")
-async def ws_del(req: WSAddReq):
-    ok = await _stop_ws(app, str(req.url))
-    if not ok:
-        raise HTTPException(404, "listener not found")
-    return {"removed": str(req.url)}
+# @app.delete("/ws/listeners")
+# async def ws_del(req: WSAddReq):
+#     ok = await _stop_ws(app, str(req.url))
+#     if not ok:
+#         raise HTTPException(404, "listener not found")
+#     return {"removed": str(req.url)}
 
 
 app.include_router(r_accounts)
 app.include_router(r_pay)
-app.include_router(r_transaction)
+app.include_router(r_transaction, prefix="/transaction")
+app.include_router(r_transaction, prefix="/txn", include_in_schema=False)  # alias /txn/ because I'm sick of typing...
 app.include_router(r_state)
 
 # @app.get("/validator/{n}", response=HTMLResponse)

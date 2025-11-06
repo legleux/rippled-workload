@@ -2,6 +2,7 @@ include:
   - prepare-workload/testnet/compose.yml
 services:
   workload:
+
     image: workload:dev
     build:
       # context: ../workload

@@ -26,10 +26,11 @@ log = logging.getLogger("workload.txn")
 
 T = TypeVar("T")
 
+
 # Need to map the class names to lowercase for when the come in from API for now. Might be a better way.
 available_txns = {t.lower():t for t in [
     # "Batch",
-    # "MPTokenCreate",
+    "MPTokenIssuanceCreate",
     "Payment",
     "NFTokenMint",
     "TrustSet",
@@ -200,10 +201,13 @@ def update_transaction(transaction: Transaction, **kwargs) -> Transaction:
     return type(transaction).from_xrpl(payload)
 
 async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides: Any) -> Transaction:
-    log.info("Generating %s txn", txn_type)
-    txn_type = available_txns.get(txn_type) if txn_type not in available_txns.values() else txn_type
+    # If no specific txn_type is passed just pick a random frmo the ones we support.
+    if txn_type is None:
+        txn_type = choice(list(available_txns.values()))
+    # txn_type = available_txns.get(txn_type) if txn_type not in available_txns.values() else txn_type
     # That's a little convoluted...it's either non-existent and we'll get a random one or you wanted a random one.
-    txn_type = txn_type or choice(list(available_txns.values())) # NOTE: probably make this an enum for easier lookup
+    # txn_type = txn_type or choice(list(available_txns.values())) # NOTE: probably make this an enum for easier lookup
+    log.info("Generating %s txn", txn_type)
     spec = REGISTRY.get(txn_type)
     if not spec:
         raise ValueError(f"Unsupported txn_type: {txn_type}")

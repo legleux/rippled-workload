@@ -8,13 +8,13 @@ funding_seed = false
 #seed    = "snoPBrXtMeMyMHUVTgbuqAfg1SUTb"
 
 [gateways]
-number = 4
+number = 2
 default_balance = 100_000_000_000000
 require_auth = false
 default_ripple = true
 
 [users]
-number = 10
+number = 4
 default_balance = 100_000_000000
 
 [amm]
@@ -56,8 +56,8 @@ amount = 100_000_000
 limit = 1_000_000_000_000000
 
 [timeout]
-overall = 8
-startup = 30
+overall = 4
+startup = 10
 initial_ledgers = 4
 
 [rippled]

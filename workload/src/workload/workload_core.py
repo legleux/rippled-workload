@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import time
+import json
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 import httpx
@@ -21,8 +22,6 @@ from xrpl.models.transactions import (
     AccountSetAsfFlag,
     Payment,
 )
-from typing import Any
-from xrpl.models.transactions import AccountSet, AccountSetAsfFlag
 from typing import Any
 from xrpl.models.requests import (
     AccountInfo,
@@ -57,12 +56,12 @@ log = logging.getLogger("workload")
 
 FINAL_STATES = {"VALIDATED", "REJECTED", "EXPIRED"}
 
-
 @dataclass(slots=True)
 class PendingTx:
     tx_hash: str
     signed_blob_hex: str
     account: str
+    tx_json: dict
     sequence: int | None
     last_ledger_seq: int
     transaction_type: C.TxType | None
@@ -75,6 +74,8 @@ class PendingTx:
     created_at: float = field(default_factory=time.time)
     finalized_at: float | None = None
 
+    def __str__(self):
+        return f"{self.transaction_type} -- {self.account} -- {self.state}"
 
 class Store(Protocol):
     async def upsert(self, p: PendingTx) -> None: ...
@@ -83,7 +84,6 @@ class Store(Protocol):
     async def rekey(self, old_hash: str, new_hash: str) -> None: ...
     async def find_by_state(self, *states: C.TxState) -> list[PendingTx]: ...
     async def all(self) -> list[PendingTx]: ...
-
 
 class InMemoryStore:
     """Current snapshot of transaction states and validation history for metrics."""
@@ -104,6 +104,7 @@ class InMemoryStore:
     async def update_record(self, tx: dict) -> None:
         """Insert or update a flat transaction record and recompute metrics."""
         txh = tx.get("tx_hash")
+        log.info("update_record %s", txh)
         if not txh:
             raise ValueError("update_record() requires 'tx_hash'")
         async with self._lock:
@@ -131,11 +132,25 @@ class InMemoryStore:
         - When state == VALIDATED, appends a ValidationRecord(txn, ledger, src).
         - Recomputes per-state and per-source counters.
         """
+        log.info("Mark %s", tx_hash)
         async with self._lock:
             rec = self._records.get(tx_hash, {})
+            # log.info("%s in %s -- %s", rec["state"], rec["created_ledger"], rec["tx_hash"])
+            initial_state = rec["state"]
+            rec_before = dict(rec)
             rec.update(fields)
+            rec_after = dict(rec)
+            if set(rec_after.items()) - set(rec_before.items()):
+                d = set(rec_after.items()) - set(rec_before.items())
+                log.info("After has more diff %s", d)
+            elif set(rec_before.items()) - set(rec_after.items()):
+                d = set(rec_before.items()) - set(rec_after.items())
+                log.info("Before has more diff %s", d)
+
             if source is not None:
                 rec["source"] = source
+            else:
+                pass
 
             state = rec.get("state")
             if isinstance(state, C.TxState):        # normalize enum to string
@@ -146,17 +161,23 @@ class InMemoryStore:
                 rec.setdefault("finalized_at", time.time())
                 # Only VALIDATED gets validation history
                 if state == "VALIDATED":
+                    seq = rec.get("validated_ledger") or 0
+                    src = source or rec.get("source", "unknown")
+                    log.info("%s ValidationRecord for in %s by %s -- %s", state, seq, src, tx_hash)
                     self.validations.append(
                         ValidationRecord(
                             txn=tx_hash,
-                            seq=rec.get("validated_ledger") or 0,
-                            src=source or rec.get("source", "unknown"),
+                            seq=seq,
+                            src=src,
                         )
                     )
 
             self._records[tx_hash] = rec
             self._recount()
-
+            if initial_state == state:
+                pass
+                log.error("!!!same state!!!")
+            log.info("%s --> %s  %s", initial_state, state, tx_hash)
     async def rekey(self, old_hash: str, new_hash: str) -> None:
         """
         Replace a record's key when a tx's canonical hash changes.
@@ -218,6 +239,14 @@ def _txid_from_signed_blob_hex(signed_blob_hex: str) -> str:
 def issue_currencies(issuer: str, currency_code: list[str]) -> list[IssuedCurrency]:
     issued_currencies = [IssuedCurrency.from_dict(dict(issuer=issuer, currency=cc)) for cc in currency_code]
     return issued_currencies
+
+async def debug_last_tx(client: AsyncJsonRpcClient, account: str):
+    # ai = await client.request({"method": "account_info", "params": [{"account": account, "ledger_index": "validated"}]})
+    ai = await client.request(AccountInfo(account=account, ledger_index="validated"))
+    try:
+        log.info("acct %s seq=%s bal=%s", account, ai.result["account_data"]["Sequence"], ai.result["account_data"]["Balance"])
+    except KeyError as e:
+        pass
 
 
 class Workload:
@@ -327,13 +356,18 @@ class Workload:
         # store pending txn keyed by local hash
         self.pending[p.tx_hash] = p
         p.state = C.TxState.CREATED
+        log.info("Creating record %s for %s", p.state, p.tx_hash)
         await self.store.update_record({
             "tx_hash": p.tx_hash,
-            "state": p.state.name,
+            "state": p.state, # or p.state.name?
             "created_ledger": p.created_ledger,
         })
 
     async def record_submitted(self, p: PendingTx, engine_result: str | None, srv_txid: str | None):
+    # async def record_submitted(self, p, engine_result, srv_txid):
+        if p.state in {C.TxState.REJECTED, C.TxState.VALIDATED, C.TxState.EXPIRED}:
+            pass # Don't overwrite terminal states. This should probably be an exception.
+            return
         old = p.tx_hash
         new_hash = srv_txid or old
         if srv_txid and srv_txid != old:
@@ -344,6 +378,7 @@ class Workload:
         p.engine_result_first = p.engine_result_first or engine_result
         self.pending[new_hash] = p
         await self.store.mark(new_hash, state=C.TxState.SUBMITTED, engine_result_first=p.engine_result_first)
+
 
     async def record_validated(self, rec: ValidationRecord, meta_result: str | None = None) -> dict:
         """Apply validation to live tx (if present) and always persist to the store."""
@@ -369,7 +404,6 @@ class Workload:
             "source": rec.src,
             "meta_result": meta_result,
         }
-
 
     async def record_expired(self, tx_hash: str):
         if tx_hash in self.pending:
@@ -416,6 +450,7 @@ class Workload:
             tx_hash=local_txid,
             signed_blob_hex=signed_blob_hex,
             account=tx["Account"],
+            tx_json=tx,
             sequence=tx.get("Sequence"),
             last_ledger_seq=lls,
             transaction_type=tx.get("TransactionType"),
@@ -427,25 +462,41 @@ class Workload:
     async def submit_pending(self, p: PendingTx, timeout: float = C.SUBMIT_TIMEOUT) -> dict | None:
         # If the txn is in this state already we've got nothing to do but why are we here in the first place?
         if p.state in {C.TxState.VALIDATED, C.TxState.REJECTED, C.TxState.EXPIRED}:
-            log.debug("%s not active txn!", p)
+            log.info("%s not active txn!", p)
             return None
 
         try:
             p.attempts += 1
+            log.info("submit start \n\ttransaction_type=%s\n\tstate=%s\n\tattempts=%s\n\taccount=%s\n\tseq=%s\n\ttx=%s", \
+                p.transaction_type, p.state.name, p.attempts, p.account, p.sequence, p.tx_hash
+            )
+            if p.transaction_type == "AccountSet":
+                pass
             resp = await asyncio.wait_for(self.client.request(SubmitOnly(tx_blob=p.signed_blob_hex)), timeout=timeout)
+            if p.transaction_type == "AccountSet":
+                log.info(resp)
             res = resp.result
             er = res.get("engine_result")
-
+            # log.info("Initial enginer result was: %s", er)
             if p.engine_result_first is None:
                 p.engine_result_first = er
 
             if isinstance(er, str) and er.startswith(("tem", "tef")):
+                # terminal reject: mark and stop
                 p.state = C.TxState.REJECTED
-            else:
-                p.state = C.TxState.SUBMITTED
-                log.debug("Submitted")
-                log.debug("%s", p)
+                self.pending[p.tx_hash] = p
+                await self.store.mark(
+                    p.tx_hash,
+                    state=p.state,
+                    engine_result_first=p.engine_result_first,
+                    engine_result_final=er,
+                )
+                log.info("************* Terminal Rejection ***********************")
+                log.info("%s by %s was %s %s", p.transaction_type, p.account, p.state, p.engine_result_first)
+                log.info("********************************************************")
+                return res
 
+            # We definitely have not submitted a transaction that isn't retryable if we get here
             srv_txid = res.get("tx_json", {}).get("hash")
             if isinstance(srv_txid, str) and srv_txid and srv_txid != p.tx_hash:
                 self.pending[srv_txid] = self.pending.pop(p.tx_hash, p)
@@ -455,13 +506,17 @@ class Workload:
 
         except asyncio.TimeoutError:
             p.state = C.TxState.FAILED_NET
-            log.error("timeout")
             self.pending[p.tx_hash] = p
+            log.error("timeout")
+            await self.store.mark(p.tx_hash, state=C.TxState.FAILED_NET, engine_result_first=p.engine_result_first)
             return {"engine_result": "timeout"}
+
         except Exception as e:
             p.state = C.TxState.FAILED_NET
             self.pending[p.tx_hash] = p
             log.error("submit error tx=%s: %s", p.tx_hash, e)
+            # NEW: persist state transition
+            await self.store.mark(p.tx_hash, state=C.TxState.FAILED_NET, message=str(e))
             return {"engine_result": "error", "message": str(e)}
 
     def log_validation(self, tx_hash, ledger_index, result, validation_src):
@@ -469,6 +524,10 @@ class Workload:
 
     # TODO: Default constants
     async def check_finality(self, p: PendingTx, grace: int = 2) -> tuple[C.TxState, int | None]:
+    # async def check_finality(self, p: PendingTx, grace: int = 2):
+        # if not hasattr(p, "tx_hash"):
+        #     log.error("check_finality got snapshot dict instead of PendingTx: %r", p)
+        #     return C.TxState.UNKNOWN, None
         try:
             txr = await self.client.request(Tx(transaction=p.tx_hash))
             if txr.is_successful() and txr.result.get("validated"):
@@ -479,8 +538,10 @@ class Workload:
                     state=C.TxState.VALIDATED,
                     validated_ledger=li,
                     meta_txn_result=result,
+                    source=ValidationSrc.POLL,
                     )
                 p.state, p.validated_ledger, p.meta_txn_result = C.TxState.VALIDATED, li, result
+                log.info("Recording %s for %s", p.state, p.tx_hash)
                 await self.record_validated(ValidationRecord(p.tx_hash, li, ValidationSrc.POLL), result)
                 return p.state, li
         except Exception:
@@ -529,11 +590,13 @@ class Workload:
         )
 
         p = await self.build_sign_and_track(fund_tx, self.funding_wallet)
+
+        await debug_last_tx(self.client, p.account)
         await self.submit_pending(p)
         log.debug(f"Funded {wallet.address} with {int(xrpl.utils.drops_to_xrp(amt_drops))} XRP")
+        await debug_last_tx(self.client, p.account)
 
     async def _acctset_flags(self, wallet: Wallet, *, require_auth=False, default_ripple=True):
-
         flags = []
         if require_auth:
             flags.append(AccountSetAsfFlag.ASF_REQUIRE_AUTH)
@@ -542,7 +605,10 @@ class Workload:
         for f in flags:
             t = AccountSet(account=wallet.address, set_flag=f)
             p = await self.build_sign_and_track(t, wallet)
+            log.info("Submitting AccountSet")
             await self.submit_pending(p)
+            log.info("Submitted AccountSet %s", p.tx_json)
+            log.info(json.dumps(p.tx_json))
 
     # TODO: Default constants
     async def wait_for_validation(self, tx_hash: str, *, overall: float = 15.0, per_rpc: float = 2.0) -> dict:
@@ -580,8 +646,7 @@ class Workload:
             _ = await self.wait_for_validation(p.tx_hash, overall=15.0)
 
     async def _apply_gateway_flags(self, *, req_auth: bool, def_ripple: bool) -> dict[str, Any]:
-        """Apply per-gateway account flags. XRPL allows one asf per AccountSet, so we send one tx per flag."""
-
+        """Apply per-gateway account flags. One AccountSet per asf flag."""
         flags: list[AccountSetAsfFlag] = []
         if req_auth:
             flags.append(AccountSetAsfFlag.ASF_REQUIRE_AUTH)
@@ -593,26 +658,32 @@ class Workload:
 
         results: list[dict[str, Any]] = []
         for w in self.gateways:
+            addr = w.classic_address
             for f in flags:
-                tx = AccountSet(account=w.address, set_flag=f)
+                tx = AccountSet(account=addr, set_flag=f)
+
+                # must sign with this wallet and use its sequence
                 p = await self.build_sign_and_track(tx, w)
-                res = await self.submit_pending(p, timeout=getattr(self, "rpc_timeout", 3.0))
+
+                # give startup breathing room
+                res = await self.submit_pending(p, timeout=max(getattr(self, "rpc_timeout", 3.0), 15.0))
+
                 er = (res or {}).get("engine_result")
                 txh = (res or {}).get("tx_json", {}).get("hash") if res else None
 
-                # record outcome snapshot; validation is handled by your periodic checker
                 results.append({
-                    "address": w.address,
+                    "address": addr,
                     "flag": f.name,
                     "engine_result": er,
                     "tx_hash": txh,
                     "state": p.state.name,
                 })
 
-                if er != "tesSUCCESS":
-                    log.error("AccountSet failed addr=%s flag=%s res=%s", w.address, f.name, res)
+                if isinstance(er, str) and er != "tesSUCCESS":
+                    log.error("AccountSet failed addr=%s flag=%s res=%s", addr, f.name, res)
 
         return {"applied": len(flags) * len(self.gateways), "results": results}
+
 
     # TODO: Default constants
     async def wait_until_validated(self, tx_hash: str, *, overall: float = 15.0, per_rpc: float = 2.0) -> dict[str, Any]:
@@ -740,7 +811,7 @@ class Workload:
         for _ in range(g):
             w = Wallet.create()
             self.wallets[w.address] = w
-            self._record_for(w.address)
+            self._record_for(w.address) # BUG: Only record address in workload after validated on ledger
             await self._ensure_funded(w, self.config["gateways"]["default_balance"])
             self.gateways.append(w)
             out_gw.append(w.address)
@@ -847,8 +918,10 @@ class Workload:
         }
 
 
-async def periodic_finality_check(w: Workload, interval: int = 5):
-    while True:
+PER_TX_TIMEOUT = 3
+
+async def periodic_finality_check(w: Workload, stop: asyncio.Event, interval: int = 5):
+    while not stop.is_set():
         try:
             for p in w.find_by_state(C.TxState.SUBMITTED):
                 try:
