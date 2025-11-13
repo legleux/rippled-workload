@@ -1,10 +1,14 @@
-import os
 import asyncio
+import json
 import logging
-import contextlib
-from fastapi import FastAPI, APIRouter
+import os
+
 from contextlib import asynccontextmanager
+
 import httpx
+import xrpl
+from fastapi import APIRouter, FastAPI, HTTPException
+
 from pydantic import BaseModel, PositiveInt
 from xrpl.asyncio.clients import AsyncJsonRpcClient, AsyncWebsocketClient
 from xrpl.models.transactions import Payment
@@ -12,33 +16,14 @@ from xrpl.models import (
     Subscribe,
     StreamParameter
 )
-from workload.ws import ws_listener
-from xrpl.models import Subscribe, StreamParameter
-from xrpl.asyncio.clients import AsyncWebsocketClient
-from contextlib import asynccontextmanager
-import asyncio, contextlib
-import asyncio
-import contextlib
-from dataclasses import dataclass
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, AnyUrl
-from xrpl.asyncio.clients import AsyncWebsocketClient
-from xrpl.models import Subscribe, StreamParameter
-from xrpl.models import Subscribe, StreamParameter
-from xrpl.asyncio.clients import AsyncWebsocketClient
-from workload.logging_config import setup_logging
 
-from workload.workload_core import Workload, periodic_finality_check
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from workload.workload_core import ValidationRecord
-from fastapi.templating import Jinja2Templates
-import json
-from fastapi.middleware.cors import CORSMiddleware
-from workload.config import cfg
-import xrpl
 from pathlib import Path
+
+from workload.config import cfg
+from workload.logging_config import setup_logging
+from workload.workload_core import Workload, periodic_finality_check
+from workload.ws import ws_listener
+
 
 setup_logging()
 log = logging.getLogger("workload.app")
@@ -65,12 +50,14 @@ WS = "ws://rippled:6006"
 
 # LEDGERS_TO_WAIT = to["initial_ledgers"]
 
+
 async def _probe_rippled(url: str) -> None:
     # NOTE: Rely on workload from communication?
     payload = {"method": "server_info", "params": [{}]}
     async with httpx.AsyncClient(timeout=TIMEOUT) as http:
         r = await http.post(url, json=payload)
         r.raise_for_status()
+
 
 async def wait_for_ledgers(url: str, count: int) -> None:
     """
@@ -91,6 +78,7 @@ async def wait_for_ledgers(url: str, count: int) -> None:
     except Exception as e:
         log.error(f"Failed to wait for ledgers via WebSocket: {e}")
         raise  # Fail startup if we can't confirm network status
+
 
 async def _dump_tasks(tag: str):
     log.warning("=== TASK DUMP: %s ===", tag)
@@ -143,6 +131,7 @@ async def lifespan(app: FastAPI):
             app.state.ws_stop_event.set()
             # exiting the TaskGroup cancels any still-running tasks after the stop signal
     await _dump_tasks("end shutdown")
+
 
 app = FastAPI(
     title="XRPL Workload",
@@ -226,6 +215,7 @@ async def create(transaction: str):
     r = await w.create_transaction(transaction)
     return r
 
+
 @app.post("/debug/fund")
 async def debug_fund(dest: str):
     """Manually fund an address from the workload's configured `funding_account` and return the unvalidated result."""
@@ -277,6 +267,7 @@ async def state_accounts():
         "addresses": list(wl.accounts.keys()),
     }
 
+
 @r_state.get("/validations")
 async def state_validations(limit: int = 100):
     """
@@ -289,10 +280,12 @@ async def state_validations(limit: int = 100):
     vals = list(app.state.workload.store.validations)[-limit:]
     return [{"txn": v.txn, "ledger": v.seq, "source": v.src} for v in reversed(vals)]
 
+
 @r_state.get("/wallets")
 def api_state_wallets():
     ws = app.state.workload.wallets
     return {"count": len(ws), "addresses": list(ws.keys())}
+
 
 @r_state.get("/finality")
 async def check_finality():

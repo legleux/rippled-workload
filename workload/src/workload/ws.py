@@ -1,10 +1,15 @@
 # workload/ws.py
-import asyncio, json, logging, websockets
+import asyncio
+import json
+import logging
+import websockets
+
 log = logging.getLogger("workload.ws")
 
 RECV_TIMEOUT = 90.0
 RECONNECT_BASE = 1.0
 RECONNECT_MAX = 10.0
+
 
 async def ws_listener(stop: asyncio.Event, ws_url: str) -> None:
     backoff = RECONNECT_BASE
