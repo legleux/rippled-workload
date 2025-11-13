@@ -16,3 +16,4 @@ logs
 config/docker-compose.yml
 config/volumes/*val*
 config/volumes/*rippled*
+testnet/
