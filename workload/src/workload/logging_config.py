@@ -3,7 +3,7 @@ import logging.config
 import os
 import sys
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING").upper()
 
 LOGGING_CONFIG = {
     "version": 1,

@@ -15,6 +15,17 @@ if TYPE_CHECKING:
 from workload.workload_core import ValidationRecord, ValidationSrc
 import workload.constants as C
 
+try:
+    from antithesis.assertions import sometimes, always
+    ANTITHESIS_AVAILABLE = True
+except ImportError:
+    ANTITHESIS_AVAILABLE = False
+    # No-op fallbacks for when not in Antithesis environment
+    def sometimes(condition, message, details=None):
+        pass
+    def always(condition, message, details=None):
+        pass
+
 log = logging.getLogger("workload.ws_processor")
 
 
@@ -27,7 +38,7 @@ async def process_ws_events(
     Consume events from WebSocket listener and update workload state.
 
     This task runs for the lifetime of the application, processing:
-    - Transaction validations from the stream
+    - Transaction validations from the stream (SEQUENTIAL - parallel caused blocking)
     - Ledger close notifications
     - Immediate submission responses (if/when we switch to WS submission)
 
@@ -51,6 +62,7 @@ async def process_ws_events(
                 event_type, data = event
 
                 if event_type == "tx_validated":
+                    # Process sequentially to avoid flooding event loop with concurrent tasks
                     await _handle_tx_validated(workload, data)
                     processed_count += 1
 
@@ -87,6 +99,12 @@ async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
     """
     Handle a validated transaction from the WebSocket stream.
 
+    We subscribe to specific accounts (our wallets), so we should only receive
+    transactions affecting our accounts. However, we still need to check if
+    it's in pending since we receive notifications for:
+    - Transactions we submitted (in pending)
+    - Transactions TO our accounts from external sources (not in pending)
+
     Message structure:
     {
         "type": "transaction",
@@ -113,8 +131,9 @@ async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
     # Check if this is a transaction we're tracking
     pending = workload.pending.get(tx_hash)
     if not pending:
-        # Not our transaction - could be from another client or system txn
-        log.debug("WS validation for untracked tx: %s", tx_hash)
+        # Transaction affecting our account but we didn't submit it
+        # (e.g., payment TO us from external source, or system transaction)
+        log.debug("WS validation for non-pending tx affecting our accounts: %s", tx_hash[:8])
         return
 
     # Extract validation data
@@ -126,8 +145,8 @@ async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
         log.warning("WS validation missing ledger_index for tx %s", tx_hash)
         return
 
-    log.info("WS validation: tx=%s ledger=%s result=%s account=%s",
-             tx_hash[:8], ledger_index, meta_result, pending.account[:8])
+    log.debug("WS validation: tx=%s ledger=%s result=%s account=%s",
+              tx_hash[:8], ledger_index, meta_result, pending.account[:8])
 
     # Record validation through the official path
     # This will:
@@ -151,10 +170,9 @@ async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
     """
     Handle a ledger close notification.
 
-    Currently just logs for monitoring. Could be used for:
-    - Triggering retry logic for expired transactions
-    - Updating metrics about network activity
-    - Triggering periodic health checks
+    Fetches ledger transaction count and runs Antithesis assertions to validate:
+    - Ledgers contain transactions at least sometimes (workload is functioning)
+    - Network is processing submitted transactions
 
     Message structure:
     {
@@ -166,10 +184,57 @@ async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
     }
     """
     ledger_index = msg.get("ledger_index")
-    log.debug("Ledger closed: %s", ledger_index)
+    ledger_hash = msg.get("ledger_hash")
 
-    # Future enhancement: track ledger close rate, detect network stalls, etc.
-    # For now, this is just informational
+    log.debug("Ledger %s closed (hash: %s)", ledger_index, ledger_hash)
+
+    # Fetch ledger to get transaction count for Antithesis assertions
+    try:
+        from xrpl.models.requests import Ledger
+
+        ledger_req = Ledger(
+            ledger_index=ledger_index,
+            transactions=True,  # Include tx hashes (not full txns)
+            expand=False,       # Don't expand to full transaction objects
+        )
+
+        ledger_resp = await workload._rpc(ledger_req)
+
+        if ledger_resp.is_successful():
+            ledger_data = ledger_resp.result.get("ledger", {})
+            transactions = ledger_data.get("transactions", [])
+            txn_count = len(transactions)
+
+            log.debug("Ledger %s closed with %d transactions", ledger_index, txn_count)
+
+            # Antithesis assertion: we should see transactions in ledgers at least sometimes
+            # This validates the workload is functioning and transactions are being processed
+            sometimes(
+                txn_count > 0,
+                "ledger_contains_transactions",
+                {
+                    "ledger_index": ledger_index,
+                    "txn_count": txn_count,
+                    "ledger_hash": ledger_hash,
+                }
+            )
+
+            # Additional assertion: if workload is running, ledgers should have transactions
+            # This is more strict - useful for detecting workload stalls
+            if hasattr(workload, '_workload_started') and workload._workload_started:
+                always(
+                    txn_count > 0,
+                    "active_workload_produces_transactions",
+                    {
+                        "ledger_index": ledger_index,
+                        "txn_count": txn_count,
+                    }
+                )
+        else:
+            log.warning("Failed to fetch ledger %s: %s", ledger_index, ledger_resp.result)
+
+    except Exception as e:
+        log.error("Error fetching ledger %s for assertions: %s", ledger_index, e)
 
 
 async def _handle_tx_response(workload: "Workload", msg: dict) -> None:

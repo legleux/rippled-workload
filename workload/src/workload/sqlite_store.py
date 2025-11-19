@@ -91,10 +91,23 @@ class SQLiteStore:
                     created_at REAL NOT NULL,
                     PRIMARY KEY (currency, issuer)
                 );
+
+                -- Account balances (XRP, IOUs, AMM LP tokens, MPTokens)
+                CREATE TABLE IF NOT EXISTS balances (
+                    account TEXT NOT NULL,
+                    asset_type TEXT NOT NULL,  -- 'XRP', 'IOU', 'AMM_LP', 'MPToken'
+                    currency TEXT,  -- NULL for XRP
+                    issuer TEXT,    -- NULL for XRP
+                    value TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (account, asset_type, currency, issuer)
+                );
+                CREATE INDEX IF NOT EXISTS idx_balance_account ON balances(account);
+                CREATE INDEX IF NOT EXISTS idx_balance_currency ON balances(currency, issuer);
                 """
             )
             conn.commit()
-            log.info(f"SQLite database initialized at {self.db_path}")
+            log.debug(f"SQLite database initialized at {self.db_path}")
         finally:
             conn.close()
 
@@ -184,7 +197,7 @@ class SQLiteStore:
 
     async def mark(self, tx_hash: str, *, source: str | None = None, **fields) -> None:
         """Update or insert a transaction record with state transitions."""
-        log.info("Mark %s", tx_hash)
+        log.debug("Mark %s", tx_hash)
         async with self._lock:
             conn = sqlite3.connect(self.db_path)
             try:
@@ -226,7 +239,7 @@ class SQLiteStore:
                             )
                             # Add to in-memory deque
                             if not any(v.txn == tx_hash and v.seq == seq for v in self.validations):
-                                log.info("%s ValidationRecord in %s by %s -- %s", state, seq, src, tx_hash)
+                                log.debug("%s ValidationRecord in %s by %s -- %s", state, seq, src, tx_hash)
                                 self.validations.append(ValidationRecord(txn=tx_hash, seq=seq, src=src))
 
                 rec["tx_hash"] = tx_hash
@@ -260,7 +273,7 @@ class SQLiteStore:
                 )
                 conn.commit()
                 self._recount()
-                log.info("%s --> %s  %s", prev_state, state, tx_hash)
+                log.debug("%s --> %s  %s", prev_state, state, tx_hash)
             finally:
                 conn.close()
 
@@ -337,6 +350,7 @@ class SQLiteStore:
 
             return {
                 "by_state": dict(self.count_by_state),
+                "by_type": {},  # TODO: Implement type counting in SQLiteStore
                 "validated_by_source": dict(self.validated_by_source),
                 "total_tracked": total,
                 "recent_validations": len(self.validations),
@@ -368,7 +382,7 @@ class SQLiteStore:
                 (wallet.address, wallet.seed, algo, int(is_gateway), int(is_user), time.time()),
             )
             conn.commit()
-            log.info(f"Saved wallet {wallet.address} (gateway={is_gateway}, user={is_user})")
+            log.debug(f"Saved wallet {wallet.address} (gateway={is_gateway}, user={is_user})")
         finally:
             conn.close()
 
@@ -388,7 +402,7 @@ class SQLiteStore:
                 wallet = Wallet.from_seed(seed, algorithm=algo)
                 result[address] = (wallet, bool(is_gateway), bool(is_user))
 
-            log.info(f"Loaded {len(result)} wallets from database")
+            log.debug(f"Loaded {len(result)} wallets from database")
             return result
         finally:
             conn.close()
@@ -433,7 +447,76 @@ class SQLiteStore:
             tx_count = cursor.fetchone()[0]
 
             has_state = wallet_count > 0 or tx_count > 0
-            log.info(f"Database state check: {wallet_count} wallets, {tx_count} transactions (has_state={has_state})")
+            log.debug(f"Database state check: {wallet_count} wallets, {tx_count} transactions (has_state={has_state})")
             return has_state
+        finally:
+            conn.close()
+
+    # =========================================================================
+    # Balance tracking
+    # =========================================================================
+
+    def update_balance(
+        self, account: str, asset_type: str, value: str, currency: str | None = None, issuer: str | None = None
+    ) -> None:
+        """Update or insert account balance for a specific asset."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO balances (account, asset_type, currency, issuer, value, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account, asset_type, currency, issuer) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (account, asset_type, currency, issuer, value, time.time()),
+            )
+            conn.commit()
+            log.debug(f"Updated balance: {account} {asset_type} {currency or 'XRP'} = {value}")
+        finally:
+            conn.close()
+
+    def get_balances(self, account: str) -> list[dict]:
+        """Get all balances for an account."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "SELECT asset_type, currency, issuer, value, updated_at FROM balances WHERE account = ?",
+                (account,),
+            )
+            balances = []
+            for asset_type, currency, issuer, value, updated_at in cursor.fetchall():
+                balance = {
+                    "asset_type": asset_type,
+                    "value": value,
+                    "updated_at": updated_at,
+                }
+                if currency:
+                    balance["currency"] = currency
+                if issuer:
+                    balance["issuer"] = issuer
+                balances.append(balance)
+            return balances
+        finally:
+            conn.close()
+
+    def get_all_balances(self) -> dict[str, list[dict]]:
+        """Get balances for all accounts."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute("SELECT account, asset_type, currency, issuer, value FROM balances")
+            balances_by_account: dict[str, list[dict]] = {}
+            for account, asset_type, currency, issuer, value in cursor.fetchall():
+                if account not in balances_by_account:
+                    balances_by_account[account] = []
+
+                balance = {"asset_type": asset_type, "value": value}
+                if currency:
+                    balance["currency"] = currency
+                if issuer:
+                    balance["issuer"] = issuer
+                balances_by_account[account].append(balance)
+            return balances_by_account
         finally:
             conn.close()

@@ -11,12 +11,16 @@ genesis_account: Final = {
 GENESIS = genesis_account
 
 class TxType(StrEnum):
-    ACCOUNT_SET             = "AccountSet"
-    BATCH                   = "Batch"
-    MPTOKEN_ISSUANCE_CREATE = "MPTokenIssuanceCreate"
-    NFTOKEN_MINT            = "NFTokenMint"
-    PAYMENT                 = "Payment"
-    TRUSTSET                = "TrustSet"
+    ACCOUNT_SET                = "AccountSet"
+    AMM_CREATE                 = "AMMCreate"
+    BATCH                      = "Batch"
+    MPTOKEN_ISSUANCE_CREATE    = "MPTokenIssuanceCreate"
+    MPTOKEN_ISSUANCE_SET       = "MPTokenIssuanceSet"
+    MPTOKEN_AUTHORIZE          = "MPTokenAuthorize"
+    MPTOKEN_ISSUANCE_DESTROY   = "MPTokenIssuanceDestroy"
+    NFTOKEN_MINT               = "NFTokenMint"
+    PAYMENT                    = "Payment"
+    TRUSTSET                   = "TrustSet"
 
 class TxState(StrEnum):
     CREATED    = "CREATED"
@@ -32,7 +36,7 @@ class TxState(StrEnum):
 # TODO: organize these
 DEFAULT_CREATE_AMOUNT = int(100 * 1e6)
 MAX_CREATE_AMOUNT = int(100e6 * 1e6) # alot?
-HORIZON = 3  # If it's not validated/failed after 20 ledgers it's gone...
+HORIZON = 10  # Transactions expire if not validated within 10 ledgers (~30-40 seconds)
 RPC_TIMEOUT = 2.0
 SUBMIT_TIMEOUT = 20
 LOCK_TIMEOUT = 2.0

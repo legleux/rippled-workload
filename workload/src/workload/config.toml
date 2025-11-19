@@ -14,11 +14,11 @@ require_auth = false
 default_ripple = true
 
 [users]
-number = 4
+number = 10
 default_balance = 100_000_000000
 
 [amm]
-xrp_chance = 0.10
+xrp_chance = 0.50
 trading_fee = 10
 default_amm_token_deposit = 1_000
 
@@ -39,11 +39,10 @@ BTC = 1_000_000_000
 ########### Transaction context defaults #############
 ######################################################
 [transactions]
-available = [
-    "Payment",
-    "NFTokenMint",
-    "TrustSet",
-    "AccountSet",
+# Disable specific transaction types for debugging (all types in _BUILDERS are enabled by default)
+disabled = [
+    # "Batch",  # Uncomment to disable Batch transactions
+    # "NFTokenMint",
 ]
 
 [transactions.mptoken.issuance_create]
@@ -56,9 +55,9 @@ amount = 100_000_000
 limit = 1_000_000_000_000000
 
 [timeout]
-overall = 4
-startup = 10
-initial_ledgers = 4
+overall = 6
+startup = 180
+initial_ledgers = 5
 
 [rippled]
 docker = "rippled"
@@ -86,7 +85,7 @@ datefmt = "%Y-%m-%dT%H:%M:%S%z"
 
 [logging.handlers.stdout]
 class = "logging.StreamHandler"
-level = "INFO"
+level = "DEBUG"  # Changed from INFO to see debug messages
 formatter = "simple_debug"
 stream = "ext://sys.stdout"
 

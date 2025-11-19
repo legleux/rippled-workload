@@ -5,12 +5,17 @@ from typing import TypeVar, Any
 import json
 from xrpl.wallet import Wallet
 from xrpl.models import IssuedCurrency, TransactionFlag
+from xrpl.models.amounts import IssuedCurrencyAmount
 from xrpl.transaction import transaction_json_to_binary_codec_form
 from xrpl.models.transactions import (
     AccountSet,
+    AMMCreate,
     Batch,
     BatchFlag,
     MPTokenIssuanceCreate,
+    MPTokenIssuanceSet,
+    MPTokenAuthorize,
+    MPTokenIssuanceDestroy,
     NFTokenMint,
     Transaction,
     Memo,
@@ -26,18 +31,8 @@ log = logging.getLogger("workload.txn")
 T = TypeVar("T")
 
 
-# Need to map the class names to lowercase for when the come in from API for now. Might be a better way.
-available_txns = {
-    t.lower(): t
-    for t in [
-        "MPTokenIssuanceCreate",
-        "Payment",
-        "NFTokenMint",
-        "TrustSet",
-        "AccountSet",
-        # "Batch",  # enable when ready
-    ]
-}
+# Transaction types are registered in _BUILDERS (single source of truth)
+# Config can disable specific types via transactions.disabled = [...]
 
 
 def choice_omit(seq: Sequence[T], omit: Iterable[T]) -> T:
@@ -52,25 +47,15 @@ AwaitInt = Callable[[], Awaitable[int]]
 AwaitSeq = Callable[[str], Awaitable[int]]
 
 
-class TxnDefaults:
-    # conservative defaults; strings in XRPL JSON format
-    max_fee_drops: int = 500
-    value: str = "100000000000"
-    amount: str = "1000000000"
-    xrp_amount_drops: str = "10000000"  # used in Payment fallback
-    trust_limit_value: str = "100000000000"  # used in TrustSet fallback
-    payment: dict | None = {"Amount": "10000000"}  # string drops
-    trust_set: dict | None = {"LimitAmount": {"value": "100000000000"}}
-
-
 @dataclass(slots=True)
 class TxnContext:
     funding_wallet: "Wallet"
     wallets: Sequence["Wallet"]  # <-- sequence, not dict    currencies: Sequence[IssuedCurrency]
     currencies: Sequence[IssuedCurrency]
-    defaults: "TxnDefaults"
+    config: dict  # Full config dict from config.toml
     base_fee_drops: "AwaitInt"
     next_sequence: "AwaitSeq"
+    mptoken_issuance_ids: list[str] | None = None  # Track created MPToken issuance IDs
 
     def rand_account(self, omit: Wallet | None = None) -> "Wallet":
         return choice_omit(self.wallets, omit=[omit] if omit else [])
@@ -79,6 +64,12 @@ class TxnContext:
         if not self.currencies:
             raise RuntimeError("No currencies configured")
         return choice(self.currencies)
+
+    def rand_mptoken_id(self) -> str:
+        """Get a random MPToken issuance ID from tracked IDs."""
+        if not self.mptoken_issuance_ids:
+            raise RuntimeError("No MPToken issuance IDs available")
+        return choice(self.mptoken_issuance_ids)
 
     def derive(self, **overrides) -> "TxnContext":
         return replace(self, **overrides)
@@ -90,15 +81,15 @@ class TxnContext:
         funding_wallet: Wallet,
         wallets: Sequence[Wallet],
         currencies: Sequence[IssuedCurrency],
+        config: dict,
         base_fee_drops: AwaitInt,
         next_sequence: AwaitSeq,
-        defaults: TxnDefaults | None = None,
     ) -> "TxnContext":
         return cls(
             wallets=wallets,
             currencies=currencies,
             funding_wallet=funding_wallet,
-            defaults=defaults or TxnDefaults(),
+            config=config,
             base_fee_drops=base_fee_drops,
             next_sequence=next_sequence,
         )
@@ -146,19 +137,30 @@ def _build_payment(ctx: TxnContext) -> dict:
         src = wl[0] if wl else ctx.funding_wallet
         dst = ctx.funding_wallet if ctx.funding_wallet is not src else src
 
+    # Randomly choose between XRP and issued currency
+    # Use xrp_chance from config (default behavior: mostly issued currencies)
+    from random import random
+
+    use_xrp = random() < ctx.config.get("amm", {}).get("xrp_chance", 0.1)
+
+    if use_xrp or not ctx.currencies:
+        # Send XRP (in drops)
+        amount = str(ctx.config["transactions"]["payment"]["amount"])
+    else:
+        # Send issued currency
+        currency = ctx.rand_currency()
+        amount = {
+            "currency": currency.currency,
+            "issuer": currency.issuer,
+            "value": "100",  # 100 units of the currency
+        }
+
     result = {
         "TransactionType": "Payment",
         "Account": src.address,
         "Destination": dst.address,
+        "Amount": amount,
     }
-
-    # Apply defaults
-    if ctx.defaults.payment:
-        deep_update(result, ctx.defaults.payment)
-
-    # Ensure Amount is set
-    if "Amount" not in result:
-        result["Amount"] = ctx.defaults.xrp_amount_drops
 
     return result
 
@@ -174,17 +176,9 @@ def _build_trustset(ctx: TxnContext) -> dict:
         "LimitAmount": {
             "currency": cur.currency,
             "issuer": cur.issuer,
+            "value": str(ctx.config["transactions"]["trustset"]["limit"]),  # From config
         },
     }
-
-    # Apply defaults
-    if ctx.defaults.trust_set:
-        deep_update(result, ctx.defaults.trust_set)
-
-    # Ensure value is set in LimitAmount
-    la = result.setdefault("LimitAmount", {})
-    if not la.get("value"):
-        la["value"] = ctx.defaults.trust_limit_value
 
     return result
 
@@ -222,29 +216,170 @@ def _build_mptoken_issuance_create(ctx: TxnContext) -> dict:
     }
 
 
-def _build_batch(ctx: TxnContext) -> dict:
-    """Build a Batch transaction with random inner payments."""
+def _build_mptoken_issuance_set(ctx: TxnContext) -> dict:
+    """Build an MPTokenIssuanceSet transaction to modify MPToken properties."""
     src = ctx.rand_account()
-    payments = [
-        {
-            "RawTransaction": Payment(
+    mpt_id = ctx.rand_mptoken_id()
+
+    return {
+        "TransactionType": "MPTokenIssuanceSet",
+        "Account": src.address,
+        "MPTokenIssuanceID": mpt_id,
+        # Optionally set holder to lock/unlock for specific account
+        # "Holder": ctx.rand_account().address,
+    }
+
+
+def _build_mptoken_authorize(ctx: TxnContext) -> dict:
+    """Build an MPTokenAuthorize transaction to authorize/unauthorize holder."""
+    src = ctx.rand_account()
+    mpt_id = ctx.rand_mptoken_id()
+
+    return {
+        "TransactionType": "MPTokenAuthorize",
+        "Account": src.address,
+        "MPTokenIssuanceID": mpt_id,
+        # Holder can be specified to authorize a specific account
+        # If omitted, authorizes the Account itself
+    }
+
+
+def _build_mptoken_issuance_destroy(ctx: TxnContext) -> dict:
+    """Build an MPTokenIssuanceDestroy transaction to destroy an MPToken issuance."""
+    src = ctx.rand_account()
+    mpt_id = ctx.rand_mptoken_id()
+
+    return {
+        "TransactionType": "MPTokenIssuanceDestroy",
+        "Account": src.address,
+        "MPTokenIssuanceID": mpt_id,
+    }
+
+
+async def _build_batch(ctx: TxnContext) -> dict:
+    """Build a Batch transaction with random inner transactions of various types."""
+    from random import random
+
+    src = ctx.rand_account()
+
+    # 1. Random count (2-8 inner txns) - Batch requires minimum 2
+    num_inner = randrange(2, 9)
+
+    # 2. Allocate sequences: Batch gets first, inner txns get next N
+    # IMPORTANT: Batch uses seq N, inner txns use N+1, N+2, N+3, ...
+    batch_seq = await ctx.next_sequence(src.address)
+    inner_sequences = [await ctx.next_sequence(src.address) for _ in range(num_inner)]
+
+    # 3. Build random inner txns of different types
+    inner_txns = []
+    for seq in inner_sequences:
+        # Pick random inner txn type
+        txn_type = choice(["Payment", "TrustSet", "AccountSet", "NFTokenMint"])
+
+        # Build based on type - ALL must have: fee="0", signing_pub_key="", TF_INNER_BATCH_TXN flag
+        if txn_type == "Payment":
+            # Mix XRP and issued currencies
+            use_xrp = random() < 0.5
+            if use_xrp or not ctx.currencies:
+                amount = str(randrange(1_000_000, 100_000_000))  # 1-100 XRP in drops
+            else:
+                currency = ctx.rand_currency()
+                amount = IssuedCurrencyAmount(
+                    currency=currency.currency,
+                    issuer=currency.issuer,
+                    value=str(randrange(10, 1000)),
+                )
+
+            inner_tx = Payment(
                 account=src.address,
                 destination=choice_omit(ctx.wallets, [src]).address,
-                amount="10000000",
+                amount=amount,
                 fee="0",
-                flags=TransactionFlag.TF_INNER_BATCH_TXN,
-                sequence=0,
                 signing_pub_key="",
+                flags=TransactionFlag.TF_INNER_BATCH_TXN,
+                sequence=seq,
             )
-        }
-        for _ in range(randrange(1, 9))
-    ]
+
+        elif txn_type == "TrustSet":
+            cur = ctx.rand_currency()
+            inner_tx = TrustSet(
+                account=src.address,
+                limit_amount=IssuedCurrencyAmount(
+                    currency=cur.currency,
+                    issuer=cur.issuer,
+                    value=str(ctx.config["transactions"]["trustset"]["limit"]),
+                ),
+                fee="0",
+                signing_pub_key="",
+                flags=TransactionFlag.TF_INNER_BATCH_TXN,
+                sequence=seq,
+            )
+
+        elif txn_type == "AccountSet":
+            inner_tx = AccountSet(
+                account=src.address,
+                fee="0",
+                signing_pub_key="",
+                flags=TransactionFlag.TF_INNER_BATCH_TXN,
+                sequence=seq,
+            )
+
+        elif txn_type == "NFTokenMint":
+            memo = Memo(memo_data="Batch NFT".encode("utf-8").hex())
+            inner_tx = NFTokenMint(
+                account=src.address,
+                nftoken_taxon=0,
+                fee="0",
+                signing_pub_key="",
+                flags=TransactionFlag.TF_INNER_BATCH_TXN,
+                sequence=seq,
+                memos=[memo],
+            )
+
+        inner_txns.append({"RawTransaction": inner_tx})
+
+    # Randomly pick a batch mode for testing variety
+    # tfAllOrNothing: all must succeed or batch fails
+    # tfOnlyOne: first success wins, rest skipped
+    # tfUntilFailure: apply until first failure
+    # tfIndependent: all execute regardless of failures
+    batch_mode = choice([
+        BatchFlag.TF_ALL_OR_NOTHING,
+        BatchFlag.TF_ONLY_ONE,
+        BatchFlag.TF_UNTIL_FAILURE,
+        BatchFlag.TF_INDEPENDENT,
+    ])
 
     return {
         "TransactionType": "Batch",
         "Account": src.address,
-        "Flags": BatchFlag,
-        "RawTransactions": payments,
+        "Sequence": batch_seq,  # Explicitly set so build_sign_and_track won't allocate a new one
+        "Flags": batch_mode,
+        "RawTransactions": inner_txns,
+    }
+
+
+def _build_amm_create(ctx: TxnContext) -> dict:
+    """Build an AMMCreate transaction with random currency pair.
+
+    NOTE: Fee will be set to owner_reserve in build_sign_and_track based on TransactionType.
+    """
+    src = ctx.rand_account()
+    currency = ctx.rand_currency()
+
+    # AMM needs two assets - one XRP, one issued currency
+    # Use values from config, but allow overrides
+    return {
+        "TransactionType": "AMMCreate",
+        "Account": src.address,
+        "Amount": "1000000000",  # 1000 XRP (in drops) - can be overridden
+        "Amount2": {
+            "currency": currency.currency,
+            "issuer": currency.issuer,
+            "value": str(ctx.config["amm"]["default_amm_token_deposit"]),  # From config
+        },
+        "TradingFee": ctx.config["amm"]["trading_fee"],  # From config
+        # NOTE: Do NOT set Fee here - it must equal owner_reserve, which is set in build_sign_and_track
     }
 
 
@@ -262,6 +397,10 @@ _BUILDERS: dict[str, tuple[Callable[[TxnContext], dict], type[Transaction]]] = {
     "AccountSet": (_build_accountset, AccountSet),
     "NFTokenMint": (_build_nftoken_mint, NFTokenMint),
     "MPTokenIssuanceCreate": (_build_mptoken_issuance_create, MPTokenIssuanceCreate),
+    "MPTokenIssuanceSet": (_build_mptoken_issuance_set, MPTokenIssuanceSet),
+    "MPTokenAuthorize": (_build_mptoken_authorize, MPTokenAuthorize),
+    "MPTokenIssuanceDestroy": (_build_mptoken_issuance_destroy, MPTokenIssuanceDestroy),
+    "AMMCreate": (_build_amm_create, AMMCreate),
     "Batch": (_build_batch, Batch),
 }
 
@@ -286,13 +425,41 @@ async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides
     Raises:
         ValueError: If txn_type is not supported
     """
+    import inspect
+
     # Choose or normalize the type name
     if txn_type is None:
-        txn_type = choice(list(available_txns.values()))
-    else:
-        txn_type = available_txns.get(str(txn_type).lower(), txn_type)
+        # Start with ALL transaction types from _BUILDERS (single source of truth)
+        configured_types = list(_BUILDERS.keys())
 
-    log.info("Generating %s txn", txn_type)
+        # Remove any types disabled in config
+        disabled_types = ctx.config.get("transactions", {}).get("disabled", [])
+        if disabled_types:
+            configured_types = [t for t in configured_types if t not in disabled_types]
+            log.debug("Disabled transaction types: %s", disabled_types)
+
+        # MPToken types that require existing issuance IDs
+        requires_mpt_id = {"MPTokenAuthorize", "MPTokenIssuanceSet", "MPTokenIssuanceDestroy"}
+
+        # Filter out MPToken types that need IDs if none are available
+        if not ctx.mptoken_issuance_ids:
+            configured_types = [t for t in configured_types if t not in requires_mpt_id]
+            log.debug("No MPToken IDs available, excluding: %s", requires_mpt_id)
+
+        if not configured_types:
+            raise RuntimeError("No transaction types available to generate")
+
+        txn_type = choice(configured_types)
+    else:
+        # Normalize case: try exact match first, then case-insensitive
+        if txn_type not in _BUILDERS:
+            # Try case-insensitive lookup
+            for builder_type in _BUILDERS.keys():
+                if builder_type.lower() == str(txn_type).lower():
+                    txn_type = builder_type
+                    break
+
+    log.debug("Generating %s txn", txn_type)
 
     builder_spec = _BUILDERS.get(txn_type)
     if not builder_spec:
@@ -300,14 +467,20 @@ async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides
 
     builder_fn, model_cls = builder_spec
 
-    # Build base transaction with defaults
-    composed = builder_fn(ctx)
+    # Build base transaction with defaults (handle async builders)
+    if inspect.iscoroutinefunction(builder_fn):
+        composed = await builder_fn(ctx)
+    else:
+        composed = builder_fn(ctx)
 
     # Apply user overrides
     if overrides:
         deep_update(composed, transaction_json_to_binary_codec_form(overrides))
 
-    log.info(f"Created {txn_type}")
+    # Debug: dump transaction dict before converting to model
+    log.debug(f"Transaction dict for {txn_type}: {composed}")
+
+    log.debug(f"Created {txn_type}")
     return model_cls.from_xrpl(composed)
 
 
@@ -339,6 +512,11 @@ async def create_mptoken_issuance_create(ctx: TxnContext, **overrides: Any) -> M
 async def create_batch(ctx: TxnContext, **overrides: Any) -> Batch:
     """Create a Batch transaction with sane defaults."""
     return await generate_txn(ctx, "Batch", **overrides)
+
+
+async def create_amm_create(ctx: TxnContext, **overrides: Any) -> AMMCreate:
+    """Create an AMMCreate transaction with sane defaults."""
+    return await generate_txn(ctx, "AMMCreate", **overrides)
 
 
 def update_transaction(transaction: Transaction, **kwargs) -> Transaction:

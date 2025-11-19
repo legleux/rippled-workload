@@ -26,6 +26,7 @@ async def ws_listener(
     stop: asyncio.Event,
     ws_url: str,
     event_queue: asyncio.Queue,
+    accounts_provider: callable = None,
 ) -> None:
     """
     Connect to rippled WebSocket, subscribe to streams, and publish events to queue.
@@ -38,6 +39,9 @@ async def ws_listener(
         WebSocket URL (e.g., "ws://rippled:6006")
     event_queue:
         Queue to publish parsed events for workload consumption
+    accounts_provider:
+        Optional callable that returns list of account addresses to subscribe to.
+        If None, subscribes to all transactions (inefficient but simple).
     """
     backoff = RECONNECT_BASE
 
@@ -51,12 +55,37 @@ async def ws_listener(
             ) as ws:
                 log.info("WS connected: %s", ws_url)
 
-                # Subscribe to transaction and ledger streams
-                subscribe_msg = {
-                    "id": 1,
-                    "command": "subscribe",
-                    "streams": ["transactions", "ledger"]
-                }
+                # Get account addresses to subscribe to
+                accounts = None
+                if accounts_provider:
+                    try:
+                        accounts = accounts_provider()
+                        if accounts:
+                            log.debug(f"Got {len(accounts)} accounts from provider")
+                        else:
+                            log.debug("No accounts available yet (likely during startup)")
+                    except Exception as e:
+                        log.warning(f"Failed to get accounts from provider: {e}, falling back to transaction stream")
+
+                # Subscribe to ledger stream + either specific accounts or all transactions
+                if accounts:
+                    # Efficient: subscribe only to our accounts
+                    subscribe_msg = {
+                        "id": 1,
+                        "command": "subscribe",
+                        "streams": ["ledger"],
+                        "accounts": accounts
+                    }
+                    log.info(f"✓ Subscribing to ledger + {len(accounts)} specific accounts (efficient)")
+                else:
+                    # Fallback: subscribe to all transactions (used during init before accounts exist)
+                    subscribe_msg = {
+                        "id": 1,
+                        "command": "subscribe",
+                        "streams": ["transactions", "ledger"]
+                    }
+                    log.info("Subscribing to ALL transactions (fallback - will switch to accounts after init/reconnect)")
+
                 await ws.send(json.dumps(subscribe_msg))
 
                 # Wait for subscription acknowledgment
