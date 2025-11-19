@@ -305,6 +305,71 @@ class Workload:
             wallets=list(self.wallets.values()),
             funding_wallet=self.funding_wallet,
         )
+
+    # =========================================================================
+    # State persistence - load and save workload state from SQLite
+    # =========================================================================
+
+    def load_state_from_store(self) -> bool:
+        """Load workload state from SQLite store if available.
+
+        Returns:
+            True if state was loaded, False otherwise
+        """
+        from workload.sqlite_store import SQLiteStore
+
+        if not isinstance(self.store, SQLiteStore):
+            log.warning("Store is not SQLiteStore, cannot load state")
+            return False
+
+        if not self.store.has_state():
+            log.info("No persisted state found in database")
+            return False
+
+        log.info("Loading workload state from database...")
+
+        # Load wallets
+        wallet_data = self.store.load_wallets()
+        for address, (wallet, is_gateway, is_user) in wallet_data.items():
+            self.wallets[address] = wallet
+            self._record_for(address)
+
+            if is_gateway:
+                self.gateways.append(wallet)
+            if is_user:
+                self.users.append(wallet)
+
+        # Load currencies
+        currencies = self.store.load_currencies()
+        if currencies:
+            self._currencies = currencies
+
+        log.info(
+            f"Loaded state: {len(self.wallets)} wallets "
+            f"({len(self.gateways)} gateways, {len(self.users)} users), "
+            f"{len(self._currencies)} currencies"
+        )
+
+        # Update transaction context with loaded wallets
+        self.update_txn_context()
+
+        return True
+
+    def save_wallet_to_store(self, wallet: Wallet, is_gateway: bool = False, is_user: bool = False) -> None:
+        """Save a wallet to the persistent store."""
+        from workload.sqlite_store import SQLiteStore
+
+        if isinstance(self.store, SQLiteStore):
+            self.store.save_wallet(wallet, is_gateway=is_gateway, is_user=is_user)
+
+    def save_currencies_to_store(self) -> None:
+        """Save all currencies to the persistent store."""
+        from workload.sqlite_store import SQLiteStore
+
+        if isinstance(self.store, SQLiteStore):
+            for currency in self._currencies:
+                self.store.save_currency(currency)
+
     # Use Fee for dynamic value when submitting txns with possibility of fee-escalation.
     # async def _open_ledger_fee(self) -> int:
     #     async with self._fee_lock:
@@ -402,6 +467,7 @@ class Workload:
             self.wallets[w.address] = w
             self._record_for(w.address)
             self.users.append(w)
+            self.save_wallet_to_store(w, is_user=True)  # Persist newly created user wallet
             self.update_txn_context()
             log.info("Adopted new account after validation: %s", w.address)
 
@@ -748,7 +814,7 @@ class Workload:
         pending = await self.build_sign_and_track(txn, self.wallets[txn.account])
         return await self.submit_pending(pending)
 
-    async def create_account(self, initial_xrp_drops: str | None = None) -> dict[str, Any]:
+    async def create_account(self, initial_xrp_drops: str | None = None, wait=True) -> dict[str, Any]:
         """
         Randomly generate a wallet, fund it from funding_wallet, and adopt it
         into the pool *after* validation via record_validated().
@@ -800,6 +866,7 @@ class Workload:
             self._record_for(w.address) # BUG: Only record address in workload after validated on ledger
             await self._ensure_funded(w, self.config["gateways"]["default_balance"])
             self.gateways.append(w)
+            self.save_wallet_to_store(w, is_gateway=True)  # Persist gateway wallet
             out_gw.append(w.address)
 
         log.info(f"Funding {(u := user_cfg["number"])} users")
@@ -809,10 +876,15 @@ class Workload:
             self._record_for(w.address)
             await self._ensure_funded(w, self.config["users"]["default_balance"])
             self.users.append(w)
+            self.save_wallet_to_store(w, is_user=True)  # Persist user wallet
             out_us.append(w.address)
 
         if req_auth or def_ripple:
             await self._apply_gateway_flags(req_auth=req_auth, def_ripple=def_ripple)
+
+        # Persist currencies after initialization
+        self.save_currencies_to_store()
+
         return {"gateways": out_gw, "users": out_us}
 
     # ============================================== #
@@ -888,6 +960,7 @@ class Workload:
 
     def snapshot_tx(self, tx_hash: str) -> dict[str, Any]:
         p = self.pending.get(tx_hash)
+        ws_port = 6006 # TODO: Use the real ws port
         if not p:
             return {}
         return {
@@ -901,6 +974,7 @@ class Workload:
             "engine_result_first": p.engine_result_first,
             "validated_ledger": p.validated_ledger,
             "meta_txn_result": p.meta_txn_result,
+            "link": f"https://custom.xrpl.org/localhost:{ws_port}/transactions/{tx_hash}"
         }
 
 

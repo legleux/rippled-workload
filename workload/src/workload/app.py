@@ -1,29 +1,44 @@
-import asyncio
-import json
-import logging
 import os
-
+import asyncio
+import logging
+import contextlib
+from fastapi import FastAPI, APIRouter
 from contextlib import asynccontextmanager
-
 import httpx
-import xrpl
-from fastapi import APIRouter, FastAPI, HTTPException
-
 from pydantic import BaseModel, PositiveInt
 from xrpl.asyncio.clients import AsyncJsonRpcClient, AsyncWebsocketClient
 from xrpl.models.transactions import Payment
-from xrpl.models import (
-    Subscribe,
-    StreamParameter
-)
+from xrpl.models import Subscribe, StreamParameter
 
-from pathlib import Path
-
-from workload.config import cfg
-from workload.logging_config import setup_logging
-from workload.workload_core import Workload, periodic_finality_check
+# Import updated WS components
 from workload.ws import ws_listener
+from workload.ws_processor import process_ws_events
 
+from xrpl.asyncio.clients import AsyncWebsocketClient
+from contextlib import asynccontextmanager
+import asyncio, contextlib
+import asyncio
+import contextlib
+from dataclasses import dataclass
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, AnyUrl
+from xrpl.asyncio.clients import AsyncWebsocketClient
+from xrpl.models import Subscribe, StreamParameter
+from xrpl.models import Subscribe, StreamParameter
+from xrpl.asyncio.clients import AsyncWebsocketClient
+from workload.logging_config import setup_logging
+
+from workload.workload_core import Workload, periodic_finality_check
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from workload.workload_core import ValidationRecord
+from fastapi.templating import Jinja2Templates
+import json
+from fastapi.middleware.cors import CORSMiddleware
+from workload.config import cfg
+import xrpl
+from pathlib import Path
 
 setup_logging()
 log = logging.getLogger("workload.app")
@@ -50,14 +65,12 @@ WS = "ws://rippled:6006"
 
 # LEDGERS_TO_WAIT = to["initial_ledgers"]
 
-
 async def _probe_rippled(url: str) -> None:
     # NOTE: Rely on workload from communication?
     payload = {"method": "server_info", "params": [{}]}
     async with httpx.AsyncClient(timeout=TIMEOUT) as http:
         r = await http.post(url, json=payload)
         r.raise_for_status()
-
 
 async def wait_for_ledgers(url: str, count: int) -> None:
     """
@@ -79,7 +92,6 @@ async def wait_for_ledgers(url: str, count: int) -> None:
         log.error(f"Failed to wait for ledgers via WebSocket: {e}")
         raise  # Fail startup if we can't confirm network status
 
-
 async def _dump_tasks(tag: str):
     log.warning("=== TASK DUMP: %s ===", tag)
     for t in asyncio.all_tasks():
@@ -93,6 +105,7 @@ async def _dump_tasks(tag: str):
 async def lifespan(app: FastAPI):
     check_interval = 5
     stop = asyncio.Event()
+
     # Startup probes to make sure network is ready
     async with asyncio.timeout(OVERALL_STARTUP_TIMEOUT):
         log.info("Probing RPC endpoint...")
@@ -101,27 +114,69 @@ async def lifespan(app: FastAPI):
         await wait_for_ledgers(WS, LEDGERS_TO_WAIT)
 
     log.info("Network is ready. Initializing workload...")
-    # Initialize workload
+
+    # Initialize workload with SQLite persistence
+    from workload.sqlite_store import SQLiteStore
+
     client = AsyncJsonRpcClient(RPC)
-    app.state.workload = Workload(cfg, client)
+    sqlite_store = SQLiteStore(db_path="workload_state.db")
+    app.state.workload = Workload(cfg, client, store=sqlite_store)
     app.state.stop = stop
-    # if not Path("/running").is_file():
-    gw, u = cfg["gateways"], cfg["users"]
-    log.info("Initializing participants (gateways=%s, users=%s)...", gw, u)
-    init_result = await app.state.workload.init_participants(gateway_cfg=gw, user_cfg=u)
-    app.state.workload.update_txn_context()  # refresh ctx with our brand new users and gateways
-    log.info("Accounts initialized: %s gateways, %s users.", len(init_result["gateways"]), len(init_result["users"]))
-    #else:
-    #    log.info("Looks like the network is already initialized and running. Skipping initialization.")
-    # Send Antithesis lifecycle event to start fuzzing here
+
+    # Try to load existing state from database
+    state_loaded = app.state.workload.load_state_from_store()
+
+    if state_loaded:
+        log.info("✓ Loaded existing state from database, skipping network provisioning")
+        log.info(
+            f"  Wallets: {len(app.state.workload.wallets)} "
+            f"(Gateways: {len(app.state.workload.gateways)}, Users: {len(app.state.workload.users)})"
+        )
+    else:
+        # Initialize participants (provision network)
+        gw, u = cfg["gateways"], cfg["users"]
+        log.info("No persisted state found. Initializing participants (gateways=%s, users=%s)...", gw, u)
+        init_result = await app.state.workload.init_participants(gateway_cfg=gw, user_cfg=u)
+        app.state.workload.update_txn_context()  # refresh ctx with our brand new users and gateways
+        log.info("Accounts initialized: %s gateways, %s users.", len(init_result["gateways"]), len(init_result["users"]))
+
+    # ============================================================
+    # NEW: Create WebSocket event queue for communication between
+    # the WS listener and the workload processor
+    # ============================================================
+    app.state.ws_queue = asyncio.Queue(maxsize=1000)  # Buffer up to 1000 events
+    log.info("Created WS event queue (maxsize=1000)")
 
     # --- concurrent services via TaskGroup ---
     app.state.ws_stop_event = asyncio.Event()
     async with asyncio.TaskGroup() as tg:
         app.state.tg = tg
-        tg.create_task(periodic_finality_check(app.state.workload, app.state.stop, check_interval), name="finality")
-        tg.create_task(ws_listener(app.state.stop, WS), name="ws")
+
+        # Existing finality checker (now acts as fallback for transactions WS doesn't catch)
+        tg.create_task(
+            periodic_finality_check(app.state.workload, app.state.stop, check_interval),
+            name="finality_checker"
+        )
+
+        # ============================================================
+        # NEW: WebSocket listener now publishes to queue
+        # ============================================================
+        tg.create_task(
+            ws_listener(app.state.stop, WS, app.state.ws_queue),
+            name="ws_listener"
+        )
+
+        # ============================================================
+        # NEW: WebSocket event processor consumes from queue
+        # ============================================================
+        tg.create_task(
+            process_ws_events(app.state.workload, app.state.ws_queue, app.state.stop),
+            name="ws_processor"
+        )
+
         log.info("Startup OK. Ready to accept requests.")
+        log.info("Active tasks: finality_checker, ws_listener, ws_processor")
+
         try:
             yield
             stop.set()
@@ -130,8 +185,8 @@ async def lifespan(app: FastAPI):
             await _dump_tasks("begin shutdown")
             app.state.ws_stop_event.set()
             # exiting the TaskGroup cancels any still-running tasks after the stop signal
-    await _dump_tasks("end shutdown")
 
+    await _dump_tasks("end shutdown")
 
 app = FastAPI(
     title="XRPL Workload",
@@ -151,7 +206,6 @@ app = FastAPI(
 
 r_accounts = APIRouter(prefix="/accounts", tags=["Accounts"])
 r_pay = APIRouter(prefix="/payments", tags=["Payments"])
-# r_transaction = APIRouter(prefix="/transaction", tags=["Transactions"])
 r_transaction = APIRouter(tags=["Transactions"])
 r_state = APIRouter(prefix="/state", tags=["State"])
 
@@ -173,7 +227,6 @@ class CreateAccountResp(BaseModel):
     seed: str | None = None
     funded: bool
     tx_hash: str | None = None
-    # algorithm: str
 
 
 class PaymentReq(BaseModel):
@@ -214,7 +267,6 @@ async def create(transaction: str):
     log.info(f"Creating a {transaction}")
     r = await w.create_transaction(transaction)
     return r
-
 
 @app.post("/debug/fund")
 async def debug_fund(dest: str):
@@ -267,7 +319,6 @@ async def state_accounts():
         "addresses": list(wl.accounts.keys()),
     }
 
-
 @r_state.get("/validations")
 async def state_validations(limit: int = 100):
     """
@@ -280,45 +331,32 @@ async def state_validations(limit: int = 100):
     vals = list(app.state.workload.store.validations)[-limit:]
     return [{"txn": v.txn, "ledger": v.seq, "source": v.src} for v in reversed(vals)]
 
-
 @r_state.get("/wallets")
 def api_state_wallets():
     ws = app.state.workload.wallets
     return {"count": len(ws), "addresses": list(ws.keys())}
 
-
 @r_state.get("/finality")
 async def check_finality():
     wl = app.state.workload
     await wl.check_finality
-## Websocket listener maintainence
-# TODO: Add to router
-# @app.get("/ws/listeners")
-# async def ws_list():
-#     _ensure_ws_state(app)
-#     return [
-#         {
-#             "url": url,
-#             "done": t.task.done(),
-#             "cancelled": t.task.cancelled(),
-#             "exception": (repr(t.task.exception())
-#                           if t.task.done() and not t.task.cancelled()
-#                           else None),
-#         }
-#         for url, t in app.state.ws_listeners.items()
-#     ]
 
-# @app.post("/ws/listeners")
-# async def ws_add(req: WSAddReq):
-#     await _start_ws(app, str(req.url))
-#     return {"added": str(req.url)}
 
-# @app.delete("/ws/listeners")
-# async def ws_del(req: WSAddReq):
-#     ok = await _stop_ws(app, str(req.url))
-#     if not ok:
-#         raise HTTPException(404, "listener not found")
-#     return {"removed": str(req.url)}
+# ============================================================
+# NEW: Diagnostic endpoints for WebSocket integration
+# ============================================================
+@r_state.get("/ws/stats")
+async def ws_stats():
+    """Return stats about WebSocket event processing."""
+    queue_size = app.state.ws_queue.qsize()
+    store_stats = app.state.workload.store.snapshot_stats()
+
+    return {
+        "queue_size": queue_size,
+        "queue_maxsize": app.state.ws_queue.maxsize,
+        "validations_by_source": store_stats.get("validated_by_source", {}),
+        "recent_validations_count": store_stats.get("recent_validations", 0),
+    }
 
 
 app.include_router(r_accounts)
@@ -326,57 +364,3 @@ app.include_router(r_pay)
 app.include_router(r_transaction, prefix="/transaction")
 app.include_router(r_transaction, prefix="/txn", include_in_schema=False)  # alias /txn/ because I'm sick of typing...
 app.include_router(r_state)
-
-# @app.get("/validator/{n}", response=HTMLResponse)
-# async def validator_state(n):
-#     vstate = app.state.workload.validator_state(n)
-#     vtmpl = Template(filename="templates/validator_layout.html.mako"))
-#     v = vtmpl.render(vstate)
-#     return v.render_unicode()
-
-# from mako.template import Template
-# @app.get("/", response=HTMLResponse)
-# async def home():
-#     template = mylookup.get_template('templates/')
-#     return template.render_unicode('validator.html')
-
-# templates = Jinja2Templates(directory="templates")
-
-
-
-# from pathlib import Path
-# BASE_DIR = Path(__file__).resolve().parent
-# templates = Jinja2Templates(directory=BASE_DIR / "templates")
-# # templates = Jinja2Templates(directory="workload/src/workload/templates")
-# @app.get("/val{n}", response_class=HTMLResponse)
-# async def val_n(n: int, request: Request):
-#     val_url = await app.state.workload.validator_state(n)
-
-#     return templates.TemplateResponse(
-#         request=request, name="val.html.jinja", context={"val": n}
-#     )
-#     return templates.TemplateResponse("val.html.jinja", data)
-
-# @app.get("/server_info/{n}")
-# async def server_info(n):
-#     log.info(f"got request for {n}")
-#     async with httpx.AsyncClient(timeout=10) as c:
-#         url = await app.state.workload.validator_state(n)
-#         log.info(f"Hitting val{n} at {url}")
-#         r = await c.post(url, json={"method": "server_info"})
-#     log.info("got request!")
-#     r.raise_for_status()
-#     return r.json()
-
-# from pathlib import Path
-# @app.get("/val", response_class=HTMLResponse)
-# async def val():
-#     vf = Path(__file__).parent / 'templates/validator.html'
-#     return vf.read_text()
-#     return templates.TemplateResponse("some-file.html",
-#           {
-#               "request": request,
-#                // pass your variables to HTML template here
-#               "my_variable": my_variable
-#           }
-# )
