@@ -39,13 +39,11 @@ include = [
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-select = [
-    "ANN201", # methods must have return types
-]
 exclude = [
     ".git",
 ]
 lint.select = [
+    "ANN201", # methods must have return types
     "B",
     "E",
     "F",
