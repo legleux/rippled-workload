@@ -4,6 +4,7 @@ import logging
 import contextlib
 from time import perf_counter
 from fastapi import FastAPI, APIRouter
+from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 import httpx
 from pydantic import BaseModel, PositiveInt
@@ -134,6 +135,28 @@ async def lifespan(app: FastAPI):
     app.state.stop = stop
 
     # ============================================================
+    # Initialize heartbeat destination - just a random throwaway account
+    # ============================================================
+    log.info("Creating heartbeat destination account...")
+    from xrpl.wallet import Wallet
+
+    # Create dedicated heartbeat wallet (sender) to avoid sequence conflicts with funding_wallet
+    # This wallet will ONLY be used for heartbeat transactions (1 per ledger)
+    heartbeat_wallet = Wallet.create()
+    app.state.workload.heartbeat_wallet = heartbeat_wallet
+
+    # Create heartbeat destination (receiver)
+    heartbeat_dest = Wallet.create()
+    app.state.workload.heartbeat_destination = heartbeat_dest.address
+
+    # Fund both heartbeat wallet and destination
+    # Heartbeat wallet needs more funds since it sends ~1 txn per ledger
+    heartbeat_funding = str(int(C.DEFAULT_CREATE_AMOUNT) * 100)  # 100x for many heartbeats
+    await app.state.workload._ensure_funded(heartbeat_wallet, heartbeat_funding)
+    await app.state.workload._ensure_funded(heartbeat_dest, str(C.DEFAULT_CREATE_AMOUNT))
+    log.info(f"✓ Heartbeat destination created: {heartbeat_dest.address[:8]}... - ready for heartbeats!")
+
+    # ============================================================
     # Create WebSocket event queue then start the background tasks
     # ============================================================
     app.state.ws_queue = asyncio.Queue(maxsize=1000) # TODO: Constant
@@ -143,31 +166,30 @@ async def lifespan(app: FastAPI):
     async with asyncio.TaskGroup() as tg:
         app.state.tg = tg
 
-        # Finality checker via RPC polling
+        # WebSocket listener - handles ledger close events (for heartbeat) and tx validations
+        tg.create_task(
+            ws_listener(
+                app.state.stop,
+                WS,
+                app.state.ws_queue,
+                accounts_provider=app.state.workload.get_all_account_addresses
+            ),
+            name="ws_listener"
+        )
+
+        # WebSocket event processor - submits heartbeat on every ledger close
+        tg.create_task(
+            process_ws_events(app.state.workload, app.state.ws_queue, app.state.stop),
+            name="ws_processor"
+        )
+
+        # Finality checker via RPC polling (backup to WS validation)
         tg.create_task(
             periodic_finality_check(app.state.workload, app.state.stop, check_interval),
             name="finality_checker"
         )
-        # using polling only for now
-        # ============================================================
-        # WebSocket listener
-        # ============================================================
-        # tg.create_task(
-        #     ws_listener(
-        #         app.state.stop,
-        #         WS,
-        #         app.state.ws_queue,
-        #         accounts_provider=app.state.workload.get_all_account_addresses
-        #     ),
-        #     name="ws_listener"
-        # )
-        #
-        # tg.create_task(
-        #     process_ws_events(app.state.workload, app.state.ws_queue, app.state.stop),
-        #     name="ws_processor"
-        # )
 
-        log.info("Background tasks started: finality_checker (polling only), state_monitor (every 10s)")
+        log.info("Background tasks started: 💓 ws_listener (heartbeat + validation), ws_processor, finality_checker")
 
         # No WS listener, no need to wait
         # await asyncio.sleep(2)
@@ -189,7 +211,7 @@ async def lifespan(app: FastAPI):
             gw, u = cfg["gateways"], cfg["users"]
             log.info("No persisted state found. Initializing participants (gateways=%s, users=%s)...", gw, u)
             init_result = await app.state.workload.init_participants(gateway_cfg=gw, user_cfg=u)
-            app.state.workload.update_txn_context()  # refresh ctx with our brand new users and gateways
+            app.state.workload.update_txn_context()
             log.info("Accounts initialized: %s gateways, %s users.", len(init_result["gateways"]), len(init_result["users"]))
 
         # Signal setup is complete and fuzzing can begin
@@ -376,6 +398,69 @@ async def create(transaction: str):
     r = await w.create_transaction(transaction)
     return r
 
+
+# Explicit endpoints for each transaction type (all call the generic create function)
+
+@r_transaction.post("/payment")
+async def create_payment():
+    """Create and submit a Payment transaction."""
+    return await create("Payment")
+
+
+@r_transaction.post("/trustset")
+async def create_trustset():
+    """Create and submit a TrustSet transaction."""
+    return await create("TrustSet")
+
+
+@r_transaction.post("/accountset")
+async def create_accountset():
+    """Create and submit an AccountSet transaction."""
+    return await create("AccountSet")
+
+
+@r_transaction.post("/ammcreate")
+async def create_ammcreate():
+    """Create and submit an AMMCreate transaction."""
+    return await create("AMMCreate")
+
+
+@r_transaction.post("/nftokenmint")
+async def create_nftokenmint():
+    """Create and submit an NFTokenMint transaction."""
+    return await create("NFTokenMint")
+
+
+@r_transaction.post("/mptokenissuancecreate")
+async def create_mptokenissuancecreate():
+    """Create and submit an MPTokenIssuanceCreate transaction."""
+    return await create("MPTokenIssuanceCreate")
+
+
+@r_transaction.post("/mptokenissuanceset")
+async def create_mptokenissuanceset():
+    """Create and submit an MPTokenIssuanceSet transaction."""
+    return await create("MPTokenIssuanceSet")
+
+
+@r_transaction.post("/mptokenauthorize")
+async def create_mptokenauthorize():
+    """Create and submit an MPTokenAuthorize transaction."""
+    return await create("MPTokenAuthorize")
+
+
+@r_transaction.post("/mptokenissuancedestroy")
+async def create_mptokenissuancedestroy():
+    """Create and submit an MPTokenIssuanceDestroy transaction."""
+    return await create("MPTokenIssuanceDestroy")
+
+
+@r_transaction.post("/batch")
+async def create_batch():
+    """Create and submit a Batch transaction."""
+    return await create("Batch")
+
+
 @app.post("/debug/fund")
 async def debug_fund(dest: str):
     """Manually fund an address from the workload's configured `funding_account` and return the unvalidated result."""
@@ -399,6 +484,195 @@ async def debug_fund(dest: str):
 @r_state.get("/summary")
 async def state_summary():
     return app.state.workload.snapshot_stats()
+
+
+@r_state.get("/dashboard", response_class=HTMLResponse)
+async def state_dashboard():
+    """HTML dashboard with live stats and visual progress bars."""
+    stats = app.state.workload.snapshot_stats()
+    failed_data = app.state.workload.snapshot_failed()
+
+    total = stats.get("total_tracked", 0)
+    by_state = stats.get("by_state", {})
+
+    validated = by_state.get("VALIDATED", 0)
+    rejected = by_state.get("REJECTED", 0)
+    submitted = by_state.get("SUBMITTED", 0)
+    created = by_state.get("CREATED", 0)
+    retryable = by_state.get("RETRYABLE", 0)
+    expired = by_state.get("EXPIRED", 0)
+
+    # Calculate percentages
+    val_pct = (validated / total * 100) if total > 0 else 0
+    rej_pct = (rejected / total * 100) if total > 0 else 0
+
+    # Group failures by result
+    failures_by_result = {}
+    for failed in failed_data:
+        result = failed.get("engine_result_first", "unknown")
+        failures_by_result[result] = failures_by_result.get(result, 0) + 1
+
+    # Sort failures by count
+    top_failures = sorted(failures_by_result.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Workload Dashboard</title>
+        <meta http-equiv="refresh" content="3">
+        <style>
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: #0d1117;
+                color: #c9d1d9;
+                margin: 0;
+                padding: 20px;
+            }}
+            .container {{
+                max-width: 1200px;
+                margin: 0 auto;
+            }}
+            h1 {{
+                color: #58a6ff;
+                margin-bottom: 10px;
+            }}
+            .subtitle {{
+                color: #8b949e;
+                margin-bottom: 30px;
+            }}
+            .stats-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 20px;
+                margin-bottom: 30px;
+            }}
+            .stat-card {{
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 20px;
+            }}
+            .stat-label {{
+                color: #8b949e;
+                font-size: 12px;
+                text-transform: uppercase;
+                margin-bottom: 8px;
+            }}
+            .stat-value {{
+                font-size: 32px;
+                font-weight: bold;
+                margin-bottom: 4px;
+            }}
+            .stat-value.success {{ color: #3fb950; }}
+            .stat-value.error {{ color: #f85149; }}
+            .stat-value.warning {{ color: #d29922; }}
+            .stat-value.info {{ color: #58a6ff; }}
+            .stat-percentage {{
+                color: #8b949e;
+                font-size: 14px;
+            }}
+            .progress-bar {{
+                background: #21262d;
+                border-radius: 6px;
+                height: 8px;
+                overflow: hidden;
+                margin-top: 8px;
+            }}
+            .progress-fill {{
+                height: 100%;
+                transition: width 0.3s ease;
+            }}
+            .progress-fill.success {{ background: #3fb950; }}
+            .progress-fill.error {{ background: #f85149; }}
+            .failures-table {{
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 20px;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+            }}
+            th, td {{
+                text-align: left;
+                padding: 12px;
+                border-bottom: 1px solid #21262d;
+            }}
+            th {{
+                color: #8b949e;
+                font-weight: 600;
+                font-size: 12px;
+                text-transform: uppercase;
+            }}
+            tr:last-child td {{
+                border-bottom: none;
+            }}
+            .badge {{
+                display: inline-block;
+                padding: 2px 8px;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            .badge.error {{ background: #f851491a; color: #f85149; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🚀 Workload Dashboard</h1>
+            <div class="subtitle">Live monitoring • Auto-refresh every 3s</div>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Total Transactions</div>
+                    <div class="stat-value info">{total:,}</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Validated</div>
+                    <div class="stat-value success">{validated:,}</div>
+                    <div class="stat-percentage">{val_pct:.1f}%</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill success" style="width: {val_pct}%"></div>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Rejected</div>
+                    <div class="stat-value error">{rejected:,}</div>
+                    <div class="stat-percentage">{rej_pct:.1f}%</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill error" style="width: {rej_pct}%"></div>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">In-Flight</div>
+                    <div class="stat-value warning">{submitted + created:,}</div>
+                    <div class="stat-percentage">Submitted: {submitted} | Created: {created}</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Retryable</div>
+                    <div class="stat-value warning">{retryable:,}</div>
+                    <div class="stat-percentage">terPRE_SEQ waiting</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Expired</div>
+                    <div class="stat-value">{expired:,}</div>
+                </div>
+            </div>
+
+            {"<div class='failures-table'><h2>Top Failures</h2><table><thead><tr><th>Error Code</th><th>Count</th></tr></thead><tbody>" + "".join(f"<tr><td><span class='badge error'>{result}</span></td><td>{count:,}</td></tr>" for result, count in top_failures) + "</tbody></table></div>" if top_failures else ""}
+        </div>
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(content=html_content)
 
 
 @r_state.get("/pending")
@@ -446,6 +720,25 @@ async def state_validations(limit: int = 100):
     """
     vals = list(app.state.workload.store.validations)[-limit:]
     return [{"txn": v.txn, "ledger": v.seq, "source": v.src} for v in reversed(vals)]
+
+
+@r_state.get("/heartbeat")
+async def state_heartbeat():
+    """
+    Return heartbeat status - our canary for ledger health.
+
+    We should see exactly ONE heartbeat transaction per ledger.
+    Missing heartbeats indicate network issues, WS disconnection, or other problems.
+
+    Returns:
+        - last_heartbeat_ledger: Most recent ledger where heartbeat was attempted
+        - total_heartbeats: Total number of heartbeats submitted
+        - missed_heartbeats: Ledger indices where heartbeat failed
+        - missed_count: Total number of missed heartbeats
+        - recent_heartbeats: Last 20 heartbeat attempts with status
+    """
+    return app.state.workload.snapshot_heartbeat()
+
 
 @r_state.get("/wallets")
 def api_state_wallets():
@@ -521,11 +814,11 @@ async def check_finality():
 
     for p in wl.find_by_state(C.TxState.SUBMITTED):
         try:
-            state, ledger_index = await wl.check_finality(p)
+            state = await wl.check_finality(p)
             results.append({
                 "tx_hash": p.tx_hash,
                 "state": state.name,
-                "ledger_index": ledger_index,
+                "ledger_index": p.validated_ledger,  # Get from PendingTx object
             })
         except Exception as e:
             results.append({
@@ -588,23 +881,45 @@ async def continuous_workload():
                     log.error(f"Failed to create new account: {e}")
                     workload_stats["failed"] += 1
 
-            batch_size = max(10, ledger_size // 2)
-            log.info(f"📊 Expected ledger size: {ledger_size} - submitting {batch_size} txns (throttled to avoid queue overflow)")
+            batch_size = max(20, ledger_size)
+            log.info(f"📊 Expected ledger size: {ledger_size} - submitting {batch_size} txns to fill ledgers")
 
             try:
                 # Build and sign all transactions first
+                # CRITICAL: Ensure only ONE transaction per account GLOBALLY to prevent sequence conflicts
+                # Get accounts with pending transactions (SUBMITTED, RETRYABLE, or CREATED)
+                accounts_with_pending = wl.get_accounts_with_pending_txns()
+
                 pending_txns = []
+                accounts_in_batch = set()  # Track which accounts already have txns in this batch
                 build_errors = 0
-                for i in range(batch_size):
+                attempts = 0
+                max_attempts = batch_size * 10  # Allow more retries to find available accounts
+
+                while len(pending_txns) < batch_size and attempts < max_attempts:
                     if workload_stop_event.is_set():
                         break
+                    attempts += 1
+
                     try:
                         # Generate transaction and prepare it
                         txn = await generate_txn(wl.ctx)
-                        pending = await wl.build_sign_and_track(txn, wl.wallets[txn.account])
+                        account = txn.account
+
+                        # Skip if this account already has a pending transaction ANYWHERE (not just this batch)
+                        if account in accounts_with_pending:
+                            continue
+
+                        # Skip if this account already has a transaction in this batch
+                        if account in accounts_in_batch:
+                            continue
+
+                        pending = await wl.build_sign_and_track(txn, wl.wallets[account])
                         pending_txns.append(pending)
+                        accounts_in_batch.add(account)
+                        accounts_with_pending.add(account)  # Add to pending set immediately
                     except Exception as e:
-                        log.error(f"Failed to build txn {i+1}/{batch_size}: {e}", exc_info=True)
+                        log.error(f"Failed to build txn {len(pending_txns)+1}/{batch_size}: {e}", exc_info=True)
                         build_errors += 1
                         workload_stats["failed"] += 1
 
@@ -615,22 +930,12 @@ async def continuous_workload():
                     log.error("No transactions to submit!")
                     continue
 
-                log.info(f"📤 Submitting {len(pending_txns)} transactions with throttling...")
+                log.info(f"📤 Submitting {len(pending_txns)} transactions in parallel...")
 
-                # Submit with slight throttling to avoid overwhelming the queue
-                # Submit in smaller sub-batches with delays
+                # Submit all transactions in parallel - let asyncio and network handle concurrency
                 submit_errors = 0
-                submit_tasks = []
-                SUB_BATCH_SIZE = 5  # Submit 5 at a time
-
-                for i in range(0, len(pending_txns), SUB_BATCH_SIZE):
-                    sub_batch = pending_txns[i:i+SUB_BATCH_SIZE]
-                    async with asyncio.TaskGroup() as tg:
-                        batch_tasks = [tg.create_task(wl.submit_pending(p)) for p in sub_batch]
-                        submit_tasks.extend(batch_tasks)
-                    # Small delay between sub-batches to let queue drain
-                    if i + SUB_BATCH_SIZE < len(pending_txns):
-                        await asyncio.sleep(0.1)
+                async with asyncio.TaskGroup() as tg:
+                    submit_tasks = [tg.create_task(wl.submit_pending(p)) for p in pending_txns]
 
                 # Count results
                 for task in submit_tasks:

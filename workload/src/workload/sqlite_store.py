@@ -348,10 +348,27 @@ class SQLiteStore:
             cursor = conn.execute("SELECT COUNT(*) FROM transactions")
             total = cursor.fetchone()[0]
 
+            # Count validated transactions by result code (tesSUCCESS vs tec* vs other)
+            cursor = conn.execute("""
+                SELECT
+                    CASE
+                        WHEN meta_txn_result = 'tesSUCCESS' THEN 'success'
+                        WHEN meta_txn_result LIKE 'tec%' THEN 'tec'
+                        WHEN meta_txn_result IS NOT NULL THEN 'other'
+                        ELSE 'unknown'
+                    END as result_category,
+                    COUNT(*) as count
+                FROM transactions
+                WHERE state = 'VALIDATED'
+                GROUP BY result_category
+            """)
+            validated_by_result = {row[0]: row[1] for row in cursor.fetchall()}
+
             return {
                 "by_state": dict(self.count_by_state),
                 "by_type": {},  # TODO: Implement type counting in SQLiteStore
                 "validated_by_source": dict(self.validated_by_source),
+                "validated_by_result": validated_by_result,  # New: tesSUCCESS vs tec codes
                 "total_tracked": total,
                 "recent_validations": len(self.validations),
             }

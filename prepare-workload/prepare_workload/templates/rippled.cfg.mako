@@ -158,7 +158,7 @@ MultiSign
 MultiSignReserve
 NegativeUNL
 NFTokenMintOffer
-NonFungibleTokensV1
+#NonFungibleTokensV1
 NonFungibleTokensV1_1
 PayChan
 PermissionedDEX

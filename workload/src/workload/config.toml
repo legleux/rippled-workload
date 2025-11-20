@@ -8,13 +8,13 @@ funding_seed = false
 #seed    = "snoPBrXtMeMyMHUVTgbuqAfg1SUTb"
 
 [gateways]
-number = 2
+number = 4
 default_balance = 100_000_000_000000
 require_auth = false
 default_ripple = true
 
 [users]
-number = 10
+number = 16
 default_balance = 100_000_000000
 
 [amm]

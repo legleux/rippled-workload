@@ -17,6 +17,13 @@ from xrpl.models.transactions import (
     MPTokenAuthorize,
     MPTokenIssuanceDestroy,
     NFTokenMint,
+    NFTokenBurn,
+    NFTokenCreateOffer,
+    NFTokenCancelOffer,
+    NFTokenAcceptOffer,
+    OfferCreate,
+    OfferCancel,
+    TicketCreate,
     Transaction,
     Memo,
     Payment,
@@ -55,10 +62,40 @@ class TxnContext:
     config: dict  # Full config dict from config.toml
     base_fee_drops: "AwaitInt"
     next_sequence: "AwaitSeq"
-    mptoken_issuance_ids: list[str] | None = None  # Track created MPToken issuance IDs
+    mptoken_issuance_ids: list[str] | None = None  # MPToken issuance IDs
+    amm_pools: set[frozenset[str]] | None = None  # AMM pools (asset pairs)
+    nfts: dict[str, str] | None = None  # NFTs: {nft_id: owner}
+    offers: dict[str, dict] | None = None  # Offers: {offer_id: {type, owner, ...}}
+    tickets: dict[str, set[int]] | None = None  # Tickets: {account: {ticket_seq, ...}}
+    balances: dict[str, dict[str | tuple[str, str], float]] | None = None  # In-memory balance tracking
 
     def rand_account(self, omit: Wallet | None = None) -> "Wallet":
+        # TODO: Use random.sample() to ensure account uniqueness when selecting multiple accounts
+        # for a single transaction (e.g., src/dest pairs). Current implementation can select the
+        # same account for both roles, causing validation errors like "Must not be equal to the account".
+        # Individual transaction types also need validation to ensure account pairs are viable
+        # (e.g., for offers, check if src actually possesses the asset being offered).
         return choice_omit(self.wallets, omit=[omit] if omit else [])
+
+    def get_account_currencies(self, account: "Wallet") -> list[IssuedCurrency]:
+        """Get list of IOU currencies this account has a non-zero balance of.
+
+        Returns currencies the account can actually send (has positive balance).
+        Useful for avoiding tecPATH_DRY errors.
+        """
+        if not self.balances or account.address not in self.balances:
+            return []
+
+        account_balances = self.balances[account.address]
+        currencies_with_balance = []
+
+        for key, balance in account_balances.items():
+            # Skip XRP, only return IOUs
+            if isinstance(key, tuple) and balance > 0:
+                currency_code, issuer = key
+                currencies_with_balance.append(IssuedCurrency(currency=currency_code, issuer=issuer))
+
+        return currencies_with_balance
 
     def rand_currency(self) -> IssuedCurrency:
         if not self.currencies:
@@ -70,6 +107,22 @@ class TxnContext:
         if not self.mptoken_issuance_ids:
             raise RuntimeError("No MPToken issuance IDs available")
         return choice(self.mptoken_issuance_ids)
+
+    def _asset_id(self, amount: str | dict) -> str:
+        """Convert an Amount (XRP drops or IOU) to a unique asset identifier."""
+        if isinstance(amount, str):
+            return "XRP"
+        else:
+            return f"{amount['currency']}.{amount['issuer']}"
+
+    def amm_pool_exists(self, asset1: str | dict, asset2: str | dict) -> bool:
+        """Check if an AMM pool for this asset pair already exists."""
+        if not self.amm_pools:
+            return False
+        id1 = self._asset_id(asset1)
+        id2 = self._asset_id(asset2)
+        pool_id = frozenset([id1, id2])
+        return pool_id in self.amm_pools
 
     def derive(self, **overrides) -> "TxnContext":
         return replace(self, **overrides)
@@ -147,13 +200,28 @@ def _build_payment(ctx: TxnContext) -> dict:
         # Send XRP (in drops)
         amount = str(ctx.config["transactions"]["payment"]["amount"])
     else:
-        # Send issued currency
-        currency = ctx.rand_currency()
-        amount = {
-            "currency": currency.currency,
-            "issuer": currency.issuer,
-            "value": "100",  # 100 units of the currency
-        }
+        # Send issued currency using in-memory balance tracking
+        # Get currencies this account actually has (non-zero balance)
+        available_currencies = ctx.get_account_currencies(src)
+
+        # If sender is an issuer, they can also send their own currency (infinite balance)
+        issuer_currencies = [c for c in ctx.currencies if c.issuer == src.address]
+
+        # Combine: currencies with balance + currencies they issue
+        sendable_currencies = list(set(available_currencies + issuer_currencies))
+
+        if sendable_currencies:
+            # Pick a random currency they can send
+            currency = choice(sendable_currencies)
+            amount = {
+                "currency": currency.currency,
+                "issuer": currency.issuer,
+                "value": "100",  # 100 units of the currency
+            }
+        else:
+            # No IOUs available - send XRP instead
+            # This happens early before cascade distribution completes
+            amount = str(ctx.config["transactions"]["payment"]["amount"])
 
     result = {
         "TransactionType": "Payment",
@@ -183,6 +251,90 @@ def _build_trustset(ctx: TxnContext) -> dict:
     return result
 
 
+def _build_offer_create(ctx: TxnContext) -> dict:
+    """Build an OfferCreate transaction to trade currencies on the DEX.
+
+    Creates offers to exchange XRP/IOU or IOU/IOU pairs.
+    """
+    from random import random
+
+    src = ctx.rand_account()
+
+    # Randomly choose offer type: XRP/IOU or IOU/IOU
+    use_xrp = random() < 0.5
+
+    if use_xrp or not ctx.currencies:
+        # XRP <-> IOU offer
+        currency = ctx.rand_currency() if ctx.currencies else None
+        if currency:
+            if random() < 0.5:
+                # Sell XRP for IOU (TakerPays=XRP, TakerGets=IOU)
+                taker_pays = str(randrange(1_000_000, 100_000_000))  # XRP in drops
+                taker_gets = {
+                    "currency": currency.currency,
+                    "issuer": currency.issuer,
+                    "value": str(randrange(10, 1000)),
+                }
+            else:
+                # Buy XRP with IOU (TakerPays=IOU, TakerGets=XRP)
+                taker_pays = {
+                    "currency": currency.currency,
+                    "issuer": currency.issuer,
+                    "value": str(randrange(10, 1000)),
+                }
+                taker_gets = str(randrange(1_000_000, 100_000_000))  # XRP in drops
+        else:
+            # Fallback: XRP self-trade (will fail, but better than crashing)
+            taker_pays = str(randrange(1_000_000, 100_000_000))
+            taker_gets = str(randrange(1_000_000, 100_000_000))
+    else:
+        # IOU <-> IOU offer
+        if len(ctx.currencies) >= 2:
+            cur1, cur2 = sample(ctx.currencies, 2)
+        else:
+            cur1 = cur2 = ctx.rand_currency()
+
+        taker_pays = {
+            "currency": cur1.currency,
+            "issuer": cur1.issuer,
+            "value": str(randrange(10, 1000)),
+        }
+        taker_gets = {
+            "currency": cur2.currency,
+            "issuer": cur2.issuer,
+            "value": str(randrange(10, 1000)),
+        }
+
+    return {
+        "TransactionType": "OfferCreate",
+        "Account": src.address,
+        "TakerPays": taker_pays,
+        "TakerGets": taker_gets,
+    }
+
+
+def _build_offer_cancel(ctx: TxnContext) -> dict:
+    """Build an OfferCancel transaction to cancel an existing offer.
+
+    Requires at least one IOU offer to exist in tracking.
+    """
+    if not ctx.offers:
+        raise RuntimeError("No offers available to cancel")
+
+    # Filter for IOU offers only (not NFT offers)
+    iou_offers = {k: v for k, v in ctx.offers.items() if v.get("type") == "IOUOffer"}
+    if not iou_offers:
+        raise RuntimeError("No IOU offers available to cancel")
+
+    offer_id, offer_data = choice(list(iou_offers.items()))
+
+    return {
+        "TransactionType": "OfferCancel",
+        "Account": offer_data["owner"],
+        "OfferSequence": offer_data["sequence"],  # Sequence number when offer was created
+    }
+
+
 def _build_accountset(ctx: TxnContext) -> dict:
     """Build an AccountSet transaction with random account."""
     src = ctx.rand_account()
@@ -202,6 +354,150 @@ def _build_nftoken_mint(ctx: TxnContext) -> dict:
         "Account": src.address,
         "NFTokenTaxon": 0,
         "memos": [memo],
+    }
+
+
+def _build_nftoken_burn(ctx: TxnContext) -> dict:
+    """Build an NFTokenBurn transaction to burn a random NFT.
+
+    Requires at least one NFT to exist in tracking.
+    """
+    # Get a random NFT from tracked NFTs
+    if not ctx.nfts:
+        raise RuntimeError("No NFTs available to burn")
+
+    nft_id, owner = choice(list(ctx.nfts.items()))
+
+    return {
+        "TransactionType": "NFTokenBurn",
+        "Account": owner,
+        "NFTokenID": nft_id,
+    }
+
+
+def _build_nftoken_create_offer(ctx: TxnContext) -> dict:
+    """Build an NFTokenCreateOffer transaction to create a sell or buy offer.
+
+    Randomly creates either:
+    - Sell offer: owner offers to sell their NFT
+    - Buy offer: non-owner offers to buy someone's NFT
+    """
+    from random import random
+
+    # 50/50 chance of sell vs buy offer
+    is_sell_offer = random() < 0.5
+
+    if is_sell_offer:
+        # Sell offer: owner must create, set tfSellNFToken flag
+        if not ctx.nfts:
+            raise RuntimeError("No NFTs available to create sell offer")
+
+        nft_id, owner = choice(list(ctx.nfts.items()))
+
+        return {
+            "TransactionType": "NFTokenCreateOffer",
+            "Account": owner,
+            "NFTokenID": nft_id,
+            "Amount": str(randrange(1_000_000, 100_000_000)),  # 1-100 XRP in drops
+            "Flags": 1,  # tfSellNFToken flag
+        }
+    else:
+        # Buy offer: any account can create for any NFT
+        if not ctx.nfts:
+            raise RuntimeError("No NFTs available to create buy offer")
+
+        nft_id, _owner = choice(list(ctx.nfts.items()))
+        buyer = ctx.rand_account()
+
+        return {
+            "TransactionType": "NFTokenCreateOffer",
+            "Account": buyer.address,
+            "NFTokenID": nft_id,
+            "Amount": str(randrange(1_000_000, 100_000_000)),  # 1-100 XRP in drops
+            "Owner": _owner,  # Owner of the NFT (required for buy offers)
+        }
+
+
+def _build_nftoken_cancel_offer(ctx: TxnContext) -> dict:
+    """Build an NFTokenCancelOffer transaction to cancel an existing offer.
+
+    Requires at least one NFT offer to exist in tracking.
+    """
+    if not ctx.offers:
+        raise RuntimeError("No NFT offers available to cancel")
+
+    # Filter for NFT offers only
+    nft_offers = {k: v for k, v in ctx.offers.items() if v.get("type") == "NFTokenOffer"}
+    if not nft_offers:
+        raise RuntimeError("No NFT offers available to cancel")
+
+    offer_id, offer_data = choice(list(nft_offers.items()))
+
+    return {
+        "TransactionType": "NFTokenCancelOffer",
+        "Account": offer_data["owner"],
+        "NFTokenOffers": [offer_id],  # Can cancel multiple offers in one txn
+    }
+
+
+def _build_nftoken_accept_offer(ctx: TxnContext) -> dict:
+    """Build an NFTokenAcceptOffer transaction to accept an existing offer.
+
+    Requires at least one NFT offer to exist in tracking.
+    """
+    if not ctx.offers:
+        raise RuntimeError("No NFT offers available to accept")
+
+    # Filter for NFT offers only
+    nft_offers = {k: v for k, v in ctx.offers.items() if v.get("type") == "NFTokenOffer"}
+    if not nft_offers:
+        raise RuntimeError("No NFT offers available to accept")
+
+    offer_id, offer_data = choice(list(nft_offers.items()))
+
+    # Determine who can accept based on offer type
+    if offer_data.get("is_sell_offer"):
+        # Sell offer: anyone (except owner) can accept
+        acceptor = ctx.rand_account()
+        return {
+            "TransactionType": "NFTokenAcceptOffer",
+            "Account": acceptor.address,
+            "NFTokenSellOffer": offer_id,
+        }
+    else:
+        # Buy offer: owner must accept
+        nft_id = offer_data.get("nft_id")
+        if nft_id and nft_id in (ctx.nfts or {}):
+            owner = ctx.nfts[nft_id]
+            return {
+                "TransactionType": "NFTokenAcceptOffer",
+                "Account": owner,
+                "NFTokenBuyOffer": offer_id,
+            }
+        else:
+            # Fallback if NFT not tracked: any account can try
+            acceptor = ctx.rand_account()
+            return {
+                "TransactionType": "NFTokenAcceptOffer",
+                "Account": acceptor.address,
+                "NFTokenBuyOffer": offer_id,
+            }
+
+
+def _build_ticket_create(ctx: TxnContext) -> dict:
+    """Build a TicketCreate transaction to create tickets for an account.
+
+    Tickets allow transactions to be submitted out of sequence order.
+    """
+    src = ctx.rand_account()
+
+    # Create 1-10 tickets at a time
+    ticket_count = randrange(1, 11)
+
+    return {
+        "TransactionType": "TicketCreate",
+        "Account": src.address,
+        "TicketCount": ticket_count,
     }
 
 
@@ -365,20 +661,40 @@ def _build_amm_create(ctx: TxnContext) -> dict:
     NOTE: Fee will be set to owner_reserve in build_sign_and_track based on TransactionType.
     """
     src = ctx.rand_account()
-    currency = ctx.rand_currency()
 
-    # AMM needs two assets - one XRP, one issued currency
-    # Use values from config, but allow overrides
+    # AMM needs two assets - try to find a pair that doesn't already exist
+    # Try up to 10 times to find an unused currency pair
+    max_attempts = 10
+    amount_xrp = "1000000000"  # 1000 XRP (in drops)
+
+    for attempt in range(max_attempts):
+        currency = ctx.rand_currency()
+        amount_iou = {
+            "currency": currency.currency,
+            "issuer": currency.issuer,
+            "value": str(ctx.config["amm"]["default_amm_token_deposit"]),
+        }
+
+        # Check if this AMM pool already exists
+        if not ctx.amm_pool_exists(amount_xrp, amount_iou):
+            # Found an unused pair!
+            return {
+                "TransactionType": "AMMCreate",
+                "Account": src.address,
+                "Amount": amount_xrp,
+                "Amount2": amount_iou,
+                "TradingFee": ctx.config["amm"]["trading_fee"],  # From config
+                # NOTE: Do NOT set Fee here - it must equal owner_reserve, which is set in build_sign_and_track
+            }
+
+    # If we couldn't find an unused pair after max_attempts, just return the last one
+    # (it will fail with tem error, but that's better than not generating any transaction)
     return {
         "TransactionType": "AMMCreate",
         "Account": src.address,
-        "Amount": "1000000000",  # 1000 XRP (in drops) - can be overridden
-        "Amount2": {
-            "currency": currency.currency,
-            "issuer": currency.issuer,
-            "value": str(ctx.config["amm"]["default_amm_token_deposit"]),  # From config
-        },
-        "TradingFee": ctx.config["amm"]["trading_fee"],  # From config
+        "Amount": amount_xrp,
+        "Amount2": amount_iou,
+        "TradingFee": ctx.config["amm"]["trading_fee"],
         # NOTE: Do NOT set Fee here - it must equal owner_reserve, which is set in build_sign_and_track
     }
 
@@ -394,8 +710,15 @@ def _build_amm_create(ctx: TxnContext) -> dict:
 _BUILDERS: dict[str, tuple[Callable[[TxnContext], dict], type[Transaction]]] = {
     "Payment": (_build_payment, Payment),
     "TrustSet": (_build_trustset, TrustSet),
+    "OfferCreate": (_build_offer_create, OfferCreate),
+    "OfferCancel": (_build_offer_cancel, OfferCancel),
     "AccountSet": (_build_accountset, AccountSet),
     "NFTokenMint": (_build_nftoken_mint, NFTokenMint),
+    "NFTokenBurn": (_build_nftoken_burn, NFTokenBurn),
+    "NFTokenCreateOffer": (_build_nftoken_create_offer, NFTokenCreateOffer),
+    "NFTokenCancelOffer": (_build_nftoken_cancel_offer, NFTokenCancelOffer),
+    "NFTokenAcceptOffer": (_build_nftoken_accept_offer, NFTokenAcceptOffer),
+    "TicketCreate": (_build_ticket_create, TicketCreate),
     "MPTokenIssuanceCreate": (_build_mptoken_issuance_create, MPTokenIssuanceCreate),
     "MPTokenIssuanceSet": (_build_mptoken_issuance_set, MPTokenIssuanceSet),
     "MPTokenAuthorize": (_build_mptoken_authorize, MPTokenAuthorize),
@@ -445,6 +768,30 @@ async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides
         if not ctx.mptoken_issuance_ids:
             configured_types = [t for t in configured_types if t not in requires_mpt_id]
             log.debug("No MPToken IDs available, excluding: %s", requires_mpt_id)
+
+        # NFT types that require existing NFTs
+        requires_nfts = {"NFTokenBurn", "NFTokenCreateOffer"}
+
+        # Filter out NFT types that need NFTs if none are available
+        if not ctx.nfts:
+            configured_types = [t for t in configured_types if t not in requires_nfts]
+            log.debug("No NFTs available, excluding: %s", requires_nfts)
+
+        # NFT offer types that require existing offers
+        requires_nft_offers = {"NFTokenCancelOffer", "NFTokenAcceptOffer"}
+
+        # Filter out NFT offer types if no NFT offers are available
+        if not ctx.offers or not any(v.get("type") == "NFTokenOffer" for v in (ctx.offers or {}).values()):
+            configured_types = [t for t in configured_types if t not in requires_nft_offers]
+            log.debug("No NFT offers available, excluding: %s", requires_nft_offers)
+
+        # IOU offer types that require existing IOU offers
+        requires_iou_offers = {"OfferCancel"}
+
+        # Filter out IOU offer types if no IOU offers are available
+        if not ctx.offers or not any(v.get("type") == "IOUOffer" for v in (ctx.offers or {}).values()):
+            configured_types = [t for t in configured_types if t not in requires_iou_offers]
+            log.debug("No IOU offers available, excluding: %s", requires_iou_offers)
 
         if not configured_types:
             raise RuntimeError("No transaction types available to generate")

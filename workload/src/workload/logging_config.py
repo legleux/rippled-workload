@@ -3,7 +3,7 @@ import logging.config
 import os
 import sys
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING").upper()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 LOGGING_CONFIG = {
     "version": 1,
@@ -20,34 +20,40 @@ LOGGING_CONFIG = {
             "formatter": "default",
             "stream": sys.stdout,
         },
+        "file": {
+            "class": "logging.FileHandler",
+            "formatter": "default",
+            "filename": "/tmp/workload.log",
+            "mode": "a",
+        },
     },
     "loggers": {
         "workload": {
             "level": LOG_LEVEL,
-            "handlers": ["console"],
+            "handlers": ["console", "file"],
             "propagate": False, # Don't pass 'workload' logs up to the root logger
         },
         # Shut the log levels for libraries up
         "fastapi": {
             "level": "INFO",
-            "handlers": ["console"],
+            "handlers": ["console", "file"],
             "propagate": False,
         },
         "uvicorn.access": {
              "level": "WARNING", # Quiets the noisy access logs
-             "handlers": ["console"],
+             "handlers": ["console", "file"],
              "propagate": False,
         },
         "xrpl": {
             "level": "WARNING", # Only show warnings/errors from xrpl-py
-            "handlers": ["console"],
+            "handlers": ["console", "file"],
             "propagate": False,
         }
     },
     # Default for all other loggers
     "root": {
         "level": "WARNING",
-        "handlers": ["console"],
+        "handlers": ["console", "file"],
     },
 }
 

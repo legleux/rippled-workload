@@ -174,6 +174,8 @@ async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
     - Ledgers contain transactions at least sometimes (workload is functioning)
     - Network is processing submitted transactions
 
+    Also submits heartbeat transaction for this ledger.
+
     Message structure:
     {
         "type": "ledgerClosed",
@@ -187,6 +189,12 @@ async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
     ledger_hash = msg.get("ledger_hash")
 
     log.debug("Ledger %s closed (hash: %s)", ledger_index, ledger_hash)
+
+    # Submit heartbeat for this ledger - our canary!
+    try:
+        await workload.submit_heartbeat(ledger_index)
+    except Exception as e:
+        log.error("Failed to submit heartbeat for ledger %s: %s", ledger_index, e)
 
     # Fetch ledger to get transaction count for Antithesis assertions
     try:

@@ -10,6 +10,9 @@ genesis_account: Final = {
 
 GENESIS = genesis_account
 
+# Black hole account - doesn't need to be created, can receive but not send
+ACCOUNT_ZERO: Final = "rrrrrrrrrrrrrrrrrrrrrhoLvTp"
+
 class TxType(StrEnum):
     ACCOUNT_SET                = "AccountSet"
     AMM_CREATE                 = "AMMCreate"
@@ -19,6 +22,13 @@ class TxType(StrEnum):
     MPTOKEN_AUTHORIZE          = "MPTokenAuthorize"
     MPTOKEN_ISSUANCE_DESTROY   = "MPTokenIssuanceDestroy"
     NFTOKEN_MINT               = "NFTokenMint"
+    NFTOKEN_BURN               = "NFTokenBurn"
+    NFTOKEN_CREATE_OFFER       = "NFTokenCreateOffer"
+    NFTOKEN_CANCEL_OFFER       = "NFTokenCancelOffer"
+    NFTOKEN_ACCEPT_OFFER       = "NFTokenAcceptOffer"
+    OFFER_CREATE               = "OfferCreate"
+    OFFER_CANCEL               = "OfferCancel"
+    TICKET_CREATE              = "TicketCreate"
     PAYMENT                    = "Payment"
     TRUSTSET                   = "TrustSet"
 
@@ -36,13 +46,15 @@ class TxState(StrEnum):
 # TODO: organize these
 DEFAULT_CREATE_AMOUNT = int(100 * 1e6)
 MAX_CREATE_AMOUNT = int(100e6 * 1e6) # alot?
-HORIZON = 10  # Transactions expire if not validated within 10 ledgers (~30-40 seconds)
+HORIZON = 15  # Transactions expire if not validated within 15 ledgers (~45-60 seconds)
 RPC_TIMEOUT = 2.0
 SUBMIT_TIMEOUT = 20
 LOCK_TIMEOUT = 2.0
 
 __all__ = [
+    "ACCOUNT_ZERO",
     "DEFAULT_CREATE_AMOUNT",
+    "GENESIS",
     "HORIZON",
     "LOCK_TIMEOUT",
     "MAX_CREATE_AMOUNT",
