@@ -47,7 +47,8 @@ class SQLiteStore:
                     algorithm TEXT NOT NULL,
                     is_gateway INTEGER DEFAULT 0,
                     is_user INTEGER DEFAULT 0,
-                    created_at REAL NOT NULL
+                    created_at REAL NOT NULL,
+                    funded_ledger_index INTEGER
                 );
 
                 -- Account records (sequence tracking)
@@ -107,6 +108,13 @@ class SQLiteStore:
                 """
             )
             conn.commit()
+
+            # Migration: Add funded_ledger_index column if it doesn't exist
+            cursor = conn.execute("PRAGMA table_info(wallets)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if 'funded_ledger_index' not in columns:
+                conn.execute("ALTER TABLE wallets ADD COLUMN funded_ledger_index INTEGER")
+                conn.commit()
             log.debug(f"SQLite database initialized at {self.db_path}")
         finally:
             conn.close()
@@ -379,7 +387,7 @@ class SQLiteStore:
     # Wallet persistence
     # =========================================================================
 
-    def save_wallet(self, wallet: Wallet, is_gateway: bool = False, is_user: bool = False) -> None:
+    def save_wallet(self, wallet: Wallet, is_gateway: bool = False, is_user: bool = False, funded_ledger_index: int | None = None) -> None:
         """Persist a wallet to database."""
         conn = sqlite3.connect(self.db_path)
         try:
@@ -390,16 +398,17 @@ class SQLiteStore:
 
             conn.execute(
                 """
-                INSERT INTO wallets (address, seed, algorithm, is_gateway, is_user, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO wallets (address, seed, algorithm, is_gateway, is_user, created_at, funded_ledger_index)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(address) DO UPDATE SET
                     is_gateway = excluded.is_gateway,
-                    is_user = excluded.is_user
+                    is_user = excluded.is_user,
+                    funded_ledger_index = COALESCE(excluded.funded_ledger_index, funded_ledger_index)
                 """,
-                (wallet.address, wallet.seed, algo, int(is_gateway), int(is_user), time.time()),
+                (wallet.address, wallet.seed, algo, int(is_gateway), int(is_user), time.time(), funded_ledger_index),
             )
             conn.commit()
-            log.debug(f"Saved wallet {wallet.address} (gateway={is_gateway}, user={is_user})")
+            log.debug(f"Saved wallet {wallet.address} (gateway={is_gateway}, user={is_user}, funded_ledger={funded_ledger_index})")
         finally:
             conn.close()
 

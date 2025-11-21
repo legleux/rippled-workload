@@ -19,7 +19,7 @@ RECONNECT_BASE = 1.0
 RECONNECT_MAX = 10.0
 
 # Event types we publish to the queue
-EventType = Literal["tx_validated", "tx_response", "ledger_closed", "raw"]
+EventType = Literal["tx_validated", "tx_response", "ledger_closed", "server_status", "raw"]
 
 
 async def ws_listener(
@@ -67,24 +67,24 @@ async def ws_listener(
                     except Exception as e:
                         log.warning(f"Failed to get accounts from provider: {e}, falling back to transaction stream")
 
-                # Subscribe to ledger stream + either specific accounts or all transactions
+                # Subscribe to ledger + server streams + either specific accounts or all transactions
                 if accounts:
                     # Efficient: subscribe only to our accounts
                     subscribe_msg = {
                         "id": 1,
                         "command": "subscribe",
-                        "streams": ["ledger"],
+                        "streams": ["ledger", "server"],
                         "accounts": accounts
                     }
-                    log.info(f"✓ Subscribing to ledger + {len(accounts)} specific accounts (efficient)")
+                    log.info(f"✓ Subscribing to ledger + server + {len(accounts)} specific accounts (efficient)")
                 else:
                     # Fallback: subscribe to all transactions (used during init before accounts exist)
                     subscribe_msg = {
                         "id": 1,
                         "command": "subscribe",
-                        "streams": ["transactions", "ledger"]
+                        "streams": ["transactions", "ledger", "server"]
                     }
-                    log.info("Subscribing to ALL transactions (fallback - will switch to accounts after init/reconnect)")
+                    log.info("Subscribing to ALL transactions + ledger + server (fallback - will switch to accounts after init/reconnect)")
 
                 await ws.send(json.dumps(subscribe_msg))
 
@@ -176,6 +176,12 @@ async def _process_message(raw_msg: str, queue: asyncio.Queue) -> None:
         ledger_idx = obj.get("ledger_index")
         log.debug("WS ledger_closed: %s", ledger_idx)
         await queue.put(("ledger_closed", obj))
+        return
+
+    # Server status notification from server stream
+    if msg_type == "serverStatus":
+        log.debug("WS server_status: load_factor=%s", obj.get("load_factor"))
+        await queue.put(("server_status", obj))
         return
 
     # Immediate submission response (has engine_result)

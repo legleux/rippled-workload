@@ -69,6 +69,9 @@ async def process_ws_events(
                 elif event_type == "ledger_closed":
                     await _handle_ledger_closed(workload, data)
 
+                elif event_type == "server_status":
+                    await _handle_server_status(workload, data)
+
                 elif event_type == "tx_response":
                     # For future: when we switch to WS submission
                     await _handle_tx_response(workload, data)
@@ -191,10 +194,11 @@ async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
     log.debug("Ledger %s closed (hash: %s)", ledger_index, ledger_hash)
 
     # Submit heartbeat for this ledger - our canary!
-    try:
-        await workload.submit_heartbeat(ledger_index)
-    except Exception as e:
-        log.error("Failed to submit heartbeat for ledger %s: %s", ledger_index, e)
+    # DISABLED: Heartbeat was buggy, holding off for now
+    # try:
+    #     await workload.submit_heartbeat(ledger_index)
+    # except Exception as e:
+    #     log.error("Failed to submit heartbeat for ledger %s: %s", ledger_index, e)
 
     # Fetch ledger to get transaction count for Antithesis assertions
     try:
@@ -276,3 +280,56 @@ async def _handle_tx_response(workload: "Workload", msg: dict) -> None:
 
     # TODO: When we switch to WS submission, this would call record_submitted()
     # For now, just log that we saw it
+
+
+async def _handle_server_status(workload: "Workload", msg: dict) -> None:
+    """Handle server status updates from the server stream.
+
+    Stores the raw message and computes human-readable fee multipliers.
+
+    Message structure:
+    {
+        "type": "serverStatus",
+        "server_status": "normal|full|busy|...",
+        "load_base": 256,
+        "load_factor": 256,
+        "load_factor_server": 256,
+        "load_factor_fee_escalation": 256,
+        "load_factor_fee_queue": 256,
+        "load_factor_fee_reference": 256,
+        ...
+    }
+    """
+    import time
+
+    # Store latest server status in workload for dashboard access
+    workload.latest_server_status = msg
+    workload.latest_server_status_time = time.time()
+
+    # Compute human-readable fee multipliers (see FeeEscalation.md:346-371)
+    load_factor = msg.get("load_factor", 256)
+    load_factor_fee_escalation = msg.get("load_factor_fee_escalation")
+    load_factor_fee_queue = msg.get("load_factor_fee_queue")
+    load_factor_fee_reference = msg.get("load_factor_fee_reference", 256)
+    server_status = msg.get("server_status", "unknown")
+
+    # Calculate multipliers
+    queue_multiplier = load_factor_fee_queue / load_factor_fee_reference if load_factor_fee_queue else 1.0
+    escalation_multiplier = load_factor_fee_escalation / load_factor_fee_reference if load_factor_fee_escalation else 1.0
+    general_load_multiplier = load_factor / 256.0
+
+    # Store computed values for dashboard
+    workload.latest_server_status_computed = {
+        "server_status": server_status,
+        "queue_fee_multiplier": queue_multiplier,
+        "open_ledger_fee_multiplier": escalation_multiplier,
+        "general_load_multiplier": general_load_multiplier,
+    }
+
+    log.debug(
+        "Server status: %s | Load: %.1fx | Queue: %.1fx | Open ledger: %.1fx",
+        server_status,
+        general_load_multiplier,
+        queue_multiplier,
+        escalation_multiplier
+    )

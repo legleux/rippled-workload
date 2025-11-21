@@ -6,7 +6,60 @@ Working on rippled-workload testing framework for Antithesis. The workload gener
 
 **Branch**: `huge-refactor`
 
+**CRITICAL BUG** (2025-11-21): Sequence number synchronization issue causing 187 transactions stuck with terPRE_SEQ errors. See `SEQUENCE_BUG_ANALYSIS.md` for detailed analysis and fix plan.
+
 ## Recent Work Completed
+
+### Session 2025-11-21: Fee Escalation and Queue Management
+
+**Implemented**:
+1. **Fee Command Integration** (workload_core.py:530-559)
+   - Created `FeeInfo` dataclass (fee_info.py)
+   - Added `get_fee_info()` method using xrpl Fee command
+   - Replaced `_expected_ledger_size()` to use fee command instead of server_info
+   - Fixed startup crash (expected_ledger_size wasn't in server_info)
+
+2. **Dynamic Fee Adjustment** (workload_core.py:510-551)
+   - `_open_ledger_fee()` now queries fee command for minimum_fee
+   - Pays escalated fees when queue fills up
+   - Caps at MAX_FEE_DROPS=1000 to prevent account drainage
+   - Logs warnings when fees escalate above base
+
+3. **TrustSet Round-Robin Interleaving** (workload_core.py:1138-1165)
+   - Fixed telCAN_NOT_QUEUE errors during init
+   - Interleaves TrustSets across accounts (max 3 per account per batch)
+   - Prevents hitting 10 txn per-account queue limit
+   - Clean 256/256 TrustSet validation during init
+
+4. **Per-Account Queue Limit Enforcement** (app.py:913-948)
+   - Added `get_pending_txn_counts_by_account()` method
+   - Continuous workload respects max 10 pending txns per account
+   - Prevents telCAN_NOT_QUEUE errors during workload
+
+5. **Batch Size Fix** (app.py:908)
+   - Changed from `max(20, ledger_size)` to `ledger_size + 1`
+   - Encourages ledger growth without overwhelming queue
+
+6. **WebSocket Server Stream** (ws.py:76, 85)
+   - Added "server" stream subscription for fee monitoring
+   - Added server_status handler (ws_processor.py:285-335)
+   - Computes human-readable fee multipliers
+
+7. **Dashboard Improvements** (app.py:513-745)
+   - Added fee info card (min/open/base drops)
+   - Added queue utilization card with progress bar
+   - Added ledger utilization card with progress bar
+   - Added ledger index + hostname to subtitle
+   - Added Start/Stop workload buttons
+   - Added `/state/fees` endpoint
+
+8. **RPC Probing with Retry** (app.py:79-104)
+   - Added retry logic for `_probe_rippled()` (max 30 attempts)
+   - Gracefully handles starting workload before rippled is ready
+
+**Issues Identified But Not Fixed**:
+- **Sequence synchronization bug** - terPRE_SEQ errors accumulate when transactions fail
+- See `SEQUENCE_BUG_ANALYSIS.md` for full analysis and fix plan
 
 ### 1. Heartbeat Transaction System
 - **Purpose**: Submit exactly 1 transaction per ledger as a "canary" to detect network issues
@@ -145,10 +198,26 @@ M workload/src/workload/ws_processor.py
 
 ## Next Steps
 
-1. **Monitor latest fixes**: Check if terPRE_SEQ expiry fix frees up accounts
-2. **Increase account count**: If still bottlenecked, increase users in config.toml
-3. **Implement TODO**: Fix account uniqueness in transaction generation
-4. **Optimize batching**: Consider not waiting for full ledger close between batches
+1. **Fix batch_size during init**: Change from `ledger_size * 2` to `ledger_size` to avoid queue overflow
+2. **Test tel* sequence release**: Verify sequences are properly released on local errors
+3. **Verify ledger growth**: Confirm 20% growth rate experimentally or in rippled source
+4. **Fix account uniqueness in transaction generation**: Use random.sample() for multi-account selection
+
+## High Priority TODOs
+
+- **State restoration on startup**: Currently DISABLED (app.py:220) due to sequence conflicts
+  - Problem: Loading wallets from DB but re-querying AccountInfo doesn't account for pending txns
+  - Fix needed:
+    1. Clear all pending transactions from previous session (stale)
+    2. Re-query AccountInfo from network for all loaded wallets
+    3. Reset next_seq in AccountRecord to match on-chain state
+    4. Then proceed with loaded wallets and currencies
+  - Benefit: Avoid recreating 256 TrustSets on every restart, significantly speed up startup
+  - Current: We write to DB but never load from it, reinitialize from scratch every time
+
+- **Multiple WebSocket listeners**: Connect to multiple rippled nodes, not just one
+- **Verify queue limits**: Confirm "max 10 txns per account" from FeeEscalation.md
+- **Optimize batch sizing**: Experiment with expected_ledger_size+1, expected_ledger_size*1.2 to maximize throughput
 
 ## Quick Debug Commands
 

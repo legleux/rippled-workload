@@ -39,7 +39,7 @@ from xrpl.models import Subscribe, StreamParameter
 from xrpl.asyncio.clients import AsyncWebsocketClient
 from workload.logging_config import setup_logging
 
-from workload.workload_core import Workload, periodic_finality_check, periodic_state_monitor
+from workload.workload_core import Workload, periodic_finality_check
 from workload.txn_factory.builder import generate_txn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -76,12 +76,32 @@ OVERALL_STARTUP_TIMEOUT = to["startup"]
 LEDGERS_TO_WAIT = to["initial_ledgers"]
 WS = "ws://rippled:6006"
 
-async def _probe_rippled(url: str) -> None:
-    # NOTE: Rely on workload from communication?
+async def _probe_rippled(url: str, max_retries: int = 30, retry_delay: float = 2.0) -> None:
+    """Probe rippled RPC endpoint with retries until it responds.
+
+    # TODO: Make the initial probing use WebSocket instead of RPC
+
+    Args:
+        url: RPC endpoint URL
+        max_retries: Maximum number of retry attempts (default: 30 = 1 minute with 2s delay)
+        retry_delay: Seconds to wait between retries
+    """
     payload = {"method": "server_info", "params": [{}]}
-    async with httpx.AsyncClient(timeout=TIMEOUT) as http:
-        r = await http.post(url, json=payload)
-        r.raise_for_status()
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as http:
+                r = await http.post(url, json=payload)
+                r.raise_for_status()
+                log.info(f"✓ RPC endpoint responding (attempt {attempt}/{max_retries})")
+                return
+        except Exception as e:
+            if attempt < max_retries:
+                log.info(f"RPC not ready yet (attempt {attempt}/{max_retries}): {e.__class__.__name__} - retrying in {retry_delay}s...")
+                await asyncio.sleep(retry_delay)
+            else:
+                log.error(f"RPC failed after {max_retries} attempts")
+                raise
 
 async def wait_for_ledgers(url: str, count: int) -> None:
     """
@@ -225,6 +245,10 @@ async def lifespan(app: FastAPI):
             "mptoken_ids": len(app.state.workload._mptoken_issuance_ids),
         })
         log.warning("✓ STARTUP COMPLETE - Workload ready to accept requests.")
+
+        # TODO: It would be nice to make the API available during initialization
+        # (move init to background task after yield, add initializing status endpoints)
+        # so /docs and /state/dashboard are accessible while waiting for startup
 
         try:
             yield
@@ -492,6 +516,11 @@ async def state_dashboard():
     stats = app.state.workload.snapshot_stats()
     failed_data = app.state.workload.snapshot_failed()
 
+    # Get fee info and ledger index
+    wl = app.state.workload
+    fee_info = await wl.get_fee_info()
+    hostname = RPC.split("//")[1].split(":")[0] if "//" in RPC else RPC.split(":")[0]
+
     total = stats.get("total_tracked", 0)
     by_state = stats.get("by_state", {})
 
@@ -617,12 +646,68 @@ async def state_dashboard():
                 font-weight: 600;
             }}
             .badge.error {{ background: #f851491a; color: #f85149; }}
+            .controls {{
+                margin-bottom: 20px;
+                display: flex;
+                gap: 10px;
+            }}
+            .btn {{
+                padding: 10px 20px;
+                border: none;
+                border-radius: 6px;
+                font-size: 14px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: opacity 0.2s;
+            }}
+            .btn:hover {{
+                opacity: 0.8;
+            }}
+            .btn-start {{
+                background: #3fb950;
+                color: white;
+            }}
+            .btn-stop {{
+                background: #f85149;
+                color: white;
+            }}
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🚀 Workload Dashboard</h1>
-            <div class="subtitle">Live monitoring • Auto-refresh every 3s</div>
+            <div class="subtitle">Live monitoring • Auto-refresh every 3s • Ledger {fee_info.ledger_current_index} @ {hostname}</div>
+
+            <div class="controls">
+                <button class="btn btn-start" onclick="fetch('/workload/start', {{method: 'POST'}}).then(() => location.reload())">▶️ Start Workload</button>
+                <button class="btn btn-stop" onclick="fetch('/workload/stop', {{method: 'POST'}}).then(() => location.reload())">⏹️ Stop Workload</button>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Fee (min/open/base)</div>
+                    <div class="stat-value {'warning' if fee_info.minimum_fee > fee_info.base_fee else 'success'}">{fee_info.minimum_fee}/{fee_info.open_ledger_fee}/{fee_info.base_fee}</div>
+                    <div class="stat-percentage">drops</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Queue Utilization</div>
+                    <div class="stat-value info">{fee_info.current_queue_size}/{fee_info.max_queue_size}</div>
+                    <div class="stat-percentage">{(fee_info.current_queue_size / fee_info.max_queue_size * 100) if fee_info.max_queue_size > 0 else 0:.1f}%</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill info" style="width: {(fee_info.current_queue_size / fee_info.max_queue_size * 100) if fee_info.max_queue_size > 0 else 0}%"></div>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-label">Ledger Utilization</div>
+                    <div class="stat-value info">{fee_info.current_ledger_size}/{fee_info.expected_ledger_size}</div>
+                    <div class="stat-percentage">{(fee_info.current_ledger_size / fee_info.expected_ledger_size * 100) if fee_info.expected_ledger_size > 0 else 0:.1f}%</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill info" style="width: {(fee_info.current_ledger_size / fee_info.expected_ledger_size * 100) if fee_info.expected_ledger_size > 0 else 0}%"></div>
+                    </div>
+                </div>
+            </div>
 
             <div class="stats-grid">
                 <div class="stat-card">
@@ -699,6 +784,26 @@ async def state_tx(tx_hash: str):
     if not data:
         raise HTTPException(404, "tx not tracked")
     return data
+
+
+@r_state.get("/fees")
+async def state_fees():
+    """Get current fee escalation state from rippled."""
+    wl = app.state.workload
+    fee_info = await wl.get_fee_info()
+    return {
+        "expected_ledger_size": fee_info.expected_ledger_size,
+        "current_ledger_size": fee_info.current_ledger_size,
+        "current_queue_size": fee_info.current_queue_size,
+        "max_queue_size": fee_info.max_queue_size,
+        "base_fee": fee_info.base_fee,
+        "minimum_fee": fee_info.minimum_fee,
+        "median_fee": fee_info.median_fee,
+        "open_ledger_fee": fee_info.open_ledger_fee,
+        "ledger_current_index": fee_info.ledger_current_index,
+        "queue_utilization": f"{fee_info.current_queue_size}/{fee_info.max_queue_size}",
+        "ledger_utilization": f"{fee_info.current_ledger_size}/{fee_info.expected_ledger_size}",
+    }
 
 
 @r_state.get("/accounts")
@@ -881,14 +986,16 @@ async def continuous_workload():
                     log.error(f"Failed to create new account: {e}")
                     workload_stats["failed"] += 1
 
-            batch_size = max(20, ledger_size)
-            log.info(f"📊 Expected ledger size: {ledger_size} - submitting {batch_size} txns to fill ledgers")
+            batch_size = ledger_size + 1  # Submit one more than expected to encourage growth
+            log.info(f"📊 Expected ledger size: {ledger_size} - submitting {batch_size} txns to encourage growth")
 
             try:
                 # Build and sign all transactions first
-                # CRITICAL: Ensure only ONE transaction per account GLOBALLY to prevent sequence conflicts
-                # Get accounts with pending transactions (SUBMITTED, RETRYABLE, or CREATED)
-                accounts_with_pending = wl.get_accounts_with_pending_txns()
+                # CRITICAL: Respect per-account queue limit of 10 transactions (FeeEscalation.md:260)
+                # TODO: Confirm "max 10 txns per account" limit in rippled source or docs
+                # Get count of pending transactions per account
+                pending_counts = wl.get_pending_txn_counts_by_account()
+                MAX_PER_ACCOUNT = 10
 
                 pending_txns = []
                 accounts_in_batch = set()  # Track which accounts already have txns in this batch
@@ -906,8 +1013,9 @@ async def continuous_workload():
                         txn = await generate_txn(wl.ctx)
                         account = txn.account
 
-                        # Skip if this account already has a pending transaction ANYWHERE (not just this batch)
-                        if account in accounts_with_pending:
+                        # Skip if this account already has MAX_PER_ACCOUNT pending transactions
+                        current_count = pending_counts.get(account, 0)
+                        if current_count >= MAX_PER_ACCOUNT:
                             continue
 
                         # Skip if this account already has a transaction in this batch
@@ -917,7 +1025,8 @@ async def continuous_workload():
                         pending = await wl.build_sign_and_track(txn, wl.wallets[account])
                         pending_txns.append(pending)
                         accounts_in_batch.add(account)
-                        accounts_with_pending.add(account)  # Add to pending set immediately
+                        # Update pending count for this account
+                        pending_counts[account] = current_count + 1
                     except Exception as e:
                         log.error(f"Failed to build txn {len(pending_txns)+1}/{batch_size}: {e}", exc_info=True)
                         build_errors += 1
