@@ -70,13 +70,21 @@ async def ws_listener(
                 # Subscribe to ledger + server streams + either specific accounts or all transactions
                 if accounts:
                     # Efficient: subscribe only to our accounts
+                    streams = ["ledger", "server"] # TODO: Abstract out subscriptions
                     subscribe_msg = {
                         "id": 1,
                         "command": "subscribe",
-                        "streams": ["ledger", "server"],
+                        "streams": streams,
                         "accounts": accounts
                     }
-                    log.info(f"✓ Subscribing to ledger + server + {len(accounts)} specific accounts (efficient)")
+                    if len(streams) > 2:
+                        steams_string = ", ".join(streams[:-1]) + f"and {streams[-1]}"
+                    elif len(streams) == 2:
+                        steams_string = " and ".join(streams)
+                    else:
+                        steams_string, _ = streams
+                    log.info("Subscribing to %s + %s specific accounts", steams_string, len(accounts))
+                    # print(f"Subscribing to {steams_string} + {len(accounts)} specific accounts")
                 else:
                     # Fallback: subscribe to all transactions (used during init before accounts exist)
                     subscribe_msg = {

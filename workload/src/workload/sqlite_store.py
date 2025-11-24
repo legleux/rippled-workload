@@ -21,7 +21,7 @@ log = logging.getLogger("workload.sqlite_store")
 class SQLiteStore:
     """Persistent store backed by SQLite."""
 
-    def __init__(self, db_path: str | Path = "workload_state.db") -> None:
+    def __init__(self, db_path: str | Path = "state.db") -> None:
         self.db_path = Path(db_path)
         self._lock = asyncio.Lock()
         self.validations: deque[ValidationRecord] = deque(maxlen=5000)
@@ -360,9 +360,9 @@ class SQLiteStore:
             cursor = conn.execute("""
                 SELECT
                     CASE
-                        WHEN meta_txn_result = 'tesSUCCESS' THEN 'success'
-                        WHEN meta_txn_result LIKE 'tec%' THEN 'tec'
-                        WHEN meta_txn_result IS NOT NULL THEN 'other'
+                        WHEN json_extract(data, '$.meta_txn_result') = 'tesSUCCESS' THEN 'success'
+                        WHEN json_extract(data, '$.meta_txn_result') LIKE 'tec%' THEN 'tec'
+                        WHEN json_extract(data, '$.meta_txn_result') IS NOT NULL THEN 'other'
                         ELSE 'unknown'
                     END as result_category,
                     COUNT(*) as count
@@ -372,11 +372,22 @@ class SQLiteStore:
             """)
             validated_by_result = {row[0]: row[1] for row in cursor.fetchall()}
 
+            # Count submission results by engine_result_first (shows terPRE_SEQ, telCAN_NOT_QUEUE, etc.)
+            cursor = conn.execute("""
+                SELECT json_extract(data, '$.engine_result_first') as result, COUNT(*) as count
+                FROM transactions
+                WHERE json_extract(data, '$.engine_result_first') IS NOT NULL
+                GROUP BY result
+                ORDER BY count DESC
+            """)
+            submission_results = {row[0]: row[1] for row in cursor.fetchall()}
+
             return {
                 "by_state": dict(self.count_by_state),
                 "by_type": {},  # TODO: Implement type counting in SQLiteStore
                 "validated_by_source": dict(self.validated_by_source),
                 "validated_by_result": validated_by_result,  # New: tesSUCCESS vs tec codes
+                "submission_results": submission_results,  # Shows terPRE_SEQ, telCAN_NOT_QUEUE, etc.
                 "total_tracked": total,
                 "recent_validations": len(self.validations),
             }

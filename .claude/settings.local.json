@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "WebFetch(domain:xrpl.org)"
     ],
     "deny": [],
     "ask": []

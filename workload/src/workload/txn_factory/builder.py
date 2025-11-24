@@ -1,6 +1,6 @@
 from collections.abc import Sequence, Iterable, Callable, Awaitable
 from dataclasses import dataclass, replace
-from random import choice, sample
+from random import choice, choices, sample
 from typing import TypeVar, Any
 import json
 from xrpl.wallet import Wallet
@@ -69,13 +69,31 @@ class TxnContext:
     tickets: dict[str, set[int]] | None = None  # Tickets: {account: {ticket_seq, ...}}
     balances: dict[str, dict[str | tuple[str, str], float]] | None = None  # In-memory balance tracking
 
-    def rand_account(self, omit: Wallet | None = None) -> "Wallet":
-        # TODO: Use random.sample() to ensure account uniqueness when selecting multiple accounts
-        # for a single transaction (e.g., src/dest pairs). Current implementation can select the
-        # same account for both roles, causing validation errors like "Must not be equal to the account".
-        # Individual transaction types also need validation to ensure account pairs are viable
-        # (e.g., for offers, check if src actually possesses the asset being offered).
-        return choice_omit(self.wallets, omit=[omit] if omit else [])
+    def rand_accounts(self, n: int, omit: list[str] | None = None) -> list["Wallet"]:
+        """Pick n unique random accounts, optionally excluding addresses.
+
+        Args:
+            n: Number of unique accounts to return.
+            omit: List of addresses to exclude (e.g., currency issuers to prevent temDST_IS_SRC).
+
+        Returns:
+            List of n unique Wallets.
+        """
+        available = self.wallets if omit is None else [w for w in self.wallets if w.address not in omit]
+        if len(available) < n:
+            raise ValueError(f"Need {n} accounts but only {len(available)} available after excluding {omit}")
+        return sample(available, n)
+
+    def rand_account(self, omit: list[str] | None = None) -> "Wallet":
+        """Pick a single random account, optionally excluding addresses.
+
+        Args:
+            omit: List of addresses to exclude (e.g., currency issuers to prevent temDST_IS_SRC).
+
+        Returns:
+            Single Wallet.
+        """
+        return self.rand_accounts(1, omit)[0]
 
     def get_account_currencies(self, account: "Wallet") -> list[IssuedCurrency]:
         """Get list of IOU currencies this account has a non-zero balance of.
@@ -234,9 +252,31 @@ def _build_payment(ctx: TxnContext) -> dict:
 
 
 def _build_trustset(ctx: TxnContext) -> dict:
-    """Build a TrustSet transaction with random account and currency."""
-    cur = ctx.rand_currency()
+    """Build a TrustSet transaction with random account and currency.
+
+    Picks a currency where:
+      1. issuer != src.address (prevents temDST_IS_SRC)
+      2. currency not in src's existing trustlines (creates useful new trustlines)
+    """
     src = ctx.rand_account()
+
+    # Get currencies src already has trustlines for
+    existing_trustlines = ctx.get_account_currencies(src)
+    existing_keys = {(c.currency, c.issuer) for c in existing_trustlines}
+
+    # Filter: issuer != src AND not already trusted
+    available = [
+        c for c in ctx.currencies
+        if c.issuer != src.address and (c.currency, c.issuer) not in existing_keys
+    ]
+
+    if not available:
+        # Fallback: just avoid self-trust if no new trustlines possible
+        available = [c for c in ctx.currencies if c.issuer != src.address]
+        if not available:
+            raise RuntimeError(f"No currencies available for {src.address} to trust")
+
+    cur = choice(available)
 
     result = {
         "TransactionType": "TrustSet",
@@ -597,19 +637,31 @@ async def _build_batch(ctx: TxnContext) -> dict:
             )
 
         elif txn_type == "TrustSet":
-            cur = ctx.rand_currency()
-            inner_tx = TrustSet(
-                account=src.address,
-                limit_amount=IssuedCurrencyAmount(
-                    currency=cur.currency,
-                    issuer=cur.issuer,
-                    value=str(ctx.config["transactions"]["trustset"]["limit"]),
-                ),
-                fee="0",
-                signing_pub_key="",
-                flags=TransactionFlag.TF_INNER_BATCH_TXN,
-                sequence=seq,
-            )
+            # Filter currencies: issuer != src to avoid temDST_IS_SRC
+            available_cur = [c for c in ctx.currencies if c.issuer != src.address]
+            if not available_cur:
+                # Skip TrustSet if no valid currencies, use AccountSet instead
+                inner_tx = AccountSet(
+                    account=src.address,
+                    fee="0",
+                    signing_pub_key="",
+                    flags=TransactionFlag.TF_INNER_BATCH_TXN,
+                    sequence=seq,
+                )
+            else:
+                cur = choice(available_cur)
+                inner_tx = TrustSet(
+                    account=src.address,
+                    limit_amount=IssuedCurrencyAmount(
+                        currency=cur.currency,
+                        issuer=cur.issuer,
+                        value=str(ctx.config["transactions"]["trustset"]["limit"]),
+                    ),
+                    fee="0",
+                    signing_pub_key="",
+                    flags=TransactionFlag.TF_INNER_BATCH_TXN,
+                    sequence=seq,
+                )
 
         elif txn_type == "AccountSet":
             inner_tx = AccountSet(
@@ -796,7 +848,18 @@ async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides
         if not configured_types:
             raise RuntimeError("No transaction types available to generate")
 
-        txn_type = choice(configured_types)
+        # Get configured percentages (types not listed share remaining evenly)
+        percentages = ctx.config.get("transactions", {}).get("percentages", {})
+
+        # Calculate weights for random.choices()
+        defined_total = sum(percentages.get(t, 0) for t in configured_types)
+        remaining = 1.0 - defined_total
+        undefined_types = [t for t in configured_types if t not in percentages]
+        per_undefined = remaining / len(undefined_types) if undefined_types else 0
+
+        weights = [percentages.get(t, per_undefined) for t in configured_types]
+
+        txn_type = choices(configured_types, weights=weights, k=1)[0]
     else:
         # Normalize case: try exact match first, then case-insensitive
         if txn_type not in _BUILDERS:
@@ -834,6 +897,31 @@ async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides
 async def create_payment(ctx: TxnContext, **overrides: Any) -> Payment:
     """Create a Payment transaction with sane defaults."""
     return await generate_txn(ctx, "Payment", **overrides)
+
+
+async def create_xrp_payment(ctx: TxnContext, **overrides: Any) -> Payment:
+    """Create an XRP-only Payment transaction.
+
+    Simple, predictable, base-fee transaction for workload testing.
+    Forces XRP amount regardless of xrp_chance config.
+    """
+    wl = list(ctx.wallets)
+    if len(wl) >= 2:
+        src, dst = sample(wl, 2)
+    else:
+        src = wl[0] if wl else ctx.funding_wallet
+        dst = ctx.funding_wallet if ctx.funding_wallet is not src else src
+
+    amount = str(ctx.config["transactions"]["payment"]["amount"])
+
+    return await generate_txn(
+        ctx,
+        "Payment",
+        Account=src.address,
+        Destination=dst.address,
+        Amount=amount,
+        **overrides,
+    )
 
 
 async def create_trustset(ctx: TxnContext, **overrides: Any) -> TrustSet:

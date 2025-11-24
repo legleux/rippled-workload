@@ -8,6 +8,12 @@ funding_seed = false
 #seed    = "snoPBrXtMeMyMHUVTgbuqAfg1SUTb"
 
 [gateways]
+names = [
+    "all-crypto",
+    "bit-bank",
+    "coin-thang",
+    "digi-bux"
+]
 number = 4
 default_balance = 100_000_000_000000
 require_auth = false
@@ -39,11 +45,19 @@ BTC = 1_000_000_000
 ########### Transaction context defaults #############
 ######################################################
 [transactions]
-# Disable specific transaction types for debugging (all types in _BUILDERS are enabled by default)
+# Disable specific transaction types (all types in _BUILDERS are enabled by default)
 disabled = [
-    # "Batch",  # Uncomment to disable Batch transactions
-    # "NFTokenMint",
+    "AMMCreate",  # Expensive fee, creates AMM pool
+    "Batch",  # TODO: Allocates multiple sequences, causing issues when expired
 ]
+
+# Transaction type percentages for random selection (0.0 to 1.0)
+# Types not listed share the remaining percentage evenly
+# Example: Payment=0.5, TrustSet=0.3 means 50% Payment, 30% TrustSet, and remaining 20% split evenly among all other
+# enabled types
+[transactions.percentages]
+Payment = 0.4
+OfferCreate = 0.3
 
 [transactions.mptoken.issuance_create]
 transfer_fee = 1000

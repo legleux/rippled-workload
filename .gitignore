@@ -17,4 +17,4 @@ config/docker-compose.yml
 config/volumes/*val*
 config/volumes/*rippled*
 testnet/
-workload_state.db
+state.db

@@ -186,6 +186,24 @@ curl http://localhost:8000/state/pending
 curl http://localhost:8000/state/validations
 ```
 
+### Network Management
+
+**IMPORTANT**: Network commands must be run from `prepare-workload/testnet/` directory where docker-compose.yml is located.
+
+```bash
+# From prepare-workload/testnet/ directory:
+
+# Restart the docker compose network
+cd /home/emel/dev/Ripple/rippled-workload/prepare-workload/testnet
+docker compose down && docker compose up -d
+
+# Clear state database before restart (if needed)
+rm /home/emel/dev/Ripple/rippled-workload/state.db
+
+# Full reset (network + state)
+docker compose down && rm /home/emel/dev/Ripple/rippled-workload/state.db && docker compose up -d
+```
+
 ## Configuration
 
 ### Workload Configuration (workload/src/workload/config.toml)

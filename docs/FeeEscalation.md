@@ -1,4 +1,4 @@
-# Fees
+# Fees[^1]
 
 Rippled's fee mechanism consists of several interrelated processes:
 
@@ -369,3 +369,7 @@ In all cases, the transaction fee must be high enough to overcome both
 need to overcome `load_factor_fee_escalation`, though if it does not, it
 is more likely to be queued than immediately processed into the open
 ledger.
+
+---
+
+[^1]: From [FeeEscalation.md](https://github.com/XRPLF/rippled/blob/8449c6c3655c29c8ee9e3407aa6420f445069388/src/xrpld/app/misc/FeeEscalation.md)

@@ -93,7 +93,7 @@ async def _probe_rippled(url: str, max_retries: int = 30, retry_delay: float = 2
             async with httpx.AsyncClient(timeout=TIMEOUT) as http:
                 r = await http.post(url, json=payload)
                 r.raise_for_status()
-                log.info(f"✓ RPC endpoint responding (attempt {attempt}/{max_retries})")
+                log.info(f"RPC endpoint responding (attempt {attempt}/{max_retries})")
                 return
         except Exception as e:
             if attempt < max_retries:
@@ -117,7 +117,7 @@ async def wait_for_ledgers(url: str, count: int) -> None:
                     ledger_count += 1
                     log.info("Ledger %s closed. (%s/%s)", msg.get('ledger_index'), ledger_count, count)
                     if ledger_count >= count:
-                        log.info("Sufficient ledgers seen. Network is ready.")
+                        log.info("Observed %s ledgers closed. Convinced network is progessing.", ledger_count)
                         break
     except Exception as e:
         log.error(f"Failed to wait for ledgers via WebSocket: {e}")
@@ -150,31 +150,31 @@ async def lifespan(app: FastAPI):
     from workload.sqlite_store import SQLiteStore
 
     client = AsyncJsonRpcClient(RPC)
-    sqlite_store = SQLiteStore(db_path="workload_state.db")
+    sqlite_store = SQLiteStore(db_path="state.db")
     app.state.workload = Workload(cfg, client, store=sqlite_store)
     app.state.stop = stop
 
     # ============================================================
     # Initialize heartbeat destination - just a random throwaway account
     # ============================================================
-    log.info("Creating heartbeat destination account...")
-    from xrpl.wallet import Wallet
+    # log.info("Creating heartbeat destination account...")
+    # from xrpl.wallet import Wallet
 
-    # Create dedicated heartbeat wallet (sender) to avoid sequence conflicts with funding_wallet
-    # This wallet will ONLY be used for heartbeat transactions (1 per ledger)
-    heartbeat_wallet = Wallet.create()
-    app.state.workload.heartbeat_wallet = heartbeat_wallet
+    # # Create dedicated heartbeat wallet (sender) to avoid sequence conflicts with funding_wallet
+    # # This wallet will ONLY be used for heartbeat transactions (1 per ledger)
+    # heartbeat_wallet = Wallet.create()
+    # app.state.workload.heartbeat_wallet = heartbeat_wallet
 
-    # Create heartbeat destination (receiver)
-    heartbeat_dest = Wallet.create()
-    app.state.workload.heartbeat_destination = heartbeat_dest.address
+    # # Create heartbeat destination (receiver)
+    # heartbeat_dest = Wallet.create()
+    # app.state.workload.heartbeat_destination = heartbeat_dest.address
 
-    # Fund both heartbeat wallet and destination
-    # Heartbeat wallet needs more funds since it sends ~1 txn per ledger
-    heartbeat_funding = str(int(C.DEFAULT_CREATE_AMOUNT) * 100)  # 100x for many heartbeats
-    await app.state.workload._ensure_funded(heartbeat_wallet, heartbeat_funding)
-    await app.state.workload._ensure_funded(heartbeat_dest, str(C.DEFAULT_CREATE_AMOUNT))
-    log.info(f"✓ Heartbeat destination created: {heartbeat_dest.address[:8]}... - ready for heartbeats!")
+    # # Fund both heartbeat wallet and destination
+    # # Heartbeat wallet needs more funds since it sends ~1 txn per ledger
+    # heartbeat_funding = str(int(C.DEFAULT_CREATE_AMOUNT) * 100)  # 100x for many heartbeats
+    # await app.state.workload._ensure_funded(heartbeat_wallet, heartbeat_funding)
+    # await app.state.workload._ensure_funded(heartbeat_dest, str(C.DEFAULT_CREATE_AMOUNT))
+    # log.info(f"✓ Heartbeat destination created: {heartbeat_dest.address[:8]}... - ready for heartbeats!")
 
     # ============================================================
     # Create WebSocket event queue then start the background tasks
@@ -186,7 +186,7 @@ async def lifespan(app: FastAPI):
     async with asyncio.TaskGroup() as tg:
         app.state.tg = tg
 
-        # WebSocket listener - handles ledger close events (for heartbeat) and tx validations
+        # WebSocket listener - handles ledger close events for tx validations
         tg.create_task(
             ws_listener(
                 app.state.stop,
@@ -197,11 +197,11 @@ async def lifespan(app: FastAPI):
             name="ws_listener"
         )
 
-        # WebSocket event processor - submits heartbeat on every ledger close
-        tg.create_task(
-            process_ws_events(app.state.workload, app.state.ws_queue, app.state.stop),
-            name="ws_processor"
-        )
+        # # WebSocket event processor - submits heartbeat on every ledger close
+        # tg.create_task(
+        #     process_ws_events(app.state.workload, app.state.ws_queue, app.state.stop),
+        #     name="ws_processor"
+        # )
 
         # Finality checker via RPC polling (backup to WS validation)
         tg.create_task(
@@ -209,18 +209,20 @@ async def lifespan(app: FastAPI):
             name="finality_checker"
         )
 
-        log.info("Background tasks started: 💓 ws_listener (heartbeat + validation), ws_processor, finality_checker")
+        log.info("Background tasks started:")
+        # log.info("Background tasks started: 💓 heartbeat")
+        log.info("ws_processor")
+        log.info("RPC finality_checker")
 
         # No WS listener, no need to wait
         # await asyncio.sleep(2)
 
-        # DISABLED: State loading causes sequence number conflicts (terPRE_SEQ)
-        # When we load wallets but have pending txns, we re-query AccountInfo which doesn't
-        # account for allocated sequences from pending txns -> reuse sequence numbers
-        state_loaded = False  # app.state.workload.load_state_from_store()
+        # Re-enabled: State loading now clears pending txns and resets sequence numbers
+        # This allows hot-reload to skip re-creating accounts and TrustSets
+        state_loaded = app.state.workload.load_state_from_store()
 
         if state_loaded:
-            log.debug("✓ Loaded existing state from database, skipping network provisioning")
+            log.debug("Loaded existing state from database, skipping network provisioning")
             log.debug(
                 "  Wallets: %s (Gateways: %s, Users: %s)",
                 len(app.state.workload.wallets),
@@ -234,7 +236,8 @@ async def lifespan(app: FastAPI):
             app.state.workload.update_txn_context()
             log.info("Accounts initialized: %s gateways, %s users.", len(init_result["gateways"]), len(init_result["users"]))
 
-        # Signal setup is complete and fuzzing can begin
+        # Signal setup is complete
+        init_ledger = await app.state.workload._current_ledger_index()
         setup_complete({
             "gateways": len(app.state.workload.gateways),
             "users": len(app.state.workload.users),
@@ -243,10 +246,11 @@ async def lifespan(app: FastAPI):
             "available_txn_types": app.state.workload.ctx.config.get("transactions", {}).get("available", []),
             "state_loaded_from_db": state_loaded,
             "mptoken_ids": len(app.state.workload._mptoken_issuance_ids),
+            "init_completed_ledger": init_ledger,
         })
-        log.warning("✓ STARTUP COMPLETE - Workload ready to accept requests.")
+        log.info(f"Network initialization complete at ledger {init_ledger}. Ready to accept requests!")
 
-        # TODO: It would be nice to make the API available during initialization
+        # TODO: Maybe it would be nice to make the API available during initialization
         # (move init to background task after yield, add initializing status endpoints)
         # so /docs and /state/dashboard are accessible while waiting for startup
 
@@ -254,7 +258,8 @@ async def lifespan(app: FastAPI):
             yield
         finally:
             # Graceful shutdown: set stop signals and give tasks time to exit
-            log.info("Shutdown initiated...")
+            log.info("Shutting down...")
+            # TODO: Catch shutdown methods (ctl-c, debugger stop, endpoint)
             stop.set()
             app.state.ws_stop_event.set()
 
@@ -276,8 +281,8 @@ app = FastAPI(
         {"name": "State", "description": "Send and track general state"},
     ],
     swagger_ui_parameters={
-        "tagsSorter": "alpha",       # checkout "order"
-        "operationsSorter": "alpha", # checkout "method"
+        "tagsSorter": "alpha",       # See what "order" does...
+        "operationsSorter": "alpha", # See what "method" does...
     },
 )
 
@@ -535,21 +540,28 @@ async def state_dashboard():
     val_pct = (validated / total * 100) if total > 0 else 0
     rej_pct = (rejected / total * 100) if total > 0 else 0
 
-    # Group failures by result
+    # Group failures by result (only rippled error codes, not our internal states)
+    INTERNAL_STATES = {"CASCADE_EXPIRED", "unknown", None, ""}
     failures_by_result = {}
     for failed in failed_data:
         result = failed.get("engine_result_first", "unknown")
-        failures_by_result[result] = failures_by_result.get(result, 0) + 1
+        if result not in INTERNAL_STATES:
+            failures_by_result[result] = failures_by_result.get(result, 0) + 1
 
     # Sort failures by count
     top_failures = sorted(failures_by_result.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    # Get submission results (terPRE_SEQ, tesSUCCESS, etc.)
+    submission_results = stats.get("submission_results", {})
+    # Sort by count, descending
+    sorted_submission_results = sorted(submission_results.items(), key=lambda x: x[1], reverse=True)
 
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Workload Dashboard</title>
-        <meta http-equiv="refresh" content="3">
+        <meta http-equiv="refresh" content="1">
         <style>
             body {{
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -676,7 +688,7 @@ async def state_dashboard():
     <body>
         <div class="container">
             <h1>🚀 Workload Dashboard</h1>
-            <div class="subtitle">Live monitoring • Auto-refresh every 3s • Ledger {fee_info.ledger_current_index} @ {hostname}</div>
+            <div class="subtitle">Live monitoring • Auto-refresh every 1s • Ledger {fee_info.ledger_current_index} @ {hostname}</div>
 
             <div class="controls">
                 <button class="btn btn-start" onclick="fetch('/workload/start', {{method: 'POST'}}).then(() => location.reload())">▶️ Start Workload</button>
@@ -750,6 +762,8 @@ async def state_dashboard():
                     <div class="stat-value">{expired:,}</div>
                 </div>
             </div>
+
+            {"<div class='failures-table'><h2>Submission Results</h2><table><thead><tr><th>Engine Result</th><th>Count</th></tr></thead><tbody>" + "".join(f"<tr><td><span class='badge {'success' if result == 'tesSUCCESS' else 'warning' if result and result.startswith('ter') else 'error' if result and result.startswith(('tel', 'tec', 'tem', 'tef')) else 'info'}'>{result}</span></td><td>{count:,}</td></tr>" for result, count in sorted_submission_results) + "</tbody></table></div>" if sorted_submission_results else ""}
 
             {"<div class='failures-table'><h2>Top Failures</h2><table><thead><tr><th>Error Code</th><th>Count</th></tr></thead><tbody>" + "".join(f"<tr><td><span class='badge error'>{result}</span></td><td>{count:,}</td></tr>" for result, count in top_failures) + "</tbody></table></div>" if top_failures else ""}
         </div>
@@ -958,91 +972,117 @@ workload_stats = {"submitted": 0, "validated": 0, "failed": 0, "started_at": Non
 
 
 async def continuous_workload():
-    """Continuously submit random transactions, ramping up with expected_ledger_size."""
-    from random import random
+    """Continuously submit XRP payments, respecting 1 pending txn per account.
+
+    Key constraint: Only ONE transaction per account can be in-flight at a time.
+    This prevents sequence number conflicts entirely - no resyncs needed.
+
+    We can still submit many transactions in PARALLEL as long as each is from
+    a different account.
+
+    Uses XRP-only payments for simplicity and predictable base fees.
+    """
+    from random import random, sample
+    from xrpl.models.transactions import Payment
+
     global workload_stats
     wl = app.state.workload
 
-    log.debug("🚀 Continuous workload started")
+    log.debug("🚀 Continuous workload started (XRP payments only)")
     workload_stats["started_at"] = perf_counter()
 
     try:
         while not workload_stop_event.is_set():
-            # Get current expected ledger size
+            # Get current expected ledger size for batch sizing
             ledger_size = await wl._expected_ledger_size()
 
-            # Occasionally create a new account
-            if random() < 0.10:
-                try:
-                    default_balance = wl.config["users"]["default_balance"]
-                    large_balance = str(int(default_balance) * 10)
-
-                    log.debug(f"Creating new account with {large_balance} drops")
-                    result = await wl.create_account(initial_xrp_drops=large_balance)
-                    workload_stats["submitted"] += 1
-
-                    log.debug(f"✓ New account created: {result['address'][:12]}... (will be adopted on validation)")
-                except Exception as e:
-                    log.error(f"Failed to create new account: {e}")
-                    workload_stats["failed"] += 1
-
-            batch_size = ledger_size + 1  # Submit one more than expected to encourage growth
-            log.info(f"📊 Expected ledger size: {ledger_size} - submitting {batch_size} txns to encourage growth")
-
-            try:
-                # Build and sign all transactions first
-                # CRITICAL: Respect per-account queue limit of 10 transactions (FeeEscalation.md:260)
-                # TODO: Confirm "max 10 txns per account" limit in rippled source or docs
-                # Get count of pending transactions per account
-                pending_counts = wl.get_pending_txn_counts_by_account()
-                MAX_PER_ACCOUNT = 10
-
-                pending_txns = []
-                accounts_in_batch = set()  # Track which accounts already have txns in this batch
-                build_errors = 0
-                attempts = 0
-                max_attempts = batch_size * 10  # Allow more retries to find available accounts
-
-                while len(pending_txns) < batch_size and attempts < max_attempts:
-                    if workload_stop_event.is_set():
-                        break
-                    attempts += 1
-
+            # Occasionally create a new account (uses funding wallet which should be free)
+            if random() < 0.50:
+                # Check if funding wallet has a pending txn
+                funding_pending = wl.get_pending_txn_counts_by_account().get(wl.funding_wallet.address, 0)
+                if funding_pending == 0:
                     try:
-                        # Generate transaction and prepare it
-                        txn = await generate_txn(wl.ctx)
-                        account = txn.account
-
-                        # Skip if this account already has MAX_PER_ACCOUNT pending transactions
-                        current_count = pending_counts.get(account, 0)
-                        if current_count >= MAX_PER_ACCOUNT:
-                            continue
-
-                        # Skip if this account already has a transaction in this batch
-                        if account in accounts_in_batch:
-                            continue
-
-                        pending = await wl.build_sign_and_track(txn, wl.wallets[account])
-                        pending_txns.append(pending)
-                        accounts_in_batch.add(account)
-                        # Update pending count for this account
-                        pending_counts[account] = current_count + 1
+                        default_balance = wl.config["users"]["default_balance"]
+                        large_balance = str(int(default_balance) * 10)
+                        result = await wl.create_account(initial_xrp_drops=large_balance)
+                        workload_stats["submitted"] += 1
+                        log.debug(f"✓ New account created: {result['address']}...")
                     except Exception as e:
-                        log.error(f"Failed to build txn {len(pending_txns)+1}/{batch_size}: {e}", exc_info=True)
-                        build_errors += 1
+                        log.error(f"Failed to create new account: {e}")
                         workload_stats["failed"] += 1
 
-                if build_errors > 0:
-                    log.warning(f"⚠️  {build_errors} transactions failed to build, only submitting {len(pending_txns)}/{batch_size}")
+            # Get accounts with fewer than MAX_PENDING_PER_ACCOUNT pending transactions
+            # Queue can hold up to 10 per account - use it for throughput
+            MAX_PENDING_PER_ACCOUNT = 10 # TODO: Set as constant. Confirm with rippled source. This _is_ what docs say.
+            pending_counts = wl.get_pending_txn_counts_by_account()
+
+            # Calculate how many MORE txns each account can accept
+            account_slots = {
+                addr: MAX_PENDING_PER_ACCOUNT - pending_counts.get(addr, 0)
+                for addr in wl.wallets.keys()
+            }
+            available_accounts = [addr for addr, slots in account_slots.items() if slots > 0]
+            total_available_slots = sum(slots for slots in account_slots.values() if slots > 0)
+
+            # Batch size = min(total available slots, expected_ledger_size + 1), capped at 200
+            MAX_BATCH_SIZE = 200
+            batch_size = min(total_available_slots, ledger_size + 1, MAX_BATCH_SIZE)
+
+            if batch_size == 0:
+                log.debug("No available slots (all accounts at max pending), waiting...")
+                await asyncio.sleep(0.5) # TODO: Remove time
+                continue
+            current_ledger = await wl._current_ledger_index()
+            log.info(f"📊 Building batch @ ledger {current_ledger}: {batch_size} txns ({len(available_accounts)} accounts, {total_available_slots} slots, target_size={ledger_size})")
+
+            try:
+                # Build transactions using weighted random selection from txn_factory
+                # Percentages configured in config.toml [transactions.percentages]
+                # Disabled types configured in config.toml [transactions.disabled]
+                from workload.txn_factory.builder import generate_txn
+
+                pending_txns = []
+                txns_built = 0
+                max_retries = batch_size * 2  # Avoid infinite loop
+                retries = 0
+
+                while txns_built < batch_size and retries < max_retries and not workload_stop_event.is_set():
+                    retries += 1
+                    try:
+                        # Ensure context has current wallets
+                        wl.ctx.wallets = list(wl.wallets.values())
+
+                        # Generate transaction using weighted selection
+                        txn = await generate_txn(wl.ctx)
+
+                        # Get source account from transaction
+                        src_addr = txn.account
+
+                        # Check if this account still has slots available
+                        current_pending = wl.get_pending_txn_counts_by_account().get(src_addr, 0)
+                        if current_pending >= MAX_PENDING_PER_ACCOUNT:
+                            continue  # Try another transaction
+
+                        # Build and track
+                        pending = await wl.build_sign_and_track(txn, wl.wallets[src_addr])
+                        pending_txns.append(pending)
+                        txns_built += 1
+
+                    except Exception as e:
+                        log.error(f"Failed to build transaction: {e}")
+                        workload_stats["failed"] += 1
 
                 if not pending_txns:
-                    log.error("No transactions to submit!")
+                    log.warning("No transactions built this batch")
+                    await asyncio.sleep(0.5)  # TODO: Remove time - we tick on LEDGERS not time!
+                    # TODO IMPORTANT: If ledgers stop ticking, we need a deadman's switch that
+                    # attempts to reconnect. Time-based waiting should ONLY be used there as a
+                    # last resort. No ledger == no game to play!
                     continue
 
                 log.info(f"📤 Submitting {len(pending_txns)} transactions in parallel...")
 
-                # Submit all transactions in parallel - let asyncio and network handle concurrency
-                submit_errors = 0
+                # Submit ALL in parallel - safe because each is from a different account
                 async with asyncio.TaskGroup() as tg:
                     submit_tasks = [tg.create_task(wl.submit_pending(p)) for p in pending_txns]
 
@@ -1051,31 +1091,24 @@ async def continuous_workload():
                     try:
                         result = task.result()
                         workload_stats["submitted"] += 1
-
-                        if result.get("state") == "VALIDATED":
-                            workload_stats["validated"] += 1
-                        elif result.get("state") in ["REJECTED", "FAILED_NET", "EXPIRED"]:
+                        er = result.get("engine_result") if result else None
+                        # TODO: Add constant for "FAILED" engine_results.
+                        if er and er.startswith(("ter", "tem", "tef", "tel")):
                             workload_stats["failed"] += 1
                     except Exception as e:
-                        log.error(f"Error in parallel submission: {e}")
-                        submit_errors += 1
+                        log.error(f"Submit error: {e}")
                         workload_stats["failed"] += 1
 
-                if submit_errors > 0:
-                    log.warning(f"⚠️  {submit_errors} transactions failed to submit")
-
             except* Exception as eg:
-                # Handle ExceptionGroup from TaskGroup failures
                 for exc in eg.exceptions:
-                    log.error(f"Task failed in batch submission: {type(exc).__name__}: {exc}", exc_info=exc)
-                workload_stats["failed"] += batch_size
+                    log.error(f"Batch error: {type(exc).__name__}: {exc}")
+                workload_stats["failed"] += len(pending_txns) if pending_txns else 0
 
-            # Wait for next ledger to close before submitting next batch
-            # This prevents flooding the queue and keeps expiration rate low
-            current_ledger = await wl._current_ledger_index()
+            # Wait for next ledger before submitting next batch
+            #current_ledger = await wl._current_ledger_index() # moved this up to line , if misbehaves...set here again?
             next_ledger = current_ledger + 1
             while await wl._current_ledger_index() < next_ledger and not workload_stop_event.is_set():
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5) # TODO: Remove time
 
     except asyncio.CancelledError:
         log.debug("Continuous workload cancelled")
@@ -1103,7 +1136,7 @@ async def start_workload():
 
     return {
         "status": "started",
-        "message": "Continuous workload started - submitting random transactions at expected_ledger_size + 1 per ledger"
+        "message": "Continuous workload started - submitting random transactions at expected_ledger_size + 1 per ledger (max 200)"
     }
 
 
@@ -1119,8 +1152,9 @@ async def stop_workload():
     log.info("Stopping workload")
     workload_stop_event.set()
     await workload_task
+    stop_ledger = await app.state.workload._current_ledger_index()
+    log.info("Stopped workload at ledger %s", stop_ledger)
     workload_running = False
-    log.info("Stopped workload")
 
     return {
         "status": "stopped",
