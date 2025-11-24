@@ -20,7 +20,7 @@ require_auth = false
 default_ripple = true
 
 [users]
-number = 16
+number = 64
 default_balance = 100_000_000000
 
 [amm]
@@ -48,7 +48,7 @@ BTC = 1_000_000_000
 # Disable specific transaction types (all types in _BUILDERS are enabled by default)
 disabled = [
     "AMMCreate",  # Expensive fee, creates AMM pool
-    "Batch",  # TODO: Allocates multiple sequences, causing issues when expired
+    # Batch now handled: sequences synced from ledger after validation/rejection/expiry
 ]
 
 # Transaction type percentages for random selection (0.0 to 1.0)
@@ -71,7 +71,7 @@ limit = 1_000_000_000_000000
 [timeout]
 overall = 6
 startup = 180
-initial_ledgers = 5
+initial_ledgers = 1
 
 [rippled]
 docker = "rippled"

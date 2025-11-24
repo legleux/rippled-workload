@@ -333,6 +333,11 @@ class Workload:
         # Track MPToken issuance IDs for MPToken transactions
         self._mptoken_issuance_ids: list[str] = []
 
+        # In-memory balance tracking - our own state, independent of ledger
+        # During fuzzing, we can't trust the ledger state, so we track what we send/receive
+        # Structure: {account: {"XRP": drops, ("CUR", "issuer"): value}}
+        self.balances: dict[str, dict[str | tuple[str, str], float]] = {}
+
         # Finally, set up the txn_context for generic txn use.
         self.ctx = self.configure_txn_context(
             wallets=self.wallets,
@@ -363,6 +368,8 @@ class Workload:
         )
         # Add MPToken issuance IDs
         ctx.mptoken_issuance_ids = self._mptoken_issuance_ids
+        # Add in-memory balance tracking for fan-out
+        ctx.balances = self.balances
         return ctx
 
     # Will it be sufficient to do this every time an account is created? or intermittently and mark some accounts as
@@ -495,6 +502,35 @@ class Workload:
             rec = AccountRecord(lock=asyncio.Lock(), next_seq=None)
             self.accounts[addr] = rec
         return rec
+
+    # =========================================================================
+    # In-memory balance tracking for fan-out token distribution
+    # =========================================================================
+
+    def _get_balance(self, account: str, currency: str, issuer: str | None = None) -> float:
+        """Get tracked balance for an account."""
+        if account not in self.balances:
+            return 0.0
+        if currency == "XRP":
+            return self.balances[account].get("XRP", 0.0)
+        else:
+            key = (currency, issuer) if issuer else currency
+            return self.balances[account].get(key, 0.0)
+
+    def _set_balance(self, account: str, currency: str, value: float, issuer: str | None = None):
+        """Set tracked balance for an account."""
+        if account not in self.balances:
+            self.balances[account] = {}
+        if currency == "XRP":
+            self.balances[account]["XRP"] = value
+        else:
+            key = (currency, issuer) if issuer else currency
+            self.balances[account][key] = value
+
+    def _update_balance(self, account: str, currency: str, delta: float, issuer: str | None = None):
+        """Update (credit/debit) tracked balance for an account."""
+        current = self._get_balance(account, currency, issuer)
+        self._set_balance(account, currency, current + delta, issuer)
 
     async def _rpc(self, req, *, t=C.RPC_TIMEOUT):
         return await asyncio.wait_for(self.client.request(req), timeout=t)
@@ -725,10 +761,36 @@ class Workload:
             self.update_txn_context()
             log.debug("Adopted new account after validation: %s", w.address)
 
-        # Update balances for the account involved in the transaction
-        # Skip during heavy load to avoid flooding RPC endpoint
-        if p_live and p_live.account and len(self.pending) < 50:
-            await self._update_account_balances(p_live.account)
+        # Update in-memory balances for Payment transactions (for fan-out tracking)
+        if p_live and meta_result == "tesSUCCESS" and p_live.transaction_type == C.TxType.PAYMENT:
+            try:
+                tx_json = p_live.tx_json
+                if tx_json:
+                    sender = tx_json.get("Account")
+                    destination = tx_json.get("Destination")
+                    amount = tx_json.get("Amount")
+
+                    if sender and destination and amount:
+                        if isinstance(amount, str):
+                            # XRP payment (drops)
+                            amount_val = float(amount)
+                            self._update_balance(sender, "XRP", -amount_val)
+                            self._update_balance(destination, "XRP", amount_val)
+                        elif isinstance(amount, dict):
+                            # IOU payment
+                            currency = amount.get("currency")
+                            issuer = amount.get("issuer")
+                            value = float(amount.get("value", 0))
+
+                            if currency and issuer:
+                                # Issuers have infinite balance, don't track debits for them
+                                if sender != issuer:
+                                    self._update_balance(sender, currency, -value, issuer)
+                                if destination != issuer:
+                                    self._update_balance(destination, currency, value, issuer)
+                                log.debug(f"Balance update: {sender[:8]} -> {destination[:8]}: {value} {currency}")
+            except Exception as e:
+                log.debug(f"Failed to update in-memory balances for {rec.txn}: {e}")
 
         # Track MPToken issuance IDs from MPTokenIssuanceCreate transactions
         if p_live and p_live.transaction_type == C.TxType.MPTOKEN_ISSUANCE_CREATE:
@@ -742,6 +804,20 @@ class Workload:
                     log.debug("Tracked new MPToken issuance ID: %s", mpt_id)
             except Exception as e:
                 log.warning(f"Failed to extract MPToken issuance ID from {rec.txn}: {e}")
+
+        # BATCH SEQUENCE SYNC: After Batch validates, sync sequence with ledger
+        # Batch consumes: 1 (outer) + N (successful inner txns) sequences
+        # We can't predict N, so just ask the ledger what it expects next
+        if p_live and p_live.transaction_type == C.TxType.BATCH and p_live.account:
+            try:
+                ai = await self._rpc(AccountInfo(account=p_live.account, ledger_index="current"))
+                rec_acct = self._record_for(p_live.account)
+                async with rec_acct.lock:
+                    old_seq = rec_acct.next_seq
+                    rec_acct.next_seq = ai.result["account_data"]["Sequence"]
+                    log.info(f"Batch validated: synced {p_live.account[:8]} sequence {old_seq} -> {rec_acct.next_seq}")
+            except Exception as e:
+                log.warning(f"Failed to sync sequence after Batch validation: {e}")
 
         log.debug("txn %s validated at ledger %s via %s", rec.txn, rec.seq, rec.src)
         return {"tx_hash": rec.txn, "ledger_index": rec.seq, "source": rec.src, "meta_result": meta_result}
@@ -807,8 +883,13 @@ class Workload:
                               transaction_type=p.transaction_type, engine_result_first=p.engine_result_first)
 
         # Cascade expire higher-sequence txns and reset account sequence
+        # IMPORTANT: Always fetch_seq_from_ledger=True because other txns from this
+        # account may have validated (advancing ledger seq) before we detected this expiry
         if p.account and p.sequence is not None:
-            await self._cascade_expire_account(p.account, p.sequence, exclude_hash=tx_hash)
+            # For Batch transactions, log explicitly since they pre-allocate multiple sequences
+            if p.transaction_type == C.TxType.BATCH:
+                log.info(f"Batch expired: {tx_hash[:8]} - will sync sequence from ledger")
+            await self._cascade_expire_account(p.account, p.sequence, exclude_hash=tx_hash, fetch_seq_from_ledger=True)
 
     def find_by_state(self, *states: C.TxState) -> list[PendingTx]:
         return [p for p in self.pending.values() if p.state in set(states)]
@@ -951,6 +1032,25 @@ class Workload:
                 log.warning(f"tel* (may retry): {er} - {p.transaction_type} seq={p.sequence} - tracking until expiry")
                 return res
 
+            if er == "tefPAST_SEQ":
+                # Sequence already used - ledger's account sequence is higher than our tx's sequence
+                # This means we're behind. Reset our sequence counter from ledger.
+                log.warning(f"tefPAST_SEQ: {p.transaction_type} from {p.account} seq={p.sequence} - resetting account sequence from ledger")
+                p.state = C.TxState.REJECTED
+                self.pending[p.tx_hash] = p
+                await self.store.mark(
+                    p.tx_hash,
+                    state=p.state,
+                    account=p.account,
+                    sequence=p.sequence,
+                    transaction_type=p.transaction_type,
+                    engine_result_first=p.engine_result_first,
+                    engine_result_final=er,
+                )
+                # Reset sequence from ledger - we're behind
+                await self._cascade_expire_account(p.account, p.sequence, exclude_hash=p.tx_hash, fetch_seq_from_ledger=True)
+                return res
+
             if isinstance(er, str) and er.startswith(("tem", "tef")):
                 # terminal reject: mark and stop
                 p.state = C.TxState.REJECTED
@@ -965,6 +1065,20 @@ class Workload:
                     engine_result_final=er,
                 )
                 log.warning(f"REJECTED: {er} - {p.transaction_type} from {p.account} seq={p.sequence} hash={p.tx_hash}")
+
+                # BATCH SEQUENCE SYNC: Batch pre-allocates multiple sequences
+                # On rejection, none were consumed - sync with ledger to reset
+                if p.transaction_type == C.TxType.BATCH and p.account:
+                    try:
+                        ai = await self._rpc(AccountInfo(account=p.account, ledger_index="current"))
+                        rec_acct = self._record_for(p.account)
+                        async with rec_acct.lock:
+                            old_seq = rec_acct.next_seq
+                            rec_acct.next_seq = ai.result["account_data"]["Sequence"]
+                            log.info(f"Batch rejected: synced {p.account[:8]} sequence {old_seq} -> {rec_acct.next_seq}")
+                    except Exception as e:
+                        log.warning(f"Failed to sync sequence after Batch rejection: {e}")
+
                 return res
 
             if er == "terPRE_SEQ":
@@ -1393,6 +1507,169 @@ class Workload:
         current = await self._current_ledger_index()
         log.info(f"TrustSet complete in {current}: {validated_count}/{total_trustsets} validated")
 
+    async def _wait_all_validated(
+        self,
+        pending_list: list[PendingTx],
+        label: str,
+        timeout: float = 120.0,
+    ) -> dict[str, int]:
+        """Wait for all transactions to reach terminal state.
+
+        Polls check_finality() for each pending tx until all are terminal
+        (VALIDATED, REJECTED, EXPIRED) or timeout.
+
+        Returns dict with counts by final state.
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            # Check finality for each non-terminal tx
+            for p in pending_list:
+                if p.state not in TERMINAL_STATE:
+                    try:
+                        await self.check_finality(p)
+                    except Exception as e:
+                        log.debug(f"check_finality failed for {p.tx_hash}: {e}")
+
+            # Count current states
+            counts: dict[str, int] = {}
+            for p in pending_list:
+                state = p.state.name
+                counts[state] = counts.get(state, 0) + 1
+
+            # All terminal?
+            if all(p.state in TERMINAL_STATE for p in pending_list):
+                validated = counts.get("VALIDATED", 0)
+                total = len(pending_list)
+                log.info(f"{label} complete: {validated}/{total} validated, {counts}")
+                return counts
+
+            await asyncio.sleep(0.5)
+
+        # Timeout - return what we have
+        counts = {}
+        for p in pending_list:
+            state = p.state.name
+            counts[state] = counts.get(state, 0) + 1
+        log.warning(f"{label} timeout after {timeout}s: {counts}")
+        return counts
+
+    async def _submit_and_wait_batched(
+        self,
+        pending_list: list[PendingTx],
+        label: str,
+        max_per_account: int = 10,
+        max_batch_size: int | None = None,
+        timeout: float = 180.0,
+    ) -> dict[str, int]:
+        """Submit transactions in batches respecting per-account AND global limits.
+
+        Groups by account, submits max_per_account at a time per account,
+        BUT also limits total in-flight to max_batch_size to avoid queue overflow.
+
+        Returns dict with counts by final state.
+        """
+        from collections import defaultdict
+
+        # Group by account
+        by_account: dict[str, list[PendingTx]] = defaultdict(list)
+        for p in pending_list:
+            by_account[p.account].append(p)
+
+        total = len(pending_list)
+        submitted_hashes: set[str] = set()
+
+        # Default batch size: expected_ledger_size or 50 (avoid queue overflow)
+        if max_batch_size is None:
+            try:
+                max_batch_size = await self._expected_ledger_size()
+            except Exception:
+                max_batch_size = 50
+
+        log.info(f"{label}: {total} txns across {len(by_account)} accounts (max {max_batch_size}/batch)")
+
+        start = time.time()
+        while time.time() - start < timeout:
+            # Count total in-flight across ALL accounts
+            total_inflight = sum(
+                1 for p in pending_list
+                if p.tx_hash in submitted_hashes and p.state not in TERMINAL_STATE
+            )
+            global_slots = max_batch_size - total_inflight
+
+            if global_slots <= 0:
+                # Wait for some to complete before submitting more
+                await asyncio.sleep(0.5)
+                # Check finality first
+                for p in pending_list:
+                    if p.tx_hash in submitted_hashes and p.state not in TERMINAL_STATE:
+                        try:
+                            await self.check_finality(p)
+                        except Exception:
+                            pass
+                continue
+
+            # Submit up to max_per_account per account, but respect global limit
+            newly_submitted = []
+            for acc, txns in by_account.items():
+                if len(newly_submitted) >= global_slots:
+                    break  # Hit global limit
+
+                # Count in-flight for this account
+                inflight = sum(
+                    1 for p in txns
+                    if p.tx_hash in submitted_hashes and p.state not in TERMINAL_STATE
+                )
+                available_slots = min(max_per_account - inflight, global_slots - len(newly_submitted))
+
+                # Find unsubmitted txns for this account
+                for p in txns:
+                    if available_slots <= 0:
+                        break
+                    if p.tx_hash not in submitted_hashes:
+                        newly_submitted.append(p)
+                        submitted_hashes.add(p.tx_hash)
+                        available_slots -= 1
+
+            # Submit the batch
+            if newly_submitted:
+                log.info(f"  {label}: Submitting {len(newly_submitted)} txns ({len(submitted_hashes)}/{total} total)")
+                for p in newly_submitted:
+                    try:
+                        await self.submit_pending(p)
+                    except Exception as e:
+                        log.error(f"Submit failed for {p.tx_hash}: {e}")
+
+            # Check finality for all submitted txns
+            for p in pending_list:
+                if p.tx_hash in submitted_hashes and p.state not in TERMINAL_STATE:
+                    try:
+                        await self.check_finality(p)
+                    except Exception:
+                        pass
+
+            # Count current states
+            counts: dict[str, int] = {}
+            for p in pending_list:
+                state = p.state.name
+                counts[state] = counts.get(state, 0) + 1
+
+            # All terminal?
+            if all(p.state in TERMINAL_STATE for p in pending_list):
+                validated = counts.get("VALIDATED", 0)
+                log.info(f"{label} complete: {validated}/{total} validated, {counts}")
+                return counts
+
+            # Wait a bit before next round
+            await asyncio.sleep(0.5)
+
+        # Timeout
+        counts = {}
+        for p in pending_list:
+            state = p.state.name
+            counts[state] = counts.get(state, 0) + 1
+        log.warning(f"{label} timeout after {timeout}s: {counts}")
+        return counts
+
     async def _distribute_initial_tokens(self) -> None:
         """Gateways send initial token balances to all users.
 
@@ -1437,59 +1714,418 @@ class Workload:
         current = await self._current_ledger_index()
         log.info(f"Token distribution complete at {current}: {validated_count}/{total_payments} validated")
 
+    # =========================================================================
+    # Simple Init Helpers - Sequential, reliable, separate from continuous workload
+    # =========================================================================
+
+    async def _init_batch(
+        self,
+        txn_wallet_pairs: list[tuple[Transaction, Wallet]],
+        label: str,
+        batch_size: int | None = None,  # None = use dynamic expected_ledger_size + 1
+    ) -> tuple[int, int]:
+        """Simple init helper: build, submit, wait in sequential batches.
+
+        Processes transactions in small batches, waiting for each batch to
+        fully validate before moving to the next. Ensures fresh LastLedgerSequence
+        for each batch.
+
+        Args:
+            batch_size: Fixed batch size, or None for dynamic (expected_ledger_size + 1)
+
+        Returns: (validated_count, total_count)
+        """
+        total = len(txn_wallet_pairs)
+        all_pending: list[PendingTx] = []
+        submit_failed = 0
+        processed = 0
+        batch_num = 0
+
+        dynamic = batch_size is None
+        if dynamic:
+            log.info(f"{label}: {total} transactions (dynamic batch size = expected_ledger_size + 1)")
+        else:
+            log.info(f"{label}: {total} transactions in batches of {batch_size}")
+
+        while processed < total:
+            batch_num += 1
+
+            # Get batch size - dynamic refreshes each iteration to grow with ledger
+            if dynamic:
+                current_batch_size = (await self._expected_ledger_size()) + 1
+            else:
+                current_batch_size = batch_size
+
+            batch_end = min(processed + current_batch_size, total)
+            batch = txn_wallet_pairs[processed:batch_end]
+            batch_pending: list[PendingTx] = []
+
+            # Build, sign, and submit this batch (fresh LLS for each)
+            for txn, wallet in batch:
+                try:
+                    p = await self.build_sign_and_track(txn, wallet)
+                    await self.submit_pending(p)
+                    batch_pending.append(p)
+                except Exception as e:
+                    log.error(f"{label}: Failed to submit: {e}")
+                    submit_failed += 1
+
+            submitted_count = processed + len(batch_pending)
+            log.info(f"  {label}: Submitted batch {batch_num} ({len(batch_pending)} txns) {submitted_count}/{total}")
+
+            # Wait for this batch to complete (all terminal)
+            for _ in range(60):  # 30 seconds max per batch
+                for p in batch_pending:
+                    if p.state not in TERMINAL_STATE:
+                        try:
+                            await self.check_finality(p)
+                        except Exception:
+                            pass
+
+                if all(p.state in TERMINAL_STATE for p in batch_pending):
+                    break
+                await asyncio.sleep(0.5)
+
+            all_pending.extend(batch_pending)
+            processed = batch_end
+
+            # Log batch results
+            batch_validated = sum(1 for p in batch_pending if p.state == C.TxState.VALIDATED)
+            if batch_validated < len(batch_pending):
+                batch_counts: dict[str, int] = {}
+                for p in batch_pending:
+                    batch_counts[p.state.name] = batch_counts.get(p.state.name, 0) + 1
+                log.warning(f"  {label}: Batch results: {batch_counts}")
+
+        # Final counts across all batches
+        counts: dict[str, int] = {}
+        for p in all_pending:
+            counts[p.state.name] = counts.get(p.state.name, 0) + 1
+        if submit_failed > 0:
+            counts["SUBMIT_FAILED"] = submit_failed
+
+        validated = counts.get("VALIDATED", 0)
+        log.info(f"{label} complete: {validated}/{total} validated, {counts}")
+        return validated, total
+
     async def init_participants(self, *, gateway_cfg: dict[str, Any], user_cfg: dict[str, Any]) -> dict:
+        """Initialize gateways and users with phase-based validation barriers.
+
+        Each phase waits for ALL transactions to validate before proceeding:
+        1. Fund gateways -> WAIT -> register gateways
+        2. Gateway flags (AccountSet) -> WAIT
+        3. Fund users -> WAIT -> register users
+        4. TrustSets -> WAIT
+        5. Token distribution -> WAIT
+        """
         out_gw, out_us = [], []
         req_auth = gateway_cfg["require_auth"]
         def_ripple = gateway_cfg["default_ripple"]
-
         gateway_names = gateway_cfg.get("names", [])
-        log.debug(f"Funding {(g := gateway_cfg['number'])} gateways")
-        for i in range(g):
+        currency_codes = self.config["currencies"]["codes"][:4]
+
+        # Timing and ledger tracking
+        phase_stats: list[dict] = []  # [{name, time_sec, ledgers, validated, total}]
+        init_start_time = time.time()
+        init_start_ledger = await self._current_ledger_index()
+
+        # ===== PHASE 1: Fund Gateways =====
+        phase1_start = time.time()
+        phase1_ledger_start = await self._current_ledger_index()
+        gateway_count = gateway_cfg["number"]
+        gateway_balance = str(self.config["gateways"]["default_balance"])
+        log.info(f"Phase 1: Funding {gateway_count} gateways")
+
+        gateway_pending: list[tuple[Wallet, PendingTx, int]] = []  # (wallet, pending, index)
+        for i in range(gateway_count):
             w = Wallet.create()
-            self.wallets[w.address] = w
-            self._record_for(w.address)  # BUG: Only record address in workload after validated on ledger
-            await self._ensure_funded(w, self.config["gateways"]["default_balance"])
-            self.gateways.append(w)
-            # Associate gateway name from config
-            if i < len(gateway_names):
-                self.gateway_names[w.address] = gateway_names[i]
-            self.save_wallet_to_store(w, is_gateway=True)  # Persist gateway wallet
-            out_gw.append(w.address)
+            fund_tx = Payment(
+                account=self.funding_wallet.address,
+                destination=w.address,
+                amount=gateway_balance,
+            )
+            p = await self.build_sign_and_track(fund_tx, self.funding_wallet)
+            await self.submit_pending(p)
+            gateway_pending.append((w, p, i))
+
+        # BARRIER: Wait for all gateway funding to validate
+        gw_results = await self._wait_all_validated(
+            [p for _, p, _ in gateway_pending],
+            "Phase 1: Gateway funding"
+        )
+
+        # NOW register validated gateways (after they exist on-chain)
+        for w, p, i in gateway_pending:
+            if p.state == C.TxState.VALIDATED:
+                self.wallets[w.address] = w
+                self._record_for(w.address)
+                self.gateways.append(w)
+                if i < len(gateway_names):
+                    self.gateway_names[w.address] = gateway_names[i]
+                self.save_wallet_to_store(w, is_gateway=True)
+                out_gw.append(w.address)
+            else:
+                log.error(f"Gateway funding failed: {w.address} state={p.state.name}")
+
+        if not self.gateways:
+            raise RuntimeError("No gateways funded successfully, cannot continue")
 
         # Create currencies issued by each gateway
-        currency_codes = self.config["currencies"]["codes"][:4]
         for gateway in self.gateways:
             gateway_currencies = issue_currencies(gateway.address, currency_codes)
             self._currencies.extend(gateway_currencies)
             gw_name = self.get_account_display_name(gateway.address)
-            log.debug(f"Gateway {gw_name} ({gateway.address}) will issue {len(gateway_currencies)} currencies: {currency_codes}")
+            log.debug(f"Gateway {gw_name} will issue: {currency_codes}")
 
-        # Update context with new currencies
         self.update_txn_context()
 
-        log.debug(f"Funding {(u := user_cfg['number'])} users")
-        for _ in range(u):
-            w = Wallet.create()
-            self.wallets[w.address] = w
-            self._record_for(w.address)
-            await self._ensure_funded(w, self.config["users"]["default_balance"])
-            self.users.append(w)
-            self.save_wallet_to_store(w, is_user=True)  # Persist user wallet
-            out_us.append(w.address)
+        # Record Phase 1 stats
+        phase1_ledger_end = await self._current_ledger_index()
+        phase_stats.append({
+            "name": "Phase 1: Gateway funding",
+            "time_sec": round(time.time() - phase1_start, 2),
+            "ledgers": phase1_ledger_end - phase1_ledger_start,
+            "validated": gw_results.get("VALIDATED", 0),
+            "total": gateway_count,
+        })
 
+        # ===== PHASE 2: Gateway Flags (AccountSet) =====
+        phase2_start = time.time()
+        phase2_ledger_start = await self._current_ledger_index()
         if req_auth or def_ripple:
-            await self._apply_gateway_flags(req_auth=req_auth, def_ripple=def_ripple)
+            log.info(f"Phase 2: Setting gateway flags (require_auth={req_auth}, default_ripple={def_ripple})")
 
-        # Establish trust lines: users create TrustSet for all currencies
-        log.debug(f"Establishing trust lines for {len(self.users)} users across {len(self._currencies)} currencies")
-        await self._establish_trust_lines()
+            flag_pending: list[PendingTx] = []
+            flags_to_set: list[AccountSetAsfFlag] = []
+            if req_auth:
+                flags_to_set.append(AccountSetAsfFlag.ASF_REQUIRE_AUTH)
+            if def_ripple:
+                flags_to_set.append(AccountSetAsfFlag.ASF_DEFAULT_RIPPLE)
 
-        # Distribute initial tokens: gateways send tokens to users
-        log.debug(f"Distributing initial tokens from {len(self.gateways)} gateways to {len(self.users)} users")
-        await self._distribute_initial_tokens()
+            for w in self.gateways:
+                for flag in flags_to_set:
+                    tx = AccountSet(account=w.address, set_flag=flag)
+                    p = await self.build_sign_and_track(tx, w)
+                    await self.submit_pending(p)
+                    flag_pending.append(p)
 
-        # Persist currencies after initialization
+            # BARRIER: Wait for all flags
+            p2_results = await self._wait_all_validated(flag_pending, "Phase 2: Gateway flags")
+            phase2_validated = p2_results.get("VALIDATED", 0)
+            phase2_total = len(flag_pending)
+        else:
+            log.info("Phase 2: Skipping gateway flags (none configured)")
+            phase2_validated = 0
+            phase2_total = 0
+
+        # Record Phase 2 stats
+        phase2_ledger_end = await self._current_ledger_index()
+        phase_stats.append({
+            "name": "Phase 2: Gateway flags",
+            "time_sec": round(time.time() - phase2_start, 2),
+            "ledgers": phase2_ledger_end - phase2_ledger_start,
+            "validated": phase2_validated,
+            "total": phase2_total,
+        })
+
+        # ===== PHASE 3: Fund Users (batched to avoid queue overflow) =====
+        phase3_start = time.time()
+        phase3_ledger_start = await self._current_ledger_index()
+        user_count = user_cfg["number"]
+        user_balance = str(self.config["users"]["default_balance"])
+        batch_size = 10  # Funding wallet can have max 10 in queue
+        log.info(f"Phase 3: Funding {user_count} users in batches of {batch_size}")
+
+        # Create all wallets first
+        new_wallets = [Wallet.create() for _ in range(user_count)]
+        user_pending: list[tuple[Wallet, PendingTx]] = []
+
+        for batch_start in range(0, user_count, batch_size):
+            batch_wallets = new_wallets[batch_start:batch_start + batch_size]
+            batch_pending: list[tuple[Wallet, PendingTx]] = []
+
+            # Build, sign, submit this batch
+            for w in batch_wallets:
+                fund_tx = Payment(
+                    account=self.funding_wallet.address,
+                    destination=w.address,
+                    amount=user_balance,
+                )
+                p = await self.build_sign_and_track(fund_tx, self.funding_wallet)
+                await self.submit_pending(p)
+                batch_pending.append((w, p))
+
+            log.info(f"  Phase 3: Submitted batch {batch_start//batch_size + 1} ({len(batch_pending)} users)")
+
+            # Wait for this batch to validate before next batch
+            for _ in range(60):
+                for w, p in batch_pending:
+                    if p.state not in TERMINAL_STATE:
+                        try:
+                            await self.check_finality(p)
+                        except Exception:
+                            pass
+                if all(p.state in TERMINAL_STATE for _, p in batch_pending):
+                    break
+                await asyncio.sleep(0.5)
+
+            user_pending.extend(batch_pending)
+
+        # Register validated users
+        for w, p in user_pending:
+            if p.state == C.TxState.VALIDATED:
+                self.wallets[w.address] = w
+                self._record_for(w.address)
+                self.users.append(w)
+                self.save_wallet_to_store(w, is_user=True)
+                out_us.append(w.address)
+            else:
+                log.error(f"User funding failed: {w.address} state={p.state.name}")
+
+        validated_users = len(self.users)
+        log.info(f"Phase 3 complete: {validated_users}/{user_count} users funded")
+
+        if not self.users:
+            raise RuntimeError("No users funded successfully, cannot continue")
+
+        self.update_txn_context()
+
+        # Record Phase 3 stats
+        phase3_ledger_end = await self._current_ledger_index()
+        phase_stats.append({
+            "name": "Phase 3: User funding",
+            "time_sec": round(time.time() - phase3_start, 2),
+            "ledgers": phase3_ledger_end - phase3_ledger_start,
+            "validated": validated_users,
+            "total": user_count,
+        })
+
+        # ===== PHASE 4: TrustSets (using simple init batch) =====
+        phase4_start = time.time()
+        phase4_ledger_start = await self._current_ledger_index()
+        total_trustsets = len(self.users) * len(self._currencies)
+        log.info(f"Phase 4: Establishing {total_trustsets} trust lines ({len(self.users)} users × {len(self._currencies)} currencies)")
+
+        trust_limit = str(self.config["transactions"]["trustset"]["limit"])
+
+        # Build (Transaction, Wallet) pairs - NOT signed yet
+        # IMPORTANT: Interleave accounts (currency-first) to spread load across accounts
+        # This way each batch has different accounts rather than hammering one account
+        trust_txn_pairs: list[tuple[Transaction, Wallet]] = []
+        for currency in self._currencies:
+            for user in self.users:
+                trust_tx = TrustSet(
+                    account=user.address,
+                    limit_amount=IssuedCurrencyAmount(
+                        currency=currency.currency,
+                        issuer=currency.issuer,
+                        value=trust_limit,
+                    ),
+                )
+                trust_txn_pairs.append((trust_tx, user))
+
+        # Use dynamic batch size (expected_ledger_size + 1, refreshed each batch)
+        phase4_validated, phase4_total = await self._init_batch(trust_txn_pairs, "Phase 4: TrustSets")
+        if phase4_validated < phase4_total:
+            log.warning(f"Phase 4: Only {phase4_validated}/{phase4_total} TrustSets validated - some tokens may fail")
+
+        # Record Phase 4 stats
+        phase4_ledger_end = await self._current_ledger_index()
+        phase_stats.append({
+            "name": "Phase 4: TrustSets",
+            "time_sec": round(time.time() - phase4_start, 2),
+            "ledgers": phase4_ledger_end - phase4_ledger_start,
+            "validated": phase4_validated,
+            "total": phase4_total,
+        })
+
+        # ===== PHASE 5: Token Distribution (Fan-out Seeding, using simple init batch) =====
+        phase5_start = time.time()
+        phase5_ledger_start = await self._current_ledger_index()
+        # Only seed a subset of users - they'll redistribute during continuous workload
+        # Generic formula: max(sqrt(users), gateways * 2) ensures enough seeds for parallelism
+        import math
+        num_users = len(self.users)
+        num_gateways = len(self.gateways)
+        seed_count = min(max(int(math.sqrt(num_users)), num_gateways * 2), num_users)
+        seed_users = self.users[:seed_count]
+
+        # Seeds get enough to redistribute to their share of users, with buffer
+        base_amount = int(self.config.get("currencies", {}).get("token_distribution", 1_000_000))
+        users_per_seed = max(1, num_users // seed_count)
+        seed_amount = base_amount * users_per_seed * 2  # 2x buffer for redistribution
+        seed_amount_str = str(seed_amount)
+
+        total_payments = seed_count * len(self._currencies)
+        log.info(f"Phase 5: Seeding {seed_count} users with tokens ({total_payments} payments)")
+        log.info(f"  Formula: max(sqrt({num_users}), {num_gateways}*2) = {seed_count} seeds")
+        log.info(f"  Amount per seed: {seed_amount} ({users_per_seed} users/seed × {base_amount} × 2)")
+        log.info(f"  Remaining {num_users - seed_count} users receive tokens via fan-out during continuous workload")
+
+        # Build (Transaction, Wallet) pairs - NOT signed yet
+        # Also track balance updates to apply after validation
+        dist_txn_pairs: list[tuple[Transaction, Wallet]] = []
+        balance_updates: list[tuple[str, str, float, str]] = []  # (user, currency, amount, issuer)
+
+        for currency in self._currencies:
+            issuer_wallet = self.wallets.get(currency.issuer)
+            if not issuer_wallet:
+                log.error(f"Cannot find wallet for gateway {currency.issuer}")
+                continue
+
+            for user in seed_users:
+                payment_tx = Payment(
+                    account=currency.issuer,
+                    destination=user.address,
+                    amount=IssuedCurrencyAmount(
+                        currency=currency.currency,
+                        issuer=currency.issuer,
+                        value=seed_amount_str,
+                    ),
+                )
+                dist_txn_pairs.append((payment_tx, issuer_wallet))
+                balance_updates.append((user.address, currency.currency, float(seed_amount), currency.issuer))
+
+        # Use dynamic batch size (expected_ledger_size + 1, refreshed each batch)
+        phase5_validated, phase5_total = await self._init_batch(dist_txn_pairs, "Phase 5: Token seeding")
+
+        # Pre-populate balances (will be updated accurately as txns validate via record_validated)
+        for user_addr, currency_code, amount, issuer in balance_updates:
+            self._set_balance(user_addr, currency_code, amount, issuer)
+
+        if phase5_validated < phase5_total:
+            log.warning(f"Phase 5: Only {phase5_validated}/{phase5_total} token distributions validated")
+
+        # Record Phase 5 stats
+        phase5_ledger_end = await self._current_ledger_index()
+        phase_stats.append({
+            "name": "Phase 5: Token seeding",
+            "time_sec": round(time.time() - phase5_start, 2),
+            "ledgers": phase5_ledger_end - phase5_ledger_start,
+            "validated": phase5_validated,
+            "total": phase5_total,
+        })
+
+        # Persist currencies
         self.save_currencies_to_store()
+
+        # ===== SUMMARY =====
+        init_end_time = time.time()
+        init_end_ledger = await self._current_ledger_index()
+        total_time = round(init_end_time - init_start_time, 2)
+        total_ledgers = init_end_ledger - init_start_ledger
+        total_validated = sum(p["validated"] for p in phase_stats)
+        total_txns = sum(p["total"] for p in phase_stats)
+
+        log.info("=" * 60)
+        log.info("INITIALIZATION SUMMARY")
+        log.info("=" * 60)
+        for p in phase_stats:
+            log.info(f"  {p['name']}: {p['validated']}/{p['total']} validated, {p['time_sec']}s, {p['ledgers']} ledgers")
+        log.info("-" * 60)
+        log.info(f"  TOTAL: {total_validated}/{total_txns} validated, {total_time}s, {total_ledgers} ledgers")
+        log.info(f"  Final state: {len(self.gateways)} gateways, {len(self.users)} users at ledger {init_end_ledger}")
+        log.info("=" * 60)
 
         return {"gateways": out_gw, "users": out_us}
 
