@@ -126,6 +126,86 @@ Fixed critical issues with transaction error handling and throughput:
 
 ---
 
+## Session 2025-11-24: Dynamic Batch Sizing, Phase 4 Interleaving, Batch Sequence Handling
+
+### Summary
+
+Fixed initialization throughput issues and implemented proper Batch transaction sequence management:
+
+1. **Dynamic Batch Sizing in Init Phases** (workload_core.py:1690-1779)
+   - Problem: Phase 4 used initial expected_ledger_size (33) for all batches, never growing
+   - Fix: Changed `_init_batch` to support dynamic sizing via `batch_size: int | None`
+   - None = dynamic mode, refreshes `expected_ledger_size + 1` each iteration
+   - Result: Batches grow with ledger (33 → 64 → 128...) to push size without fee escalation
+
+2. **Phase 4 Account Interleaving** (workload_core.py:1976-1997)
+   - Problem: User-first loop order hammered same account with many txns per batch
+   - Fix: Changed to currency-first loop order: `for currency in currencies: for user in users`
+   - Result: Each batch spreads across different accounts, better load distribution
+
+3. **M/N Progress Logging** (workload_core.py:1750-1751)
+   - Added batch progress: `"Submitted batch 9 (33 txns) 297/1024"`
+   - Shows batch number, size, and cumulative progress
+
+4. **Batch Transaction Sequence Handling** (workload_core.py:808-820, 1066-1077, 889-891)
+   - Problem: Batch pre-allocates 1 (outer) + K (inner) sequences at build time
+   - Actual consumption is 1 + N (successful inner) where N ≤ K
+   - Can't predict N until validation
+   - Fix: After Batch validates/rejects/expires, sync sequence from ledger via AccountInfo
+   - Added sync in `record_validated` (after validation)
+   - Added sync in `submit_pending` (after tem/tef rejection)
+   - Added logging in `record_expired` (cascade_expire handles sync)
+
+5. **Init Phase Timing & Summary** (workload_core.py:1777-1780, 2087-2106)
+   - Added per-phase tracking: time_sec, ledgers, validated/total counts
+   - Final summary table shows all phases with metrics
+
+6. **Enabled Batch Transactions** (config.toml:49-52)
+   - Re-enabled Batch (removed from disabled list)
+   - Now safe with sequence sync after completion
+
+### Technical Details
+
+**Batch Transaction Mechanics:**
+- Fee = 2 × owner_reserve + (inner_count × base_fee)
+- Sequence consumption = 1 (outer) + N (successful inner), where 0 ≤ N ≤ K
+- Must pre-allocate all K+1 sequences at build time
+- Sync actual consumption from ledger after terminal state using AccountInfo with ledger_index="current"
+
+**Dynamic Batching:**
+- Phase 4 & 5 now use `await self._init_batch(pairs, label)` with no batch_size parameter
+- Each batch iteration calls `await self._expected_ledger_size()` to get fresh limit
+- Batch size = expected_ledger_size + 1 (just over limit to push growth without triggering escalation)
+
+### Key Files Modified
+- `workload/src/workload/workload_core.py`: _init_batch, Phase 4/5, record_validated, submit_pending, record_expired
+- `workload/src/workload/config.toml`: Enabled Batch
+
+### Objectives
+
+This work addresses issues from latest_workload_run_info.md:
+- Mitigate tefPAST_SEQ (148) and terPRE_SEQ (299) sequence errors
+- Improve transaction distribution across ledgers more consistently
+- Fix Batch sequence handling to prevent cascade sequence burn on expiry
+- Increase validated rate from 81.5% toward 90%+ target
+
+### Status
+
+**Completed:**
+- Dynamic batch sizing implemented and tested in code
+- Phase 4 interleaving from user-first to currency-first
+- Batch sequence sync after all terminal states
+- M/N progress logging
+- Per-phase timing and summary table
+
+**Pending:**
+- Full workload run to verify dynamic batching grows correctly
+- Monitor tefPAST_SEQ/terPRE_SEQ counts with new Batch handling
+- Verify ledgers consistently hit expected_ledger_size + 1
+- Confirm validated rate improvement
+
+---
+
 ## Testing Commands
 
 ```bash
