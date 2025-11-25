@@ -1,6 +1,7 @@
 import asyncio
-import uvicorn
 from contextlib import suppress
+
+import uvicorn
 
 
 def main():

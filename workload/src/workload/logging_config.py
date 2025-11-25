@@ -31,33 +31,32 @@ LOGGING_CONFIG = {
         "workload": {
             "level": LOG_LEVEL,
             "handlers": ["console", "file"],
-            "propagate": False, # Don't pass 'workload' logs up to the root logger
+            "propagate": False,  # Don't pass 'workload' logs up to the root logger
         },
-        # Shut the log levels for libraries up
         "fastapi": {
             "level": "INFO",
             "handlers": ["console", "file"],
             "propagate": False,
         },
         "uvicorn.access": {
-             "level": "WARNING", # Quiets the noisy access logs
-             "handlers": ["console", "file"],
-             "propagate": False,
-        },
-        "xrpl": {
-            "level": "WARNING", # Only show warnings/errors from xrpl-py
+            "level": "WARNING",  # Quiets the noisy access logs
             "handlers": ["console", "file"],
             "propagate": False,
-        }
+        },
+        "xrpl": {
+            "level": "WARNING",  # Only show warnings/errors from xrpl-py
+            "handlers": ["console", "file"],
+            "propagate": False,
+        },
     },
-    # Default for all other loggers
     "root": {
         "level": "WARNING",
         "handlers": ["console", "file"],
     },
 }
 
+
 def setup_logging():
-    """ Apply the logging configuration. """
+    """Apply the logging configuration."""
     logging.config.dictConfig(LOGGING_CONFIG)
     os.environ.setdefault("PYTHONUNBUFFERED", "1")

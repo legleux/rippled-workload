@@ -1,4 +1,3 @@
-# workload/ws.py
 """
 WebSocket listener that:
 1. Maintains persistent connection to rippled WS endpoint
@@ -6,11 +5,13 @@ WebSocket listener that:
 3. Publishes events to a queue for workload processing
 4. Handles reconnection with exponential backoff
 """
+
 import asyncio
 import json
 import logging
-import websockets
 from typing import Literal
+
+import websockets
 
 log = logging.getLogger("workload.ws")
 
@@ -18,7 +19,6 @@ RECV_TIMEOUT = 90.0
 RECONNECT_BASE = 1.0
 RECONNECT_MAX = 10.0
 
-# Event types we publish to the queue
 EventType = Literal["tx_validated", "tx_response", "ledger_closed", "server_status", "raw"]
 
 
@@ -47,15 +47,9 @@ async def ws_listener(
 
     while not stop.is_set():
         try:
-            async with websockets.connect(
-                ws_url,
-                ping_interval=20,
-                ping_timeout=20,
-                close_timeout=1
-            ) as ws:
+            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20, close_timeout=1) as ws:
                 log.info("WS connected: %s", ws_url)
 
-                # Get account addresses to subscribe to
                 accounts = None
                 if accounts_provider:
                     try:
@@ -67,16 +61,9 @@ async def ws_listener(
                     except Exception as e:
                         log.warning(f"Failed to get accounts from provider: {e}, falling back to transaction stream")
 
-                # Subscribe to ledger + server streams + either specific accounts or all transactions
                 if accounts:
-                    # Efficient: subscribe only to our accounts
-                    streams = ["ledger", "server"] # TODO: Abstract out subscriptions
-                    subscribe_msg = {
-                        "id": 1,
-                        "command": "subscribe",
-                        "streams": streams,
-                        "accounts": accounts
-                    }
+                    streams = ["ledger", "server"]  # TODO: Abstract out subscriptions
+                    subscribe_msg = {"id": 1, "command": "subscribe", "streams": streams, "accounts": accounts}
                     if len(streams) > 2:
                         steams_string = ", ".join(streams[:-1]) + f"and {streams[-1]}"
                     elif len(streams) == 2:
@@ -84,19 +71,14 @@ async def ws_listener(
                     else:
                         steams_string, _ = streams
                     log.info("Subscribing to %s + %s specific accounts", steams_string, len(accounts))
-                    # print(f"Subscribing to {steams_string} + {len(accounts)} specific accounts")
                 else:
-                    # Fallback: subscribe to all transactions (used during init before accounts exist)
-                    subscribe_msg = {
-                        "id": 1,
-                        "command": "subscribe",
-                        "streams": ["transactions", "ledger", "server"]
-                    }
-                    log.info("Subscribing to ALL transactions + ledger + server (fallback - will switch to accounts after init/reconnect)")
+                    subscribe_msg = {"id": 1, "command": "subscribe", "streams": ["transactions", "ledger", "server"]}
+                    log.info(
+                        "Subscribing to ALL transactions + ledger + server (fallback - will switch to accounts after init/reconnect)"
+                    )
 
                 await ws.send(json.dumps(subscribe_msg))
 
-                # Wait for subscription acknowledgment
                 try:
                     ack = await asyncio.wait_for(ws.recv(), timeout=10)
                     ack_obj = json.loads(ack)
@@ -106,29 +88,21 @@ async def ws_listener(
                 except asyncio.TimeoutError:
                     log.warning("WS subscription ack timeout, continuing anyway")
 
-                # Reset backoff on successful connection
                 backoff = RECONNECT_BASE
 
-                # Main message loop
                 while not stop.is_set():
                     recv_task = asyncio.create_task(ws.recv())
                     halt_task = asyncio.create_task(stop.wait())
 
-                    done, pending = await asyncio.wait(
-                        {recv_task, halt_task},
-                        return_when=asyncio.FIRST_COMPLETED
-                    )
+                    done, pending = await asyncio.wait({recv_task, halt_task}, return_when=asyncio.FIRST_COMPLETED)
 
-                    # Cancel pending task
                     for t in pending:
                         t.cancel()
 
-                    # Check if we're shutting down
                     if halt_task in done:
                         log.info("WS listener received stop signal")
                         return
 
-                    # Process the message
                     try:
                         msg = recv_task.result()
                         await _process_message(msg, event_queue)
@@ -141,11 +115,9 @@ async def ws_listener(
         except Exception as e:
             log.error("WS connection error: %s", e)
 
-        # Don't reconnect if we're stopping
         if stop.is_set():
             break
 
-        # Exponential backoff before reconnecting
         log.info("WS reconnecting in %.1fs", backoff)
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, RECONNECT_MAX)
@@ -171,39 +143,31 @@ async def _process_message(raw_msg: str, queue: asyncio.Queue) -> None:
 
     msg_type = obj.get("type")
 
-    # Transaction validation notification from stream
     if msg_type == "transaction" and obj.get("validated"):
-        log.debug("WS tx_validated: hash=%s ledger=%s",
-                 obj.get("transaction", {}).get("hash"),
-                 obj.get("ledger_index"))
+        log.debug("WS tx_validated: hash=%s ledger=%s", obj.get("transaction", {}).get("hash"), obj.get("ledger_index"))
         await queue.put(("tx_validated", obj))
         return
 
-    # Ledger close notification
     if msg_type == "ledgerClosed":
         ledger_idx = obj.get("ledger_index")
         log.debug("WS ledger_closed: %s", ledger_idx)
         await queue.put(("ledger_closed", obj))
         return
 
-    # Server status notification from server stream
     if msg_type == "serverStatus":
         log.debug("WS server_status: load_factor=%s", obj.get("load_factor"))
         await queue.put(("server_status", obj))
         return
 
-    # Immediate submission response (has engine_result)
     engine_result = obj.get("engine_result")
     if engine_result:
         log.debug("WS tx_response: result=%s", engine_result)
         await queue.put(("tx_response", obj))
         return
 
-    # Subscription acknowledgments, status messages, etc.
     status = obj.get("status")
     if status:
         log.debug("WS status: %s", status)
         return
 
-    # Unknown message type - log and continue
     log.debug("WS unknown message type: %s", obj.get("type") or "no_type")

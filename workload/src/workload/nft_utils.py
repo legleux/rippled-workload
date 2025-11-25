@@ -39,18 +39,14 @@ def encode_nftoken_id(
         >>> encode_nftoken_id(11, 1337, "rJoxBSzpXhPtAuqFmqxQtGKjA13jUJWthE", 1337, 12)
         '000B0539C35B55AA096BA6D87A6E6C965A6534150DC56E5E12C5D09E0000000C'
     """
-    # Decode issuer address to 20-byte account ID
     issuer_bytes = base58.b58decode_check(issuer, alphabet=base58.XRP_ALPHABET)
-    # Remove the 1-byte type prefix if present
     issuer_bytes = issuer_bytes[1:] if len(issuer_bytes) > 20 else issuer_bytes
 
     if len(issuer_bytes) != 20:
         raise ValueError(f"Issuer must decode to 20 bytes, got {len(issuer_bytes)}")
 
-    # Scramble taxon with sequence
     taxon_bytes = scramble_taxon(taxon, sequence)
 
-    # Construct NFTokenID: [flags][transfer_fee][issuer][scrambled_taxon][sequence]
     nftoken_id_bytes = (
         flags.to_bytes(2, byteorder="big")
         + transfer_fee.to_bytes(2, byteorder="big")

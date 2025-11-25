@@ -5,11 +5,13 @@ Test script to verify WebSocket integration is working correctly.
 Usage:
     python test_ws_integration.py [--base-url http://localhost:8000]
 """
+
 import asyncio
-import httpx
 import sys
 from datetime import datetime
-from typing import Dict, Any
+from typing import Any, Dict
+
+import httpx
 
 BASE_URL = "http://localhost:8000"
 
@@ -103,7 +105,9 @@ async def test_ws_validation_source():
             print_status("WS validations detected", True, details)
             return True
         elif poll_count > 0:
-            print(f"      {Colors.YELLOW}Note: Only POLL validations so far. WS may not have seen transactions yet.{Colors.END}")
+            print(
+                f"      {Colors.YELLOW}Note: Only POLL validations so far. WS may not have seen transactions yet.{Colors.END}"
+            )
             return True
         else:
             print(f"      {Colors.YELLOW}Note: No validations yet. Submit transactions to test.{Colors.END}")
@@ -130,9 +134,9 @@ async def test_submit_and_validate():
         # Try to extract tx_hash from various possible locations
         if isinstance(tx_result, dict):
             tx_hash = (
-                tx_result.get("tx_hash") or
-                tx_result.get("tx_json", {}).get("hash") or
-                tx_result.get("result", {}).get("tx_json", {}).get("hash")
+                tx_result.get("tx_hash")
+                or tx_result.get("tx_json", {}).get("hash")
+                or tx_result.get("result", {}).get("tx_json", {}).get("hash")
             )
 
         if not tx_hash:
@@ -154,14 +158,17 @@ async def test_submit_and_validate():
                     ledger = v.get("ledger")
 
                     is_ws = source == "WS"
-                    details = f"Validated in ledger {ledger} via {source} ({i+1}s)"
+                    details = f"Validated in ledger {ledger} via {source} ({i + 1}s)"
                     print_status("Transaction validated", True, details)
 
                     if is_ws:
                         print_status("Validation via WebSocket", True, "🎉 WS integration working!")
                     else:
-                        print_status("Validation via WebSocket", False,
-                                   f"Validated via {source} instead (WS may be slow/disconnected)")
+                        print_status(
+                            "Validation via WebSocket",
+                            False,
+                            f"Validated via {source} instead (WS may be slow/disconnected)",
+                        )
 
                     return is_ws
 

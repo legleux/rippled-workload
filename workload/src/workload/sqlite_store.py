@@ -2,18 +2,18 @@
 
 import asyncio
 import json
+import logging
 import sqlite3
 import time
 from collections import deque
 from pathlib import Path
 
 import xrpl
-from xrpl.wallet import Wallet
 from xrpl.models import IssuedCurrency
+from xrpl.wallet import Wallet
 
-from workload.workload_core import ValidationRecord, TERMINAL_STATE
 import workload.constants as C
-import logging
+from workload.workload_core import TERMINAL_STATE, ValidationRecord
 
 log = logging.getLogger("workload.sqlite_store")
 
@@ -28,9 +28,7 @@ class SQLiteStore:
         self.count_by_state: dict[str, int] = {}
         self.validated_by_source: dict[str, int] = {}
 
-        # Initialize database
         self._init_db()
-        # Load validations into memory for fast access
         self._load_validations()
         self._recount()
 
@@ -109,10 +107,9 @@ class SQLiteStore:
             )
             conn.commit()
 
-            # Migration: Add funded_ledger_index column if it doesn't exist
             cursor = conn.execute("PRAGMA table_info(wallets)")
             columns = [row[1] for row in cursor.fetchall()]
-            if 'funded_ledger_index' not in columns:
+            if "funded_ledger_index" not in columns:
                 conn.execute("ALTER TABLE wallets ADD COLUMN funded_ledger_index INTEGER")
                 conn.commit()
             log.debug(f"SQLite database initialized at {self.db_path}")
@@ -126,7 +123,6 @@ class SQLiteStore:
             cursor = conn.execute(
                 "SELECT tx_hash, ledger_seq, source FROM validations ORDER BY validated_at DESC LIMIT 5000"
             )
-            # Reverse to get chronological order
             for tx_hash, ledger_seq, source in reversed(cursor.fetchall()):
                 self.validations.append(ValidationRecord(txn=tx_hash, seq=ledger_seq, src=source))
         finally:
@@ -136,19 +132,13 @@ class SQLiteStore:
         """Recompute metrics from database."""
         conn = sqlite3.connect(self.db_path)
         try:
-            # Count by state
             cursor = conn.execute("SELECT state, COUNT(*) FROM transactions GROUP BY state")
             self.count_by_state = dict(cursor.fetchall())
 
-            # Count validations by source
             cursor = conn.execute("SELECT source, COUNT(*) FROM validations GROUP BY source")
             self.validated_by_source = dict(cursor.fetchall())
         finally:
             conn.close()
-
-    # =========================================================================
-    # Transaction record methods (Store protocol)
-    # =========================================================================
 
     async def update_record(self, tx: dict) -> None:
         """Insert or update a transaction record."""
@@ -209,7 +199,6 @@ class SQLiteStore:
         async with self._lock:
             conn = sqlite3.connect(self.db_path)
             try:
-                # Get existing record
                 cursor = conn.execute("SELECT data FROM transactions WHERE tx_hash = ?", (tx_hash,))
                 row = cursor.fetchone()
                 rec = json.loads(row[0]) if row else {}
@@ -225,16 +214,13 @@ class SQLiteStore:
                     state = state.name
                     rec["state"] = state
 
-                # Terminal handling
                 if state in TERMINAL_STATE:
                     rec.setdefault("finalized_at", time.time())
 
-                    # Validation history
                     if state == "VALIDATED" and prev_state != "VALIDATED":
                         seq = rec.get("validated_ledger") or 0
                         src = source or rec.get("source", "unknown")
 
-                        # Check if validation already exists
                         cursor = conn.execute(
                             "SELECT 1 FROM validations WHERE tx_hash = ? AND ledger_seq = ?",
                             (tx_hash, seq),
@@ -245,7 +231,6 @@ class SQLiteStore:
                                 "VALUES (?, ?, ?, ?)",
                                 (tx_hash, seq, src, time.time()),
                             )
-                            # Add to in-memory deque
                             if not any(v.txn == tx_hash and v.seq == seq for v in self.validations):
                                 log.debug("%s ValidationRecord in %s by %s -- %s", state, seq, src, tx_hash)
                                 self.validations.append(ValidationRecord(txn=tx_hash, seq=seq, src=src))
@@ -298,7 +283,6 @@ class SQLiteStore:
                 rec = json.loads(row[0])
                 rec["tx_hash"] = new_hash
 
-                # Delete old, insert new
                 conn.execute("DELETE FROM transactions WHERE tx_hash = ?", (old_hash,))
                 now = time.time()
                 conn.execute(
@@ -356,7 +340,6 @@ class SQLiteStore:
             cursor = conn.execute("SELECT COUNT(*) FROM transactions")
             total = cursor.fetchone()[0]
 
-            # Count validated transactions by result code (tesSUCCESS vs tec* vs other)
             cursor = conn.execute("""
                 SELECT
                     CASE
@@ -372,7 +355,6 @@ class SQLiteStore:
             """)
             validated_by_result = {row[0]: row[1] for row in cursor.fetchall()}
 
-            # Count submission results by engine_result_first (shows terPRE_SEQ, telCAN_NOT_QUEUE, etc.)
             cursor = conn.execute("""
                 SELECT json_extract(data, '$.engine_result_first') as result, COUNT(*) as count
                 FROM transactions
@@ -394,15 +376,12 @@ class SQLiteStore:
         finally:
             conn.close()
 
-    # =========================================================================
-    # Wallet persistence
-    # =========================================================================
-
-    def save_wallet(self, wallet: Wallet, is_gateway: bool = False, is_user: bool = False, funded_ledger_index: int | None = None) -> None:
+    def save_wallet(
+        self, wallet: Wallet, is_gateway: bool = False, is_user: bool = False, funded_ledger_index: int | None = None
+    ) -> None:
         """Persist a wallet to database."""
         conn = sqlite3.connect(self.db_path)
         try:
-            # Get algorithm name
             algo = wallet.algorithm if hasattr(wallet, "algorithm") else "secp256k1"
             if isinstance(algo, xrpl.CryptoAlgorithm):
                 algo = algo.value
@@ -419,7 +398,9 @@ class SQLiteStore:
                 (wallet.address, wallet.seed, algo, int(is_gateway), int(is_user), time.time(), funded_ledger_index),
             )
             conn.commit()
-            log.debug(f"Saved wallet {wallet.address} (gateway={is_gateway}, user={is_user}, funded_ledger={funded_ledger_index})")
+            log.debug(
+                f"Saved wallet {wallet.address} (gateway={is_gateway}, user={is_user}, funded_ledger={funded_ledger_index})"
+            )
         finally:
             conn.close()
 
@@ -430,7 +411,6 @@ class SQLiteStore:
             cursor = conn.execute("SELECT address, seed, algorithm, is_gateway, is_user FROM wallets")
             result = {}
             for address, seed, algo_str, is_gateway, is_user in cursor.fetchall():
-                # Convert algorithm string to enum
                 try:
                     algo = xrpl.CryptoAlgorithm(algo_str)
                 except ValueError:
@@ -443,10 +423,6 @@ class SQLiteStore:
             return result
         finally:
             conn.close()
-
-    # =========================================================================
-    # Currency persistence
-    # =========================================================================
 
     def save_currency(self, currency: IssuedCurrency) -> None:
         """Persist an issued currency."""
@@ -469,10 +445,6 @@ class SQLiteStore:
         finally:
             conn.close()
 
-    # =========================================================================
-    # Metadata check
-    # =========================================================================
-
     def has_state(self) -> bool:
         """Check if database has any persisted state (wallets or transactions)."""
         conn = sqlite3.connect(self.db_path)
@@ -488,10 +460,6 @@ class SQLiteStore:
             return has_state
         finally:
             conn.close()
-
-    # =========================================================================
-    # Balance tracking
-    # =========================================================================
 
     def update_balance(
         self, account: str, asset_type: str, value: str, currency: str | None = None, issuer: str | None = None

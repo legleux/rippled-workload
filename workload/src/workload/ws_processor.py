@@ -1,10 +1,10 @@
-# workload/ws_processor.py
 """
 WebSocket event processor that consumes events from the WS listener queue
 and updates transaction states in the Workload.
 
 This is the bridge between the passive WS listener and the active Workload state machine.
 """
+
 import asyncio
 import logging
 from typing import TYPE_CHECKING
@@ -12,19 +12,22 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from workload.workload_core import Workload
 
-from workload.workload_core import ValidationRecord, ValidationSrc
 import workload.constants as C
+from workload.workload_core import ValidationRecord, ValidationSrc
 
 try:
-    from antithesis.assertions import sometimes, always
+    from antithesis.assertions import always, sometimes
+
     ANTITHESIS_AVAILABLE = True
 except ImportError:
     ANTITHESIS_AVAILABLE = False
-    # No-op fallbacks for when not in Antithesis environment
+
     def sometimes(condition, message, details=None):
         pass
+
     def always(condition, message, details=None):
         pass
+
 
 log = logging.getLogger("workload.ws_processor")
 
@@ -57,12 +60,10 @@ async def process_ws_events(
     try:
         while not stop.is_set():
             try:
-                # Wait for event with timeout so we can check stop signal
                 event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
                 event_type, data = event
 
                 if event_type == "tx_validated":
-                    # Process sequentially to avoid flooding event loop with concurrent tasks
                     await _handle_tx_validated(workload, data)
                     processed_count += 1
 
@@ -73,23 +74,18 @@ async def process_ws_events(
                     await _handle_server_status(workload, data)
 
                 elif event_type == "tx_response":
-                    # For future: when we switch to WS submission
                     await _handle_tx_response(workload, data)
 
                 elif event_type == "raw":
-                    # Unknown messages - just log
                     pass
 
-                # Periodic stats logging
                 if processed_count > 0 and processed_count % 100 == 0:
                     log.info("WS processor: %d validations processed", processed_count)
 
             except asyncio.TimeoutError:
-                # No event in 1s, check stop signal and continue
                 continue
             except Exception as e:
                 log.error("Error processing WS event: %s", e, exc_info=True)
-                # Continue processing despite errors
 
     except asyncio.CancelledError:
         log.info("WS event processor cancelled")
@@ -131,15 +127,11 @@ async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
         log.debug("WS validation missing tx hash, ignoring")
         return
 
-    # Check if this is a transaction we're tracking
     pending = workload.pending.get(tx_hash)
     if not pending:
-        # Transaction affecting our account but we didn't submit it
-        # (e.g., payment TO us from external source, or system transaction)
         log.debug("WS validation for non-pending tx affecting our accounts: %s", tx_hash[:8])
         return
 
-    # Extract validation data
     ledger_index = msg.get("ledger_index")
     meta = msg.get("meta", {})
     meta_result = meta.get("TransactionResult")
@@ -148,15 +140,14 @@ async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
         log.warning("WS validation missing ledger_index for tx %s", tx_hash)
         return
 
-    log.debug("WS validation: tx=%s ledger=%s result=%s account=%s",
-              tx_hash[:8], ledger_index, meta_result, pending.account[:8])
+    log.debug(
+        "WS validation: tx=%s ledger=%s result=%s account=%s",
+        tx_hash[:8],
+        ledger_index,
+        meta_result,
+        pending.account[:8],
+    )
 
-    # Record validation through the official path
-    # This will:
-    # 1. Update pending transaction state to VALIDATED
-    # 2. Store validation in the deque
-    # 3. Update per-source counters
-    # 4. Adopt new wallets if this was a funding payment
     validation_record = ValidationRecord(
         txn=tx_hash,
         seq=ledger_index,
@@ -193,21 +184,13 @@ async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
 
     log.debug("Ledger %s closed (hash: %s)", ledger_index, ledger_hash)
 
-    # Submit heartbeat for this ledger - our canary!
-    # DISABLED: Heartbeat was buggy, holding off for now
-    # try:
-    #     await workload.submit_heartbeat(ledger_index)
-    # except Exception as e:
-    #     log.error("Failed to submit heartbeat for ledger %s: %s", ledger_index, e)
-
-    # Fetch ledger to get transaction count for Antithesis assertions
     try:
         from xrpl.models.requests import Ledger
 
         ledger_req = Ledger(
             ledger_index=ledger_index,
             transactions=True,  # Include tx hashes (not full txns)
-            expand=False,       # Don't expand to full transaction objects
+            expand=False,  # Don't expand to full transaction objects
         )
 
         ledger_resp = await workload._rpc(ledger_req)
@@ -219,8 +202,6 @@ async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
 
             log.debug("Ledger %s closed with %d transactions", ledger_index, txn_count)
 
-            # Antithesis assertion: we should see transactions in ledgers at least sometimes
-            # This validates the workload is functioning and transactions are being processed
             sometimes(
                 txn_count > 0,
                 "ledger_contains_transactions",
@@ -228,19 +209,17 @@ async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
                     "ledger_index": ledger_index,
                     "txn_count": txn_count,
                     "ledger_hash": ledger_hash,
-                }
+                },
             )
 
-            # Additional assertion: if workload is running, ledgers should have transactions
-            # This is more strict - useful for detecting workload stalls
-            if hasattr(workload, '_workload_started') and workload._workload_started:
+            if hasattr(workload, "_workload_started") and workload._workload_started:
                 always(
                     txn_count > 0,
                     "active_workload_produces_transactions",
                     {
                         "ledger_index": ledger_index,
                         "txn_count": txn_count,
-                    }
+                    },
                 )
         else:
             log.warning("Failed to fetch ledger %s: %s", ledger_index, ledger_resp.result)
@@ -278,9 +257,6 @@ async def _handle_tx_response(workload: "Workload", msg: dict) -> None:
 
     log.info("WS submission response: tx=%s result=%s", tx_hash[:8], engine_result)
 
-    # TODO: When we switch to WS submission, this would call record_submitted()
-    # For now, just log that we saw it
-
 
 async def _handle_server_status(workload: "Workload", msg: dict) -> None:
     """Handle server status updates from the server stream.
@@ -302,23 +278,21 @@ async def _handle_server_status(workload: "Workload", msg: dict) -> None:
     """
     import time
 
-    # Store latest server status in workload for dashboard access
     workload.latest_server_status = msg
     workload.latest_server_status_time = time.time()
 
-    # Compute human-readable fee multipliers (see FeeEscalation.md:346-371)
     load_factor = msg.get("load_factor", 256)
     load_factor_fee_escalation = msg.get("load_factor_fee_escalation")
     load_factor_fee_queue = msg.get("load_factor_fee_queue")
     load_factor_fee_reference = msg.get("load_factor_fee_reference", 256)
     server_status = msg.get("server_status", "unknown")
 
-    # Calculate multipliers
     queue_multiplier = load_factor_fee_queue / load_factor_fee_reference if load_factor_fee_queue else 1.0
-    escalation_multiplier = load_factor_fee_escalation / load_factor_fee_reference if load_factor_fee_escalation else 1.0
+    escalation_multiplier = (
+        load_factor_fee_escalation / load_factor_fee_reference if load_factor_fee_escalation else 1.0
+    )
     general_load_multiplier = load_factor / 256.0
 
-    # Store computed values for dashboard
     workload.latest_server_status_computed = {
         "server_status": server_status,
         "queue_fee_multiplier": queue_multiplier,
@@ -331,5 +305,5 @@ async def _handle_server_status(workload: "Workload", msg: dict) -> None:
         server_status,
         general_load_multiplier,
         queue_multiplier,
-        escalation_multiplier
+        escalation_multiplier,
     )
