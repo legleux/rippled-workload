@@ -206,6 +206,112 @@ This work addresses issues from latest_workload_run_info.md:
 
 ---
 
+## Session 2025-11-24 (continued): Dashboard Fixes, Parallel Submission, Enhanced Logging, and Ledger Fill Smoothing
+
+### Summary
+
+Fixed dashboard bugs, improved initialization throughput, enhanced logging visibility, and implemented dynamic ledger fill rate control for smoother transaction distribution:
+
+1. **Fixed tesSUCCESS in Top Failures Dashboard** (app.py:543-550)
+   - Problem: Success codes (`tesSUCCESS`) appearing in "Top Failures" table
+   - Fix: Added filter to exclude `tes*` codes from failures_by_result collection
+   - Condition: `if result not in INTERNAL_STATES and not (result and result.startswith("tes"))`
+
+2. **Parallelized Phase 4 Batch Submission with TaskGroup** (workload_core.py:1763-1780)
+   - Problem: Sequential submission during Phase 4 taking 3+ minutes
+   - Fix: Implemented `asyncio.TaskGroup` for concurrent transaction submission within batches
+   - Added nested `build_and_submit()` helper function
+   - Result: Ledgers fill immediately, but gaps between ledgers still occurred (addressed by #4)
+
+3. **Enhanced Sequence Reset Logging** (workload_core.py:852-900, 1044, 1093, 896-899)
+   - Added "Cascade check" logging showing count of expired txns
+   - Added "SEQ RESET" logging with old→new sequence and delta
+   - Three reset types: `(ledger)` via AccountInfo, `(expiry)` resets to failed_seq, `(fallback)` on error
+   - Enhanced tefPAST_SEQ logging: shows txn type, account, sequence, hash
+   - Enhanced terPRE_SEQ logging: shows context before cascade expire
+   - Enhanced EXPIRED logging: distinguishes Batch vs regular txns
+   - **CRITICAL**: All logging uses FULL account addresses and tx_hashes (no truncation) for lookup capability
+
+4. **Implemented Ledger Fill Fraction for Smoothing** (app.py:1028-1039)
+   - Problem: Old batch sizing tried to max out ledger (`ledger_size + 1`), causing burst then 5-ledger gaps
+   - Fix: Changed to submit fraction of `ledger_size` for steady flow across multiple ledgers
+   - Formula: `target_batch_size = int(ledger_size * ledger_fill_fraction)`
+   - Batch size: `min(total_available_slots, target_batch_size, MAX_BATCH_SIZE=200)`
+   - Default fill fraction: 0.5 (50% of ledger per batch)
+   - Rationale: Smaller batches allow accounts to validate/clear between submissions
+
+5. **Added Dynamic Fill Fraction Control Endpoints** (app.py:1179-1221)
+   - GET `/workload/fill-fraction`: Returns current fill fraction and recommendations
+   - POST `/workload/fill-fraction`: Sets new fill fraction with validation (0.0 < value ≤ 1.0)
+   - Recommendations: 0.3-0.4 = conservative/smooth, 0.5 = balanced, 0.7-0.8 = aggressive
+   - Takes effect immediately on next batch (no restart required)
+   - Enables live experimentation with throughput vs smoothness tradeoff
+
+6. **Refactored Fill Fraction from Global to Instance Attribute** (workload_core.py:330-333)
+   - Initial implementation used global variable `LEDGER_FILL_FRACTION`
+   - Refactored to Workload instance attribute: `self.ledger_fill_fraction: float = 0.5`
+   - Updated continuous_workload to use `wl.ledger_fill_fraction`
+   - Updated endpoints to use `app.state.workload.ledger_fill_fraction`
+   - Better encapsulation, testability, thread-safety, could load from config
+
+### Technical Details
+
+**Ledger Fill Fraction Mechanics:**
+- Fraction (0.0-1.0) of `expected_ledger_size` to submit per batch
+- Lower values (0.3-0.4): More conservative, smoother distribution across ledgers, less throughput
+- Medium values (0.5): Balanced approach
+- Higher values (0.7-0.8): More aggressive, higher throughput, risk of gaps
+- Formula: `batch_size = min(available_slots, ledger_size * fill_fraction, 200)`
+
+**Burst vs Steady Flow:**
+- Old approach: `batch_size = ledger_size + 1` → fills one ledger then gaps
+- New approach: `batch_size = ledger_size * 0.5` → continuous flow across multiple ledgers
+- Allows accounts to validate and clear sequences between batches
+- Reduces sequence errors from txns queuing behind expired txns
+
+**Sequence Reset Logging Format:**
+```
+Cascade check for rAccount...: expired 3 txns with seq > 42
+SEQ RESET (ledger): rAccount... 45 -> 43 (delta: -2)
+SEQ RESET (expiry): rAccount... 50 -> 42 (delta: -8)
+SEQ RESET (fallback): rAccount... None -> 42 (delta: N/A)
+```
+
+### Key Files Modified
+- `workload/src/workload/app.py`: Top Failures filter, batch sizing, fill fraction endpoints
+- `workload/src/workload/workload_core.py`: TaskGroup submission, sequence reset logging, fill fraction attribute
+
+### Objectives
+
+This work addresses issues from latest_workload_run_info.md:
+- Eliminate 5-ledger gaps between full ledgers
+- Reduce tefPAST_SEQ (8728) and terPRE_SEQ (2355) sequence errors via smoother distribution
+- Increase validated rate from 81.9% toward 90%+ target
+- Provide runtime control over throughput vs smoothness tradeoff
+- Improve debugging visibility for sequence reset patterns
+
+### Status
+
+**Completed:**
+- ✅ Fixed tesSUCCESS in Top Failures dashboard
+- ✅ Parallelized Phase 4 submission with TaskGroup
+- ✅ Enhanced sequence reset logging with full addresses
+- ✅ Implemented ledger fill fraction smoothing (default 0.5)
+- ✅ Added GET/POST endpoints for dynamic fill fraction control
+- ✅ Refactored to Workload instance attribute (no globals)
+
+**Pending:**
+- Test smoothing changes to verify ledger gap elimination
+- Monitor tefPAST_SEQ/terPRE_SEQ counts with new distribution pattern
+- Experiment with different fill fractions via endpoint (0.3, 0.5, 0.7)
+- Verify validated rate improvement toward 90%+ target
+
+**Next Steps (per user summary):**
+- Enable more OfferCreate transactions that will cross
+- Complete MPToken transaction workflows
+
+---
+
 ## Testing Commands
 
 ```bash
@@ -223,4 +329,12 @@ curl -s http://localhost:8000/state/summary | jq
 
 # View dashboard
 open http://localhost:8000/state/dashboard
+
+# Check current fill fraction
+curl -s http://localhost:8000/workload/fill-fraction | jq
+
+# Set fill fraction (example: 0.7 for aggressive)
+curl -s -X POST http://localhost:8000/workload/fill-fraction \
+  -H "Content-Type: application/json" \
+  -d '{"fill_fraction": 0.7}' | jq
 ```

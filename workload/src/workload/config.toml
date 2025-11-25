@@ -14,13 +14,14 @@ names = [
     "coin-thang",
     "digi-bux"
 ]
+# TODO: Instead of 4, get from the number of names?
 number = 4
 default_balance = 100_000_000_000000
 require_auth = false
 default_ripple = true
 
 [users]
-number = 64
+number = 96
 default_balance = 100_000_000000
 
 [amm]
@@ -45,6 +46,11 @@ BTC = 1_000_000_000
 ########### Transaction context defaults #############
 ######################################################
 [transactions]
+# Maximum pending transactions per account (rippled queue limit)
+# Higher values = more throughput but more risk of sequence errors
+# Default: 10 (matches rippled's per-account queue limit) #TODO: Confirm in docs/source/Slack if this is still accurate
+max_pending_per_account = 10
+
 # Disable specific transaction types (all types in _BUILDERS are enabled by default)
 disabled = [
     "AMMCreate",  # Expensive fee, creates AMM pool

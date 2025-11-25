@@ -34,6 +34,26 @@ rippled-workload/
 
 ## Architecture
 
+### Core Design Principles
+
+**LEDGER-BASED TIMING: The ledger is the tick, not the clock**
+
+This workload operates on **ledger close events** as the fundamental unit of time, not wall-clock time:
+
+- ✅ **DO**: Wait for ledger closes, count ledgers, use ledger index as the tick
+- ✅ **DO**: Use time for timeouts (network connectivity issues) and measuring operation duration (metrics)
+- ❌ **DON'T**: Use time-based delays for submission logic (no `await asyncio.sleep()` between batches)
+- ❌ **DON'T**: Spread submissions over time intervals
+- ❌ **DON'T**: Use time to control submission rate
+
+**Rationale**: XRPL consensus operates on discrete ledger closes (~3-4 seconds). Transaction validation, sequence numbers, and queue behavior are all tied to ledger boundaries. Time-based logic creates race conditions and unpredictable behavior. Ledger-based logic is deterministic and aligns with how rippled actually works.
+
+**Examples**:
+- ✅ "Wait for 5 ledger closes before re-checking state"
+- ✅ "Submit batch when ledger closes and accounts have available slots"
+- ❌ "Wait 2 seconds between submissions"
+- ❌ "Submit 100 txns/second"
+
 ### Domain Model
 
 The workload follows a layered architecture (see workload/README.md:7-13):

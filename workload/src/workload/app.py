@@ -541,11 +541,12 @@ async def state_dashboard():
     rej_pct = (rejected / total * 100) if total > 0 else 0
 
     # Group failures by result (only rippled error codes, not our internal states)
+    # Exclude tes* codes (success) since this is "Top Failures"
     INTERNAL_STATES = {"CASCADE_EXPIRED", "unknown", None, ""}
     failures_by_result = {}
     for failed in failed_data:
         result = failed.get("engine_result_first", "unknown")
-        if result not in INTERNAL_STATES:
+        if result not in INTERNAL_STATES and not (result and result.startswith("tes")):
             failures_by_result[result] = failures_by_result.get(result, 0) + 1
 
     # Sort failures by count
@@ -1011,22 +1012,22 @@ async def continuous_workload():
                         log.error(f"Failed to create new account: {e}")
                         workload_stats["failed"] += 1
 
-            # Get accounts with fewer than MAX_PENDING_PER_ACCOUNT pending transactions
-            # Queue can hold up to 10 per account - use it for throughput
-            MAX_PENDING_PER_ACCOUNT = 10 # TODO: Set as constant. Confirm with rippled source. This _is_ what docs say.
+            # Get accounts with fewer than max_pending_per_account pending transactions
+            # Configurable via config.toml [transactions] max_pending_per_account
             pending_counts = wl.get_pending_txn_counts_by_account()
 
             # Calculate how many MORE txns each account can accept
             account_slots = {
-                addr: MAX_PENDING_PER_ACCOUNT - pending_counts.get(addr, 0)
+                addr: wl.max_pending_per_account - pending_counts.get(addr, 0)
                 for addr in wl.wallets.keys()
             }
             available_accounts = [addr for addr, slots in account_slots.items() if slots > 0]
             total_available_slots = sum(slots for slots in account_slots.values() if slots > 0)
 
-            # Batch size = min(total available slots, expected_ledger_size + 1), capped at 200
-            MAX_BATCH_SIZE = 200
-            batch_size = min(total_available_slots, ledger_size + 1, MAX_BATCH_SIZE)
+            # Hard cap at target_txns_per_ledger for consistent, controlled throughput
+            # Default 30 txns/ledger, adjustable via endpoint
+            # This prevents overwhelming rippled and gives predictable, steady flow
+            batch_size = min(total_available_slots, wl.target_txns_per_ledger)
 
             if batch_size == 0:
                 log.debug("No available slots (all accounts at max pending), waiting...")
@@ -1060,7 +1061,7 @@ async def continuous_workload():
 
                         # Check if this account still has slots available
                         current_pending = wl.get_pending_txn_counts_by_account().get(src_addr, 0)
-                        if current_pending >= MAX_PENDING_PER_ACCOUNT:
+                        if current_pending >= wl.max_pending_per_account:
                             continue  # Try another transaction
 
                         # Build and track
@@ -1169,6 +1170,94 @@ async def workload_status():
         "running": workload_running,
         "stats": workload_stats,
         "uptime_seconds": perf_counter() - workload_stats["started_at"] if workload_stats["started_at"] else 0
+    }
+
+
+@r_workload.get("/fill-fraction")
+async def get_fill_fraction():
+    """Get current ledger fill fraction for continuous workload.
+
+    Returns the fraction (0.0 to 1.0) of expected_ledger_size used for batch sizing.
+    Lower values = smoother distribution across ledgers, higher = more aggressive filling.
+    """
+    return {
+        "fill_fraction": app.state.workload.ledger_fill_fraction,
+        "description": "Fraction of ledger_size to fill per batch (0.0 to 1.0)",
+        "recommendation": "0.3-0.4 = conservative/smooth, 0.5 = balanced, 0.7-0.8 = aggressive"
+    }
+
+
+class FillFractionReq(BaseModel):
+    fill_fraction: float
+
+
+@r_workload.post("/fill-fraction")
+async def set_fill_fraction(req: FillFractionReq):
+    """Set ledger fill fraction for continuous workload.
+
+    Controls batch size as fraction of expected_ledger_size.
+    - Lower (0.3-0.4): More conservative, smoother distribution, less throughput
+    - Medium (0.5): Balanced approach
+    - Higher (0.7-0.8): More aggressive, higher throughput, risk of gaps
+
+    Takes effect immediately on next batch.
+    """
+    if not 0.0 < req.fill_fraction <= 1.0:
+        raise HTTPException(status_code=400, detail="fill_fraction must be between 0.0 and 1.0")
+
+    old_value = app.state.workload.ledger_fill_fraction
+    app.state.workload.ledger_fill_fraction = req.fill_fraction
+
+    log.info(f"ledger_fill_fraction changed: {old_value} -> {app.state.workload.ledger_fill_fraction}")
+
+    return {
+        "old_value": old_value,
+        "new_value": app.state.workload.ledger_fill_fraction,
+        "status": "updated",
+        "note": "Change takes effect on next workload batch"
+    }
+
+
+class TargetTxnsReq(BaseModel):
+    target_txns: int
+
+
+@r_workload.get("/target-txns")
+async def get_target_txns():
+    """Get current target transactions per ledger for continuous workload.
+
+    Returns the hard cap on transactions submitted per ledger.
+    """
+    return {
+        "target_txns_per_ledger": app.state.workload.target_txns_per_ledger,
+        "description": "Hard cap on transactions per ledger",
+    }
+
+
+@r_workload.post("/target-txns")
+async def set_target_txns(req: TargetTxnsReq):
+    """Set target transactions per ledger for continuous workload.
+
+    Controls how many transactions to submit per ledger.
+    - Lower (10-20): Very conservative, smooth, low throughput
+    - Medium (30-50): Balanced approach
+    - Higher (80-100): Aggressive, high throughput
+
+    Takes effect immediately on next batch.
+    """
+    if req.target_txns < 1 or req.target_txns > 500:
+        raise HTTPException(status_code=400, detail="target_txns must be between 1 and 500")
+
+    old_value = app.state.workload.target_txns_per_ledger
+    app.state.workload.target_txns_per_ledger = req.target_txns
+
+    log.info(f"target_txns_per_ledger changed: {old_value} -> {app.state.workload.target_txns_per_ledger}")
+
+    return {
+        "old_value": old_value,
+        "new_value": app.state.workload.target_txns_per_ledger,
+        "status": "updated",
+        "note": "Change takes effect on next workload batch"
     }
 
 

@@ -108,8 +108,8 @@ def main(fee_log_data):
 
         time.sleep(0.05)
         os.system("clear")
-        if int(cls_) == stop_at_ledger_size:
-            print(f"Ledger breached {stop_at_ledger_size} at ledger {lci} after {uptime}s!")
+        if int(cls_) >= stop_at_ledger_size:
+            print(f"Ledger breached {stop_at_ledger_size} with {cls_} at ledger {lci} after {uptime}s!")
             sys.exit(0)
 
 def write_fee_log(fee_log_data):

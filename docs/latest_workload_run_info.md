@@ -1,50 +1,81 @@
-# Init info
+# Initialization Info
 
-Results of [✓] or [✗]
+REsults:
+[✓] - Pass
+[-] - Meh
+[✗] - Fail
+[?] - No metric
 
-## Gateway and user setup
+### Phase 1 - Gateway funding
 
-### Account creation via Payment
-- [✓] [2] ledgers of account creation
-    - [✓] [4] Gateways with [4] AccountSets
-    - [✓] [16] User accounts created successfully.
+[✓] - Fine
 
-### TrustSets and token distribution
-- [✗] [4] empty ledgers gap then [5] ledgers of User account TrustSets for gateways 33 + 40 + 49 + 56 + 8 + 53 + 5 = 244
-    - Oof, we missed even more!!!! Nooooooo!
-    Didn't even get sumission results this time!
-2025-11-24 11:00:54 INFO   workload:1324   TrustSet: Submitting batch of 160 txns (160/256 total)
-- [✓] [7] empty ledgers gap then [3] ledgesrs of Payments of token disbursement 86 + 104 + 66 = 256
-2025-11-24 11:01:42 INFO   workload:1433   Submission results: {'tesSUCCESS': 12, 'terPRE_SEQ': 27, 'tecPATH_DRY': 1}
-2025-11-24 11:01:42 INFO   workload:1438 Token distribution complete at 107: 13/256 validated
+### Phase 2 - Gateway configuration
 
-### Completion
+[✓] - Fine
 
-`/state/summary` reports [] validated txns should be [20] Payments for gw and users, + [4] AccountSets for , [256] TrustSets [256] Payments
-[✓] 512 + 20 + 4 = 536
+### Phase 3 - User funding
 
+[-] - Took 53s for the 96 users, let's not mess with it unless that's where the errors came form
+
+### Phase 4 - User TrustSets configuration
+
+- [-] Still took Over 3 minutes. Like to see it under 1 but let's stick with this setup for now since it actually works.
+    The TaskGroup did great fill the ledger up immediately but we still had gaps between ledgers that killed our time!
+
+### Phase 5 - Token distribution
+
+[✗] -  Reported before validation completed "Phase 5: Token seeding: 28/144 validated, 14.11s, 5 ledgers"
+    All 144 showed up in the ledger
+
+### Init Completion
+
+[-] - We did have  6 terPRE_SEQ during init
+[-] - Added 32 more users and still too over 4 minutes.  just a bit long.
+[✗] - Also reported "TOTAL: 1668/1784 validated, 283.05s, 93 ledgers" but the summary showed everyone got validated actually:
+oof, we _did_ get some EXPIREDs, I don't like that but we might need to deal with it for now.
+{
+  "total_tracked": 1784,
+  "by_state": {
+    "VALIDATED": 1668,
+    "EXPIRED": 116
+  },
+  "gateways": 4,
+  "users": 96
+}
 # Continuous Workload Info
-[✓] At least one of every txn type enabled succeed.
-    - Maybe not offers crossed? didn't check
+
+[?] At least one of every txn type enabled succeed.
+    - Maybe not offers crossed? We should start watching for this somehow
 [✗] At least 90% VALIDATED rate
-    - VALIDATED rate 65.6%
-[✗] At most 15% REJECTED rate
-    - REJECTED rate 11.5% - but I don't even trust that!
+    - VALIDATED rate 81.9%
+[✓] At most 15% REJECTED rate
+    - REJECTED rate 13.0%
+[?] 50% offers crossed
+    - Not tracking yet
 
 # Notes
-"workload.ws:86 Subscribing to ledger and server + 2 specific accounts" only 2?
-We've gotten much worse init this time
+Let it run for a loooong time
+First txn was almost 200 (192) but still had gap of 5 ledgers until next txn-filled ledger so more accounts didn't help that much.
+It also just immediately started with "tefPAST_SEQ" responses still!!!
+We really have so many "Reset next_seq for ..." earnings is there a way to mitigate that?
+Still tracking _tons_ of tefPAST_SEQ and terPRE_SEQ errors! We got to find a way to manage these better!
+Still getting gaps in between full ledgers - how can we smooth out the traffic?
+Having more accounts did _NOT_ smooth the throughput out appreciably.
+Perhaps insteead always trying to max a ledger out we can divided our pool of potential accounts for the next submission into a
+few batches and line them up to submit over serveral ledgers?
+
+I'm skeptical about the handling of tec errors too because really only 12 unfunded offers and 1 tecPATH_DRY in almost 100k txns submitted?
+
+
 Dashboard states:
-    290 EXPIRED
-    telCAN_NOT_QUEUE 1
-    terPRE_SEQ 22
+TOTAL TXNS 92858
+VALIDATED 76041
+REJECTED 12055
+EXPIRED 4762
 
-Stopped it around ledger 250 and when we settled EXPIRED and terPRE_SEQ + None! matched at 1837 txns :(.
-
-Ledger txn mix still looks good but the tefPAST_SEQ is just rampant!
-stopped barely at 200 with final results:
-155 REJECTED
-
-tefPAST_SEQ 155
-terPRE_SEQ 35
-telCAN_NOT_QUEUE 1
+Top Failures:
+tefPAST_SEQ 8728
+terPRE_SEQ 2355
+tecUNFUNDED_OFFER 12
+tecPATH_DRY 1
