@@ -17,7 +17,7 @@ from workload.ws import ws_listener
 from workload.ws_processor import process_ws_events
 
 try:
-    from antithesis.assertions import setup_complete
+    from antithesis.lifecycle import setup_complete
 
     ANTITHESIS_AVAILABLE = True
 except ImportError:
@@ -207,8 +207,11 @@ async def lifespan(app: FastAPI):
                 "init_completed_ledger": init_ledger,
             }
         )
+        workload_ready_msg = "Workload initialization complete"
         log.info(f"Network initialization complete at ledger {init_ledger}. Ready to accept requests!")
-
+        setup_complete(details={"message": workload_ready_msg})
+        await asyncio.sleep(5)
+        await start_workload()
         try:
             yield
         finally:
