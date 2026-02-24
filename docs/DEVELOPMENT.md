@@ -64,6 +64,8 @@
 - Line length: 120 characters
 - Prefer explicit over implicit
 - Avoid premature optimization - clarity first, performance second
+- Avoid too many parameters to methods
+- Avoid returning multiple types
 
 ## Architecture Notes
 - **Domain layer**: Pure data types (WalletModel, IssuedCurrencyModel)

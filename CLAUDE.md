@@ -339,3 +339,10 @@ New accounts are adopted into `self.users` after validation (workload/src/worklo
 - Account initialization happens at startup in `lifespan()` (app.py:92-133)
 - WebSocket listeners and finality checks run as concurrent tasks in an asyncio.TaskGroup
 - Retry logic is not yet implemented (marked as TODO in several places)
+
+## Active Technologies
+- Python 3.13+ + FastAPI, xrpl-py (minimal usage), uvicorn, asyncio.TaskGroup (001-priority-improvements)
+- SQLite3 (via sqlite_store.py), in-memory state (InMemoryStore), persistent transaction tracking (001-priority-improvements)
+
+## Recent Changes
+- 001-priority-improvements: Added Python 3.13+ + FastAPI, xrpl-py (minimal usage), uvicorn, asyncio.TaskGroup

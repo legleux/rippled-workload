@@ -46,7 +46,7 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(asctime)s %
 
 log = logging.getLogger("workload")
 
-TERMINAL_STATE = {C.TxState.VALIDATED, C.TxState.REJECTED, C.TxState.EXPIRED}
+TERMINAL_STATE = {C.TxState.VALIDATED, C.TxState.REJECTED, C.TxState.EXPIRED, C.TxState.FAILED_NET}
 
 
 @dataclass(slots=True)
@@ -2165,7 +2165,7 @@ class Workload:
         return f"http://{val_ip}:{rpc_port}"
 
     def snapshot_pending(self, *, open_only: bool = True) -> list[dict]:
-        OPEN_STATES = {C.TxState.CREATED, C.TxState.SUBMITTED, C.TxState.RETRYABLE, C.TxState.FAILED_NET}  # TODO: Move
+        OPEN_STATES = {C.TxState.CREATED, C.TxState.SUBMITTED, C.TxState.RETRYABLE}  # TODO: Move
         out = []
         for txh, p in self.pending.items():
             if open_only and p.state not in OPEN_STATES:
@@ -2199,12 +2199,20 @@ class Workload:
             state = p.state.name
             by_state[state] = by_state.get(state, 0) + 1
 
-        return {
+        result = {
             "total_tracked": len(self.pending),
             "by_state": by_state,
             "gateways": len(self.gateways),
             "users": len(self.users),
         }
+
+        # Merge store-level aggregate stats (submission results, validation sources)
+        store_stats = self.store.snapshot_stats()
+        for key in ("validated_by_source", "validated_by_result", "submission_results", "recent_validations"):
+            if key in store_stats:
+                result[key] = store_stats[key]
+
+        return result
 
     def snapshot_tx(self, tx_hash: str) -> dict[str, Any]:
         p = self.pending.get(tx_hash)
@@ -2226,17 +2234,40 @@ class Workload:
         }
 
 
+    def _cleanup_terminal(self, keep_recent: int = 200) -> int:
+        """Remove old terminal txns from self.pending (already persisted in store)."""
+        terminal = [
+            (txh, p) for txh, p in self.pending.items()
+            if p.state in TERMINAL_STATE
+        ]
+        if len(terminal) <= keep_recent:
+            return 0
+        terminal.sort(key=lambda x: x[1].finalized_at or x[1].created_at)
+        to_remove = terminal[:-keep_recent]
+        for txh, _ in to_remove:
+            del self.pending[txh]
+        return len(to_remove)
+
+
 PER_TX_TIMEOUT = 3
 
 
 async def periodic_finality_check(w: Workload, stop: asyncio.Event, interval: int = 5):
+    iteration = 0
     while not stop.is_set():
         try:
-            for p in w.find_by_state(C.TxState.SUBMITTED):
+            for p in w.find_by_state(C.TxState.SUBMITTED, C.TxState.RETRYABLE):
                 try:
                     await w.check_finality(p)
                 except Exception:
                     log.exception("[finality] check failed for %s", getattr(p, "tx_hash", p))
+
+            iteration += 1
+            if iteration % 10 == 0:
+                removed = w._cleanup_terminal()
+                if removed:
+                    log.info("[finality] cleaned up %d terminal txns from pending", removed)
+
             await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise

@@ -171,9 +171,12 @@ async def lifespan(app: FastAPI):
             periodic_finality_check(app.state.workload, app.state.stop, check_interval), name="finality_checker"
         )
 
-        log.info("Background tasks started:")
-        log.info("ws_processor")
-        log.info("RPC finality_checker")
+        tg.create_task(
+            process_ws_events(app.state.workload, app.state.ws_queue, app.state.stop),
+            name="ws_processor",
+        )
+
+        log.info("Background tasks started: ws_listener, finality_checker, ws_processor")
 
         state_loaded = app.state.workload.load_state_from_store()
 

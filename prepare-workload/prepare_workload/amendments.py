@@ -4,9 +4,114 @@
 import json
 import urllib.request
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from pathlib import Path
+import hashlib
 
+amendments = [
+    "AMM",
+    "AMMClawback",
+    "Batch",
+    "CheckCashMakesTrustLine",
+    "Checks",
+    "Clawback",
+    "Credentials",
+    "CryptoConditions",
+    "CryptoConditionsSuite",
+    "DeepFreeze",
+    "DeletableAccounts",
+    "DepositAuth",
+    "DepositPreauth",
+    "DID",
+    "DisallowIncoming",
+    "DynamicNFT",
+    "EnforceInvariants",
+    "Escrow",
+    "ExpandedSignerList",
+    "FeeEscalation",
+    "Flow",
+    "FlowCross",
+    "FlowSortStrands",
+    "HardenedValidations",
+    "ImmediateOfferKilled",
+    "MPTokensV1",
+    "MultiSign",
+    "MultiSignReserve",
+    "NegativeUNL",
+    "NFTokenMintOffer",
+    "NonFungibleTokensV1_1",
+    "NonFungibleTokensV1",
+    "PayChan",
+    "PermissionedDEX",
+    "PermissionedDomains",
+    "PriceOracle",
+    "RequireFullyCanonicalSig",
+    "SortedDirectories",
+    "TicketBatch",
+    "TickSize",
+    "TokenEscrow",
+    "TrustSetAuth",
+    "XChainBridge",
+    "XRPFees",
+    ### Fix Amendments ###
+    "fix1201",
+    "fix1368",
+    "fix1373",
+    "fix1512",
+    "fix1513",
+    "fix1515",
+    "fix1523",
+    "fix1528",
+    "fix1543",
+    "fix1571",
+    "fix1578",
+    "fix1623",
+    "fix1781",
+    "fixAmendmentMajorityCalc",
+    "fixAMMClawbackRounding",
+    "fixAMMOverflowOffer",
+    "fixAMMv1_1",
+    "fixAMMv1_2",
+    "fixAMMv1_3",
+    "fixCheckThreading",
+    "fixDirectoryLimit",
+    "fixDisallowIncomingV1",
+    "fixEmptyDID",
+    "fixEnforceNFTokenTrustline",
+    "fixEnforceNFTokenTrustlineV2",
+    "fixFillOrKill",
+    "fixFrozenLPTokenTransfer",
+    "fixIncludeKeyletFields",
+    "fixInnerObjTemplate",
+    "fixInnerObjTemplate2",
+    "fixInvalidTxFlags",
+    "fixMasterKeyAsRegularKey",
+    "fixMPTDeliveredAmount",
+    "fixNFTokenDirV1",
+    "fixNFTokenNegOffer",
+    "fixNFTokenPageLinks",
+    "fixNFTokenRemint",
+    "fixNFTokenReserve",
+    "fixNonFungibleTokensV1_2",
+    "fixPayChanCancelAfter",
+    "fixPayChanRecipientOwnerDir",
+    "fixPreviousTxnID",
+    "fixPriceOracleOrder",
+    "fixQualityUpperBound",
+    "fixReducedOffersV1",
+    "fixReducedOffersV2",
+    "fixRemoveNFTokenAutoTrustLine",
+    "fixRmSmallIncreasedQOffers",
+    "fixSTAmountCanonicalize",
+    "fixTakerDryOfferRemoval",
+    "fixTokenEscrowV1",
+    "fixTrustLinesToSelf",
+    "fixUniversalNumber",
+    "fixXChainRewardRounding",
+    ]
+
+def sha512half(data):
+    return hashlib.sha512(data.encode("utf-8")).digest()[:32].hex().upper()
 
 class Network(IntEnum):
     MAIN = 0
@@ -25,9 +130,13 @@ network_rpc_url = {
     0: [
         "https://s1.ripple.com:51234",
         "https://s2.ripple.com:51234",
+        "https://r.ripple.com:51234",
     ],
     1: [
         "https://s.altnet.rippletest.net:51234/",
+        "https://s1.altnet.rippletest.net:51234/",
+        "https://s2.altnet.rippletest.net:51234/",
+        "https://r.altnet.rippletest.net:51234/",
         "https://clio.altnet.rippletest.net:51234/",
     ],
     2: ["https://s.devnet.rippletest.net:51234"],
@@ -61,10 +170,14 @@ class Amendment:
     name: str
     link: str
     enabled: bool
-    obsolete: bool = False
+    obsolete: bool = False # Maybe not default to false
 
     def __str__(self):
         return f"{self.name} {("Enabled" if self.enabled else "Disabled")}"
+
+    @classmethod
+    def name_to_hash(cls, name: str) -> str:
+        return sha512half(name)
 
 
 def _get_amendments_from_file(amendments_file: Path | None = None) -> list[Amendment]:
@@ -82,7 +195,6 @@ def _get_amendments_from_file(amendments_file: Path | None = None) -> list[Amend
         return json.loads(features_file.resolve().read_text())
     except Exception as e:
         pass  # probably file not found...
-
 
 def _get_amendments_from_url(url: str, timeout: int = 3) -> list[Amendment]:
     # network = network or DEFAULT_NETWORK
@@ -104,7 +216,7 @@ def _get_amendments_from_url(url: str, timeout: int = 3) -> list[Amendment]:
 
 def _get_amendments_from_net(network: Network) -> tuple[str, list[Amendment]]:
     """Get the amendments enabled on the `network` via `rippled`'s `feature` command."""
-    # BUG: rippled `feature` is _not_ reliable right now!
+    # BUG: rippled `feature` is _not_ on custom networks!
     urls = network_rpc_url[network]
     for url in urls:
         try:
@@ -121,10 +233,10 @@ def get_amendments(source: Path | str | Network) -> tuple[str, list[Amendment]]:
         a = _get_amendments_from_file(source)
     elif isinstance(source, str):
         a = _get_amendments_from_url(source)
-        for i in a.items():
-            print(i)
-        import sys
-        sys.exit(0)
+        # for i in a.items():
+        #     print(i)
+        # import sys
+        # sys.exit(0)
     else:
         source, a = _get_amendments_from_net(source)
 
@@ -137,12 +249,15 @@ def get_amendments(source: Path | str | Network) -> tuple[str, list[Amendment]]:
                 ) for am_hash, info in a.items()
             ]
 
-def get_disabled_amendments(net: Network) -> list[Amendment]:
-    a = get_amendments(net)
+# def get_disabled_amendments(net: Network) -> list[Amendment]:
+#     return filter(lambda a: a.enabled, get_amendments(net))
+    # disabled = filter(lambda a: a.enabled, get_amendments(amendments))
 
 
-def get_enabled_amendment_hashes(source: Path | Network) -> list[str]:
-    return [a.index for a in get_amendments(source) if a.enabled]
+AmendmentEnum = StrEnum('Amendment', {sha512half(a):a for a in amendments})
+
+# def get_enabled_amendment_hashes(source: Path | Network) -> list[str]:
+#     return [a.index for a in get_amendments(source) if a.enabled]
 
 
 def print_amendments(amendments: list[Amendment]) -> None:
@@ -160,13 +275,40 @@ def print_amendments(amendments: list[Amendment]) -> None:
         print(f"{a.name[:31]:31}  {a.index:8}  {status:9}  {a.link}")
     print()
 
+def parse_ledger(ledger: str):
+    ledger_file = Path(ledger).resolve().read_text()
+    ledger_json = json.loads(ledger_file)
+    account_state = ledger_json['ledger']['accountState']
+    amendment_hashes = next((d["Amendments"] for d in account_state if "Amendments" in d))
+    return {h:AmendmentEnum[h].value for h in amendment_hashes}
+
+def get_amendments_from_ledger(ledger: str):
+    prefix="https://xrpl.org/resources/known-amendments#"
+    a = parse_ledger(ledger)
+    return [Amendment(
+                index=am_hash,
+                name=name,
+                link=prefix + name.lower(),
+                enabled=True,
+                ) for am_hash, name in a.items()
+            ]
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=False)
-    group.add_argument("network", nargs="?", default="devnet", help="Network to use (default: devnet)")
+    status = parser.add_mutually_exclusive_group(required=False)
+    default_network="mainnet"
+    group.add_argument("network",
+                       nargs="?",
+                       choices=["mainnet", "testnet", "devnet"],
+                       default=default_network,
+                       help=f"Network to use (default: {default_network})",
+                       )
+    group.add_argument("-l", "--ledger", type=Path)
     group.add_argument("-u", "--url", help="rippled node to query for enabled amendments")
-    parser.add_argument("-d", "--disabled", action='store_true')
+    status.add_argument("-d", "--disabled", action='store_true')
+    status.add_argument("-e", "--enabled", action='store_true')
     parser.add_argument("-p", "--plain", action='store_true')
     parser.add_argument("-n", "--names-only", action='store_true')
     # parser.add_argument("-j", "--json", action='store_true')
@@ -176,7 +318,10 @@ if __name__ == "__main__":
     if args.url:
         net = "Custom"
         source = args.url
-        src, amd = get_amendments(source)
+        src, amendments = get_amendments(source)
+    elif args.ledger:
+        amendments = get_amendments_from_ledger(args.ledger)
+        pass
     elif args.network:
         match net := args.network:
             case _ if net.startswith(("main", "live", "m")):
@@ -187,9 +332,16 @@ if __name__ == "__main__":
                 net = Network.DEV
         src, amendments = get_amendments(net)
 
+
     if args.disabled:
-        amd = [a for a in amd if not a.enabled]
+        amd = [a for a in amendments if not a.enabled]
         disabled = True
+        amendments = list(filter(lambda a: not a.enabled, amendments))
+
+    if args.enabled:
+        amd = [a for a in amendments if not a.enabled]
+        disabled = True
+        amendments = list(filter(lambda a: a.enabled, amendments))
 
     if args.names_only:
         for a in amd:
@@ -200,3 +352,5 @@ if __name__ == "__main__":
             print(a)
 
     print_amendments(amendments)
+
+    # TODO: intersection of networks

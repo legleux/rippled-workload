@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(curl:*)",
-      "WebFetch(domain:xrpl.org)"
+      "WebFetch(domain:xrpl.org)",
+      "Bash(ls:*)",
+      "Bash(.specify/scripts/bash/create-new-feature.sh:*)",
+      "Bash(.specify/scripts/bash/setup-plan.sh:*)",
+      "Bash(wc:*)",
+      "Bash(.specify/scripts/bash/check-prerequisites.sh:*)"
     ],
     "deny": [],
     "ask": []
