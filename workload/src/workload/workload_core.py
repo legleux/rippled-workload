@@ -29,6 +29,7 @@ from xrpl.models.requests import (
 from xrpl.models.transactions import (
     AccountSet,
     AccountSetAsfFlag,
+    AMMCreate,
     Payment,
     TrustSet,
 )
@@ -277,6 +278,17 @@ class Workload:
 
         self._mptoken_issuance_ids: list[str] = []
 
+        self._amm_pool_registry: list[dict] = []  # [{asset1: {...}, asset2: {...}, creator: str}]
+        self._amm_pools: set[frozenset[str]] = set()  # For dedup
+        self._dex_metrics: dict = {
+            "pools_created": 0,
+            "total_deposits": 0,
+            "total_withdrawals": 0,
+            "total_offers": 0,
+            "pool_snapshots": [],
+            "last_poll_ledger": 0,
+        }
+
         self.balances: dict[str, dict[str | tuple[str, str], float]] = {}
 
         self.ctx = self.configure_txn_context(
@@ -305,6 +317,8 @@ class Workload:
         )
         ctx.mptoken_issuance_ids = self._mptoken_issuance_ids
         ctx.balances = self.balances
+        ctx.amm_pools = self._amm_pools
+        ctx.amm_pool_registry = self._amm_pool_registry
         return ctx
 
     def update_txn_context(self):
@@ -312,6 +326,19 @@ class Workload:
             wallets=list(self.wallets.values()),
             funding_wallet=self.funding_wallet,
         )
+
+    def _register_amm_pool(self, asset1: dict, asset2: dict, creator: str) -> None:
+        """Register a new AMM pool after successful AMMCreate validation."""
+        pool_info = {"asset1": asset1, "asset2": asset2, "creator": creator}
+        self._amm_pool_registry.append(pool_info)
+
+        id1 = "XRP" if asset1.get("currency") == "XRP" else f"{asset1['currency']}.{asset1.get('issuer', '')}"
+        id2 = "XRP" if asset2.get("currency") == "XRP" else f"{asset2['currency']}.{asset2.get('issuer', '')}"
+        self._amm_pools.add(frozenset([id1, id2]))
+
+        self._dex_metrics["pools_created"] = len(self._amm_pool_registry)
+        self.update_txn_context()
+        log.info("Registered AMM pool: %s / %s (total: %d)", id1, id2, len(self._amm_pool_registry))
 
     def get_all_account_addresses(self) -> list[str]:
         """Return all account addresses we're tracking (for WebSocket subscription).
@@ -389,6 +416,112 @@ class Workload:
         self.update_txn_context()
 
         return True
+
+    async def load_from_genesis(self, accounts_json_path: str) -> bool:
+        """Load accounts from a pre-generated accounts.json (from generate_ledger).
+
+        Skips all init phases — accounts, trust lines, tokens, and AMMs are already
+        baked into the genesis ledger.
+
+        Args:
+            accounts_json_path: Path to accounts.json with [address, seed] pairs
+
+        Returns:
+            True if loaded successfully
+        """
+        import json as _json
+        from pathlib import Path
+
+        path = Path(accounts_json_path)
+        if not path.exists():
+            log.debug("Genesis accounts file not found: %s", path)
+            return False
+
+        with open(path) as f:
+            account_data = _json.load(f)
+
+        genesis_cfg = self.config.get("genesis", {})
+        gateway_count = genesis_cfg.get("gateway_count", 6)
+        user_count = genesis_cfg.get("user_count", 1000)
+        currency_codes = genesis_cfg.get("currencies", ["USD", "CNY", "BTC", "ETH"])
+        gateway_names = self.config.get("gateways", {}).get("names", [])
+
+        log.info("Loading from genesis: %d accounts (%d gateways, %d users)", len(account_data), gateway_count, user_count)
+
+        # Build wallets from seeds
+        for i, (address, seed) in enumerate(account_data):
+            w = Wallet.from_seed(seed, algorithm=xrpl.CryptoAlgorithm.SECP256K1)
+            self.wallets[w.address] = w
+            self._record_for(w.address)
+
+            if i < gateway_count:
+                self.gateways.append(w)
+                if i < len(gateway_names):
+                    self.gateway_names[w.address] = gateway_names[i]
+                self.save_wallet_to_store(w, is_gateway=True)
+            elif i < gateway_count + user_count:
+                self.users.append(w)
+                self.save_wallet_to_store(w, is_user=True)
+            else:
+                # AMM creator or extra accounts
+                self.save_wallet_to_store(w, is_user=True)
+
+        # Build currencies (4 per gateway)
+        for gw in self.gateways:
+            for code in currency_codes:
+                self._currencies.append(IssuedCurrency(currency=code, issuer=gw.address))
+
+        self.save_currencies_to_store()
+        self.update_txn_context()
+
+        log.info("Genesis loaded: %d gateways, %d users, %d currencies", len(self.gateways), len(self.users), len(self._currencies))
+
+        # Discover AMM pools from the ledger
+        await self._discover_amm_pools()
+
+        return True
+
+    async def _discover_amm_pools(self) -> None:
+        """Discover existing AMM pools by querying amm_info for known currency pairs."""
+        from xrpl.models.currencies import XRP as XRPCurrency
+        from xrpl.models.requests import AMMInfo
+
+        discovered = 0
+        # Check XRP/IOU pairs (gateway pools)
+        for currency in self._currencies:
+            try:
+                a1 = XRPCurrency()
+                a2 = IssuedCurrency(currency=currency.currency, issuer=currency.issuer)
+                resp = await self._rpc(AMMInfo(asset=a1, asset2=a2), t=3.0)
+                if resp.is_successful() and "amm" in resp.result:
+                    self._register_amm_pool(
+                        {"currency": "XRP"},
+                        {"currency": currency.currency, "issuer": currency.issuer},
+                        resp.result["amm"].get("account", "unknown"),
+                    )
+                    discovered += 1
+            except Exception:
+                pass
+
+        # Check IOU/IOU pairs
+        from itertools import combinations
+
+        for c1, c2 in combinations(self._currencies, 2):
+            try:
+                a1 = IssuedCurrency(currency=c1.currency, issuer=c1.issuer)
+                a2 = IssuedCurrency(currency=c2.currency, issuer=c2.issuer)
+                resp = await self._rpc(AMMInfo(asset=a1, asset2=a2), t=2.0)
+                if resp.is_successful() and "amm" in resp.result:
+                    self._register_amm_pool(
+                        {"currency": c1.currency, "issuer": c1.issuer},
+                        {"currency": c2.currency, "issuer": c2.issuer},
+                        resp.result["amm"].get("account", "unknown"),
+                    )
+                    discovered += 1
+            except Exception:
+                pass
+
+        log.info("Discovered %d AMM pools from ledger", discovered)
 
     def save_wallet_to_store(
         self, wallet: Wallet, is_gateway: bool = False, is_user: bool = False, funded_ledger_index: int | None = None
@@ -717,6 +850,35 @@ class Workload:
                     log.info(f"Batch validated: synced {p_live.account[:8]} sequence {old_seq} -> {rec_acct.next_seq}")
             except Exception as e:
                 log.warning(f"Failed to sync sequence after Batch validation: {e}")
+
+        if p_live and meta_result == "tesSUCCESS" and p_live.transaction_type == C.TxType.AMM_CREATE:
+            try:
+                tx_json = p_live.tx_json
+                if tx_json:
+                    amount1 = tx_json.get("Amount")
+                    amount2 = tx_json.get("Amount2")
+                    if amount1 and amount2:
+                        asset1 = (
+                            {"currency": "XRP"}
+                            if isinstance(amount1, str)
+                            else {"currency": amount1["currency"], "issuer": amount1["issuer"]}
+                        )
+                        asset2 = (
+                            {"currency": "XRP"}
+                            if isinstance(amount2, str)
+                            else {"currency": amount2["currency"], "issuer": amount2["issuer"]}
+                        )
+                        self._register_amm_pool(asset1, asset2, p_live.account)
+            except Exception as e:
+                log.warning(f"Failed to register AMM pool from {rec.txn}: {e}")
+
+        if p_live and meta_result == "tesSUCCESS":
+            if p_live.transaction_type == C.TxType.AMM_DEPOSIT:
+                self._dex_metrics["total_deposits"] += 1
+            elif p_live.transaction_type == C.TxType.AMM_WITHDRAW:
+                self._dex_metrics["total_withdrawals"] += 1
+            elif p_live.transaction_type == C.TxType.OFFER_CREATE:
+                self._dex_metrics["total_offers"] += 1
 
         log.debug("txn %s validated at ledger %s via %s", rec.txn, rec.seq, rec.src)
         return {"tx_hash": rec.txn, "ledger_index": rec.seq, "source": rec.src, "meta_result": meta_result}
@@ -2118,6 +2280,171 @@ class Workload:
 
         self.save_currencies_to_store()
 
+        # Phase 7: Gateway AMM Creation (XRP/IOU pools)
+        phase7_start = time.time()
+        phase7_ledger_start = await self._current_ledger_index()
+
+        amm_cfg = self.config.get("amm", {})
+        gateway_pool_count = amm_cfg.get("gateway_pools", 12)
+        pools_per_gateway = max(1, gateway_pool_count // len(self.gateways))
+
+        log.info(f"Phase 7: Creating {gateway_pool_count} gateway AMM pools ({pools_per_gateway} per gateway)")
+
+        amm_txn_pairs: list[tuple[Transaction, Wallet]] = []
+        pool_count = 0
+
+        for gw in self.gateways:
+            gw_currencies = [c for c in self._currencies if c.issuer == gw.address]
+            pools_for_gw = gw_currencies[:pools_per_gateway]
+
+            for currency in pools_for_gw:
+                if pool_count >= gateway_pool_count:
+                    break
+
+                xrp_amount = amm_cfg.get("deposit_amount_xrp", "1000000000")
+                iou_amount = IssuedCurrencyAmount(
+                    currency=currency.currency,
+                    issuer=currency.issuer,
+                    value=str(amm_cfg.get("default_amm_token_deposit", 1000)),
+                )
+
+                amm_create_tx = AMMCreate(
+                    account=gw.address,
+                    amount=xrp_amount,
+                    amount2=iou_amount,
+                    trading_fee=amm_cfg.get("trading_fee", 500),
+                )
+                amm_txn_pairs.append((amm_create_tx, gw))
+                pool_count += 1
+
+        phase7_validated, phase7_total, phase7_pending = await self._init_batch(
+            amm_txn_pairs, "Phase 7: Gateway AMMs"
+        )
+
+        for p in phase7_pending:
+            if p.state == C.TxState.VALIDATED and p.meta_txn_result == "tesSUCCESS":
+                tx_json = p.tx_json
+                if tx_json:
+                    amount1 = tx_json.get("Amount")
+                    amount2 = tx_json.get("Amount2")
+                    if amount1 and amount2:
+                        asset1 = (
+                            {"currency": "XRP"}
+                            if isinstance(amount1, str)
+                            else {"currency": amount1["currency"], "issuer": amount1["issuer"]}
+                        )
+                        asset2 = (
+                            {"currency": "XRP"}
+                            if isinstance(amount2, str)
+                            else {"currency": amount2["currency"], "issuer": amount2["issuer"]}
+                        )
+                        self._register_amm_pool(asset1, asset2, p.account)
+
+        phase7_ledger_end = await self._current_ledger_index()
+        phase_stats.append(
+            {
+                "name": "Phase 7: Gateway AMMs",
+                "time_sec": round(time.time() - phase7_start, 2),
+                "ledgers": phase7_ledger_end - phase7_ledger_start,
+                "validated": phase7_validated,
+                "total": phase7_total,
+            }
+        )
+
+        # Phase 8: User AMM Creation (IOU/IOU pools)
+        phase8_start = time.time()
+        phase8_ledger_start = await self._current_ledger_index()
+
+        user_pool_count = amm_cfg.get("user_pools", 100)
+        log.info(f"Phase 8: Creating {user_pool_count} user AMM pools (IOU/IOU)")
+
+        from itertools import combinations
+        from random import shuffle
+
+        all_iou_pairs = list(combinations(self._currencies, 2))
+        all_iou_pairs = [
+            (c1, c2)
+            for c1, c2 in all_iou_pairs
+            if not (c1.currency == c2.currency and c1.issuer == c2.issuer)
+        ]
+        shuffle(all_iou_pairs)
+
+        user_amm_txn_pairs: list[tuple[Transaction, Wallet]] = []
+        created_pairs: set[frozenset[str]] = set(self._amm_pools)
+        user_idx = 0
+
+        for c1, c2 in all_iou_pairs:
+            if len(user_amm_txn_pairs) >= user_pool_count:
+                break
+
+            pair_key = frozenset([f"{c1.currency}.{c1.issuer}", f"{c2.currency}.{c2.issuer}"])
+            if pair_key in created_pairs:
+                continue
+            created_pairs.add(pair_key)
+
+            omit = [c1.issuer, c2.issuer]
+            available = [u for u in self.users if u.address not in omit]
+            if not available:
+                continue
+            user = available[user_idx % len(available)]
+            user_idx += 1
+
+            amm_create_tx = AMMCreate(
+                account=user.address,
+                amount=IssuedCurrencyAmount(
+                    currency=c1.currency,
+                    issuer=c1.issuer,
+                    value=str(amm_cfg.get("default_amm_token_deposit", 1000)),
+                ),
+                amount2=IssuedCurrencyAmount(
+                    currency=c2.currency,
+                    issuer=c2.issuer,
+                    value=str(amm_cfg.get("default_amm_token_deposit", 1000)),
+                ),
+                trading_fee=amm_cfg.get("trading_fee", 500),
+            )
+            user_amm_txn_pairs.append((amm_create_tx, user))
+
+        log.info(
+            f"Phase 8: Built {len(user_amm_txn_pairs)} user AMM pool creations (from {len(all_iou_pairs)} possible pairs)"
+        )
+
+        phase8_validated, phase8_total, phase8_pending = await self._init_batch(
+            user_amm_txn_pairs, "Phase 8: User AMMs"
+        )
+
+        for p in phase8_pending:
+            if p.state == C.TxState.VALIDATED and p.meta_txn_result == "tesSUCCESS":
+                tx_json = p.tx_json
+                if tx_json:
+                    amount1 = tx_json.get("Amount")
+                    amount2 = tx_json.get("Amount2")
+                    if amount1 and amount2:
+                        asset1 = (
+                            {"currency": "XRP"}
+                            if isinstance(amount1, str)
+                            else {"currency": amount1["currency"], "issuer": amount1["issuer"]}
+                        )
+                        asset2 = (
+                            {"currency": "XRP"}
+                            if isinstance(amount2, str)
+                            else {"currency": amount2["currency"], "issuer": amount2["issuer"]}
+                        )
+                        self._register_amm_pool(asset1, asset2, p.account)
+
+        phase8_ledger_end = await self._current_ledger_index()
+        phase_stats.append(
+            {
+                "name": "Phase 8: User AMMs",
+                "time_sec": round(time.time() - phase8_start, 2),
+                "ledgers": phase8_ledger_end - phase8_ledger_start,
+                "validated": phase8_validated,
+                "total": phase8_total,
+            }
+        )
+
+        self.update_txn_context()
+
         init_end_time = time.time()
         init_end_ledger = await self._current_ledger_index()
         total_time = round(init_end_time - init_start_time, 2)
@@ -2212,7 +2539,78 @@ class Workload:
             if key in store_stats:
                 result[key] = store_stats[key]
 
+        result["dex"] = self.snapshot_dex_metrics()
+
         return result
+
+    def snapshot_dex_metrics(self) -> dict:
+        """Return current DEX metrics snapshot for the API."""
+        return {
+            "pools_created": self._dex_metrics.get("pools_created", 0),
+            "active_pools": self._dex_metrics.get("active_pools", 0),
+            "total_deposits": self._dex_metrics.get("total_deposits", 0),
+            "total_withdrawals": self._dex_metrics.get("total_withdrawals", 0),
+            "total_offers": self._dex_metrics.get("total_offers", 0),
+            "total_xrp_locked_drops": self._dex_metrics.get("total_xrp_locked_drops", 0),
+            "last_poll_ledger": self._dex_metrics.get("last_poll_ledger", 0),
+            "pool_count": len(self._amm_pool_registry),
+            "pool_details": self._dex_metrics.get("pool_snapshots", []),
+        }
+
+    async def poll_dex_metrics(self) -> dict:
+        """Poll amm_info for all tracked AMM pools and update DEX metrics."""
+        from xrpl.models.currencies import XRP as XRPCurrency
+        from xrpl.models.requests import AMMInfo
+
+        pool_snapshots = []
+        total_xrp_locked = 0
+
+        for pool in self._amm_pool_registry:
+            try:
+                asset1 = pool["asset1"]
+                asset2 = pool["asset2"]
+
+                if asset1.get("currency") == "XRP":
+                    a1 = XRPCurrency()
+                else:
+                    a1 = IssuedCurrency(currency=asset1["currency"], issuer=asset1["issuer"])
+
+                if asset2.get("currency") == "XRP":
+                    a2 = XRPCurrency()
+                else:
+                    a2 = IssuedCurrency(currency=asset2["currency"], issuer=asset2["issuer"])
+
+                resp = await self._rpc(AMMInfo(asset=a1, asset2=a2), t=3.0)
+                if resp.is_successful():
+                    amm_data = resp.result.get("amm", {})
+                    snapshot = {
+                        "asset1": asset1,
+                        "asset2": asset2,
+                        "amount": amm_data.get("amount"),
+                        "amount2": amm_data.get("amount2"),
+                        "lp_token": amm_data.get("lp_token"),
+                        "trading_fee": amm_data.get("trading_fee"),
+                        "vote_slots": len(amm_data.get("vote_slots", [])),
+                    }
+                    pool_snapshots.append(snapshot)
+
+                    amt = amm_data.get("amount")
+                    if isinstance(amt, str):
+                        total_xrp_locked += int(amt)
+                    amt2 = amm_data.get("amount2")
+                    if isinstance(amt2, str):
+                        total_xrp_locked += int(amt2)
+
+            except Exception as e:
+                log.debug(f"Failed to poll amm_info for pool: {e}")
+
+        current_ledger = await self._current_ledger_index()
+        self._dex_metrics["pool_snapshots"] = pool_snapshots
+        self._dex_metrics["last_poll_ledger"] = current_ledger
+        self._dex_metrics["total_xrp_locked_drops"] = total_xrp_locked
+        self._dex_metrics["active_pools"] = len(pool_snapshots)
+
+        return self._dex_metrics
 
     def snapshot_tx(self, tx_hash: str) -> dict[str, Any]:
         p = self.pending.get(tx_hash)
@@ -2250,6 +2648,29 @@ class Workload:
 
 
 PER_TX_TIMEOUT = 3
+
+
+async def periodic_dex_metrics(w: Workload, stop: asyncio.Event, poll_interval_ledgers: int = 5):
+    """Periodically poll DEX metrics every N ledgers."""
+    last_polled_ledger = 0
+    while not stop.is_set():
+        try:
+            if not w._amm_pool_registry:
+                await asyncio.sleep(5)
+                continue
+
+            current = await w._current_ledger_index()
+            if current >= last_polled_ledger + poll_interval_ledgers:
+                await w.poll_dex_metrics()
+                last_polled_ledger = current
+                log.debug("DEX metrics polled at ledger %d (%d pools)", current, len(w._amm_pool_registry))
+
+            await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("[dex_metrics] poll error; continuing")
+            await asyncio.sleep(5)
 
 
 async def periodic_finality_check(w: Workload, stop: asyncio.Event, interval: int = 5):

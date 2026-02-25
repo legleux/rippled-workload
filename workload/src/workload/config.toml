@@ -12,22 +12,27 @@ names = [
     "all-crypto",
     "bit-bank",
     "coin-thang",
-    "digi-bux"
+    "digi-bux",
+    "flux-pay",
+    "zen-trade",
 ]
-# TODO: Instead of 4, get from the number of names?
-number = 4
+number = 6
 default_balance = 100_000_000_000000
 require_auth = false
 default_ripple = true
 
 [users]
-number = 96
+number = 1000
 default_balance = 100_000_000000
 
 [amm]
 xrp_chance = 0.50
-trading_fee = 10
+trading_fee = 500
 default_amm_token_deposit = 1_000
+gateway_pools = 12
+user_pools = 100
+deposit_amount_xrp = "1000000000"
+deposit_amount_iou = "500"
 
 [currencies]
 token_distribution = 1_000_000
@@ -53,17 +58,16 @@ max_pending_per_account = 10
 
 # Disable specific transaction types (all types in _BUILDERS are enabled by default)
 disabled = [
-    "AMMCreate",  # Expensive fee, creates AMM pool
     # Batch now handled: sequences synced from ledger after validation/rejection/expiry
 ]
 
 # Transaction type percentages for random selection (0.0 to 1.0)
 # Types not listed share the remaining percentage evenly
-# Example: Payment=0.5, TrustSet=0.3 means 50% Payment, 30% TrustSet, and remaining 20% split evenly among all other
-# enabled types
 [transactions.percentages]
-Payment = 0.4
-OfferCreate = 0.3
+Payment = 0.25
+OfferCreate = 0.20
+AMMDeposit = 0.15
+AMMWithdraw = 0.10
 
 [transactions.mptoken.issuance_create]
 transfer_fee = 1000
@@ -76,8 +80,16 @@ limit = 1_000_000_000_000000
 
 [timeout]
 overall = 6
-startup = 180
+startup = 600
 initial_ledgers = 1
+
+[genesis]
+# Path to accounts.json from generate_ledger (address+seed pairs)
+# Set to false or empty to disable genesis loading
+accounts_json = "../prepare-workload/testnet/accounts.json"
+gateway_count = 6       # First N accounts are gateways
+user_count = 1000       # Next N accounts are users
+currencies = ["USD", "CNY", "BTC", "ETH"]  # Currencies per gateway
 
 [rippled]
 docker = "rippled"

@@ -10,6 +10,10 @@ from xrpl.models.amounts import IssuedCurrencyAmount
 from xrpl.models.transactions import (
     AccountSet,
     AMMCreate,
+    AMMDeposit,
+    AMMDepositFlag,
+    AMMWithdraw,
+    AMMWithdrawFlag,
     Batch,
     BatchFlag,
     Memo,
@@ -59,7 +63,8 @@ class TxnContext:
     base_fee_drops: "AwaitInt"
     next_sequence: "AwaitSeq"
     mptoken_issuance_ids: list[str] | None = None  # MPToken issuance IDs
-    amm_pools: set[frozenset[str]] | None = None  # AMM pools (asset pairs)
+    amm_pools: set[frozenset[str]] | None = None  # AMM pools (asset pairs) for dedup
+    amm_pool_registry: list[dict] | None = None  # [{asset1: {...}, asset2: {...}, creator: str}]
     nfts: dict[str, str] | None = None  # NFTs: {nft_id: owner}
     offers: dict[str, dict] | None = None  # Offers: {offer_id: {type, owner, ...}}
     tickets: dict[str, set[int]] | None = None  # Tickets: {account: {ticket_seq, ...}}
@@ -136,6 +141,12 @@ class TxnContext:
         id2 = self._asset_id(asset2)
         pool_id = frozenset([id1, id2])
         return pool_id in self.amm_pools
+
+    def rand_amm_pool(self) -> dict:
+        """Pick a random AMM pool from the registry."""
+        if not self.amm_pool_registry:
+            raise RuntimeError("No AMM pools available")
+        return choice(self.amm_pool_registry)
 
     def derive(self, **overrides) -> "TxnContext":
         return replace(self, **overrides)
@@ -681,6 +692,113 @@ def _build_amm_create(ctx: TxnContext) -> dict:
     }
 
 
+def _build_amm_deposit(ctx: TxnContext) -> dict:
+    """Build an AMMDeposit transaction to add liquidity to an existing AMM pool.
+
+    Uses TF_TWO_ASSET flag for dual-asset deposit.
+    """
+    pool = ctx.rand_amm_pool()
+    asset1 = pool["asset1"]
+    asset2 = pool["asset2"]
+
+    omit = []
+    if isinstance(asset2, dict) and "issuer" in asset2:
+        omit.append(asset2["issuer"])
+    if isinstance(asset1, dict) and "issuer" in asset1:
+        omit.append(asset1["issuer"])
+    src = ctx.rand_account(omit=omit if omit else None)
+
+    amm_cfg = ctx.config.get("amm", {})
+
+    if asset1.get("currency") == "XRP":
+        amount1 = amm_cfg.get("deposit_amount_xrp", "1000000000")
+        amount2 = {
+            "currency": asset2["currency"],
+            "issuer": asset2["issuer"],
+            "value": amm_cfg.get("deposit_amount_iou", "500"),
+        }
+        asset1_field = {"currency": "XRP"}
+        asset2_field = {"currency": asset2["currency"], "issuer": asset2["issuer"]}
+    else:
+        amount1 = {
+            "currency": asset1["currency"],
+            "issuer": asset1["issuer"],
+            "value": amm_cfg.get("deposit_amount_iou", "500"),
+        }
+        amount2 = {
+            "currency": asset2["currency"],
+            "issuer": asset2["issuer"],
+            "value": amm_cfg.get("deposit_amount_iou", "500"),
+        }
+        asset1_field = {"currency": asset1["currency"], "issuer": asset1["issuer"]}
+        asset2_field = {"currency": asset2["currency"], "issuer": asset2["issuer"]}
+
+    return {
+        "TransactionType": "AMMDeposit",
+        "Account": src.address,
+        "Asset": asset1_field,
+        "Asset2": asset2_field,
+        "Amount": amount1,
+        "Amount2": amount2,
+        "Flags": AMMDepositFlag.TF_TWO_ASSET,
+    }
+
+
+def _build_amm_withdraw(ctx: TxnContext) -> dict:
+    """Build an AMMWithdraw transaction to remove liquidity from an existing AMM pool.
+
+    Uses TF_TWO_ASSET flag for proportional dual-asset withdrawal.
+    Withdraws 10% of deposit amounts to keep pools healthy.
+    """
+    pool = ctx.rand_amm_pool()
+    asset1 = pool["asset1"]
+    asset2 = pool["asset2"]
+
+    omit = []
+    if isinstance(asset2, dict) and "issuer" in asset2:
+        omit.append(asset2["issuer"])
+    if isinstance(asset1, dict) and "issuer" in asset1:
+        omit.append(asset1["issuer"])
+    src = ctx.rand_account(omit=omit if omit else None)
+
+    amm_cfg = ctx.config.get("amm", {})
+    withdraw_xrp = str(int(int(amm_cfg.get("deposit_amount_xrp", "1000000000")) * 0.1))
+    withdraw_iou = str(float(amm_cfg.get("deposit_amount_iou", "500")) * 0.1)
+
+    if asset1.get("currency") == "XRP":
+        amount1 = withdraw_xrp
+        amount2 = {
+            "currency": asset2["currency"],
+            "issuer": asset2["issuer"],
+            "value": withdraw_iou,
+        }
+        asset1_field = {"currency": "XRP"}
+        asset2_field = {"currency": asset2["currency"], "issuer": asset2["issuer"]}
+    else:
+        amount1 = {
+            "currency": asset1["currency"],
+            "issuer": asset1["issuer"],
+            "value": withdraw_iou,
+        }
+        amount2 = {
+            "currency": asset2["currency"],
+            "issuer": asset2["issuer"],
+            "value": withdraw_iou,
+        }
+        asset1_field = {"currency": asset1["currency"], "issuer": asset1["issuer"]}
+        asset2_field = {"currency": asset2["currency"], "issuer": asset2["issuer"]}
+
+    return {
+        "TransactionType": "AMMWithdraw",
+        "Account": src.address,
+        "Asset": asset1_field,
+        "Asset2": asset2_field,
+        "Amount": amount1,
+        "Amount2": amount2,
+        "Flags": AMMWithdrawFlag.TF_TWO_ASSET,
+    }
+
+
 _BUILDERS: dict[str, tuple[Callable[[TxnContext], dict], type[Transaction]]] = {
     "Payment": (_build_payment, Payment),
     "TrustSet": (_build_trustset, TrustSet),
@@ -698,6 +816,8 @@ _BUILDERS: dict[str, tuple[Callable[[TxnContext], dict], type[Transaction]]] = {
     "MPTokenAuthorize": (_build_mptoken_authorize, MPTokenAuthorize),
     "MPTokenIssuanceDestroy": (_build_mptoken_issuance_destroy, MPTokenIssuanceDestroy),
     "AMMCreate": (_build_amm_create, AMMCreate),
+    "AMMDeposit": (_build_amm_deposit, AMMDeposit),
+    "AMMWithdraw": (_build_amm_withdraw, AMMWithdraw),
     "Batch": (_build_batch, Batch),
 }
 
@@ -750,6 +870,12 @@ async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides
         if not ctx.offers or not any(v.get("type") == "IOUOffer" for v in (ctx.offers or {}).values()):
             configured_types = [t for t in configured_types if t not in requires_iou_offers]
             log.debug("No IOU offers available, excluding: %s", requires_iou_offers)
+
+        requires_amm_pools = {"AMMDeposit", "AMMWithdraw"}
+
+        if not ctx.amm_pool_registry:
+            configured_types = [t for t in configured_types if t not in requires_amm_pools]
+            log.debug("No AMM pools available, excluding: %s", requires_amm_pools)
 
         if not configured_types:
             raise RuntimeError("No transaction types available to generate")

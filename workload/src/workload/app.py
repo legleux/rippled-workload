@@ -48,7 +48,7 @@ import workload.constants as C
 from workload.config import cfg
 from workload.logging_config import setup_logging
 from workload.txn_factory.builder import generate_txn
-from workload.workload_core import ValidationRecord, Workload, periodic_finality_check
+from workload.workload_core import ValidationRecord, Workload, periodic_dex_metrics, periodic_finality_check
 
 setup_logging()
 log = logging.getLogger("workload.app")
@@ -175,26 +175,62 @@ async def lifespan(app: FastAPI):
             name="ws_processor",
         )
 
-        log.info("Background tasks started: ws_listener, finality_checker, ws_processor")
+        tg.create_task(
+            periodic_dex_metrics(app.state.workload, app.state.stop),
+            name="dex_metrics_poller",
+        )
+
+        log.info("Background tasks started: ws_listener, finality_checker, ws_processor, dex_metrics_poller")
 
         state_loaded = app.state.workload.load_state_from_store()
 
         if state_loaded:
-            log.debug("Loaded existing state from database, skipping network provisioning")
-            log.debug(
+            log.info("Loaded existing state from database, skipping network provisioning")
+            log.info(
                 "  Wallets: %s (Gateways: %s, Users: %s)",
                 len(app.state.workload.wallets),
                 len(app.state.workload.gateways),
                 len(app.state.workload.users),
             )
         else:
-            gw, u = cfg["gateways"], cfg["users"]
-            log.info("No persisted state found. Initializing participants (gateways=%s, users=%s)...", gw, u)
-            init_result = await app.state.workload.init_participants(gateway_cfg=gw, user_cfg=u)
-            app.state.workload.update_txn_context()
-            log.info(
-                "Accounts initialized: %s gateways, %s users.", len(init_result["gateways"]), len(init_result["users"])
-            )
+            # Try loading from pre-generated genesis accounts
+            genesis_cfg = cfg.get("genesis", {})
+            accounts_json = genesis_cfg.get("accounts_json", "")
+
+            if accounts_json:
+                from pathlib import Path
+
+                # Resolve relative to CWD (typically workload/ project root)
+                accounts_path = Path(accounts_json)
+                if not accounts_path.is_absolute() and not accounts_path.exists():
+                    # Try relative to app.py's directory as fallback
+                    accounts_path = Path(__file__).parent / accounts_json
+                if not accounts_path.exists():
+                    # Try absolute from repo root
+                    accounts_path = Path(__file__).parent.parent.parent.parent / "prepare-workload" / "testnet" / "accounts.json"
+                log.info("Genesis accounts path: %s (exists=%s)", accounts_path, accounts_path.exists())
+
+                genesis_loaded = await app.state.workload.load_from_genesis(str(accounts_path))
+            else:
+                genesis_loaded = False
+
+            if genesis_loaded:
+                log.info(
+                    "Loaded from genesis: %s gateways, %s users, %s AMM pools",
+                    len(app.state.workload.gateways),
+                    len(app.state.workload.users),
+                    len(app.state.workload._amm_pool_registry),
+                )
+            else:
+                gw, u = cfg["gateways"], cfg["users"]
+                log.info("No persisted/genesis state. Initializing participants (gateways=%s, users=%s)...", gw, u)
+                init_result = await app.state.workload.init_participants(gateway_cfg=gw, user_cfg=u)
+                app.state.workload.update_txn_context()
+                log.info(
+                    "Accounts initialized: %s gateways, %s users.",
+                    len(init_result["gateways"]),
+                    len(init_result["users"]),
+                )
 
         init_ledger = await app.state.workload._current_ledger_index()
         setup_complete(
@@ -248,6 +284,7 @@ r_pay = APIRouter(prefix="/payment", tags=["Payments"])
 r_transaction = APIRouter(tags=["Transactions"])
 r_state = APIRouter(prefix="/state", tags=["State"])
 r_workload = APIRouter(prefix="/workload", tags=["Workload"])
+r_dex = APIRouter(prefix="/dex", tags=["DEX"])
 
 
 class TxnReq(BaseModel):
@@ -474,46 +511,31 @@ async def state_summary():
 
 @r_state.get("/dashboard", response_class=HTMLResponse)
 async def state_dashboard():
-    """HTML dashboard with live stats and visual progress bars."""
-    stats = app.state.workload.snapshot_stats()
-    failed_data = app.state.workload.snapshot_failed()
-
-    wl = app.state.workload
-    fee_info = await wl.get_fee_info()
+    """HTML dashboard with live stats, explorer embed, and WS terminal."""
     hostname = RPC.split("//")[1].split(":")[0] if "//" in RPC else RPC.split(":")[0]
 
-    total = stats.get("total_tracked", 0)
-    by_state = stats.get("by_state", {})
-
-    validated = by_state.get("VALIDATED", 0)
-    rejected = by_state.get("REJECTED", 0)
-    submitted = by_state.get("SUBMITTED", 0)
-    created = by_state.get("CREATED", 0)
-    retryable = by_state.get("RETRYABLE", 0)
-    expired = by_state.get("EXPIRED", 0)
-
-    val_pct = (validated / total * 100) if total > 0 else 0
-    rej_pct = (rejected / total * 100) if total > 0 else 0
-
-    INTERNAL_STATES = {"CASCADE_EXPIRED", "unknown", None, ""}
-    failures_by_result = {}
-    for failed in failed_data:
-        result = failed.get("engine_result_first", "unknown")
-        if result not in INTERNAL_STATES and not (result and result.startswith("tes")):
-            failures_by_result[result] = failures_by_result.get(result, 0) + 1
-
-    top_failures = sorted(failures_by_result.items(), key=lambda x: x[1], reverse=True)[:10]
-
-    submission_results = stats.get("submission_results", {})
-    sorted_submission_results = sorted(submission_results.items(), key=lambda x: x[1], reverse=True)
+    # Build node list from compose config for the WS terminal dropdown
+    from generate_ledger.config import ComposeConfig
+    cc = ComposeConfig()
+    nodes = []
+    for i in range(cc.num_validators):
+        name = f"{cc.validator_name}{i}"
+        ws = cc.ws_port + i + cc.num_hubs
+        nodes.append({"name": name, "ws": ws})
+    for i in range(cc.num_hubs):
+        name = cc.hub_name if cc.num_hubs == 1 else f"{cc.hub_name}{i}"
+        ws = cc.ws_port + i
+        nodes.append({"name": name, "ws": ws})
+    import json as _json
+    nodes_json = _json.dumps(nodes)
 
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Workload Dashboard</title>
-        <meta http-equiv="refresh" content="1">
         <style>
+            * {{ box-sizing: border-box; }}
             body {{
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                 background: #0d1117;
@@ -521,203 +543,543 @@ async def state_dashboard():
                 margin: 0;
                 padding: 20px;
             }}
-            .container {{
-                max-width: 1200px;
-                margin: 0 auto;
-            }}
-            h1 {{
-                color: #58a6ff;
-                margin-bottom: 10px;
-            }}
-            .subtitle {{
-                color: #8b949e;
-                margin-bottom: 30px;
-            }}
+            .container {{ max-width: 1400px; margin: 0 auto; }}
+            h1 {{ color: #58a6ff; margin-bottom: 10px; }}
+            h2 {{ color: #c9d1d9; margin: 0 0 12px 0; font-size: 16px; }}
+            .subtitle {{ color: #8b949e; margin-bottom: 20px; }}
+            .subtitle a {{ color: #58a6ff; text-decoration: none; }}
+            .subtitle a:hover {{ text-decoration: underline; }}
+
             .stats-grid {{
                 display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 20px;
-                margin-bottom: 30px;
+                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 16px;
+                margin-bottom: 20px;
             }}
             .stat-card {{
-                background: #161b22;
-                border: 1px solid #30363d;
-                border-radius: 6px;
-                padding: 20px;
+                background: #161b22; border: 1px solid #30363d;
+                border-radius: 6px; padding: 16px;
             }}
             .stat-label {{
-                color: #8b949e;
-                font-size: 12px;
-                text-transform: uppercase;
-                margin-bottom: 8px;
+                color: #8b949e; font-size: 11px;
+                text-transform: uppercase; margin-bottom: 6px;
             }}
             .stat-value {{
-                font-size: 32px;
-                font-weight: bold;
-                margin-bottom: 4px;
+                font-size: 28px; font-weight: bold; margin-bottom: 2px;
             }}
             .stat-value.success {{ color: #3fb950; }}
             .stat-value.error {{ color: #f85149; }}
             .stat-value.warning {{ color: #d29922; }}
             .stat-value.info {{ color: #58a6ff; }}
-            .stat-percentage {{
-                color: #8b949e;
-                font-size: 14px;
-            }}
+            .stat-percentage {{ color: #8b949e; font-size: 13px; }}
             .progress-bar {{
-                background: #21262d;
-                border-radius: 6px;
-                height: 8px;
-                overflow: hidden;
-                margin-top: 8px;
+                background: #21262d; border-radius: 6px;
+                height: 6px; overflow: hidden; margin-top: 6px;
             }}
-            .progress-fill {{
-                height: 100%;
-                transition: width 0.3s ease;
-            }}
+            .progress-fill {{ height: 100%; transition: width 0.3s ease; }}
             .progress-fill.success {{ background: #3fb950; }}
             .progress-fill.error {{ background: #f85149; }}
-            .failures-table {{
-                background: #161b22;
-                border: 1px solid #30363d;
-                border-radius: 6px;
-                padding: 20px;
+            .progress-fill.info {{ background: #58a6ff; }}
+
+            .panel {{
+                background: #161b22; border: 1px solid #30363d;
+                border-radius: 6px; padding: 20px; margin-bottom: 20px;
             }}
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-            }}
-            th, td {{
-                text-align: left;
-                padding: 12px;
-                border-bottom: 1px solid #21262d;
-            }}
-            th {{
-                color: #8b949e;
-                font-weight: 600;
-                font-size: 12px;
-                text-transform: uppercase;
-            }}
-            tr:last-child td {{
-                border-bottom: none;
-            }}
+            .failures-table {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 20px; margin-bottom: 20px; }}
+            table {{ width: 100%; border-collapse: collapse; }}
+            th, td {{ text-align: left; padding: 10px; border-bottom: 1px solid #21262d; }}
+            th {{ color: #8b949e; font-weight: 600; font-size: 11px; text-transform: uppercase; }}
+            tr:last-child td {{ border-bottom: none; }}
             .badge {{
-                display: inline-block;
-                padding: 2px 8px;
-                border-radius: 4px;
-                font-size: 12px;
-                font-weight: 600;
+                display: inline-block; padding: 2px 8px; border-radius: 4px;
+                font-size: 12px; font-weight: 600;
             }}
+            .badge.success {{ background: #3fb9501a; color: #3fb950; }}
+            .badge.warning {{ background: #d299221a; color: #d29922; }}
             .badge.error {{ background: #f851491a; color: #f85149; }}
+            .badge.info {{ background: #58a6ff1a; color: #58a6ff; }}
+
             .controls {{
-                margin-bottom: 20px;
-                display: flex;
-                gap: 10px;
+                margin-bottom: 20px; display: flex;
+                gap: 10px; align-items: center; flex-wrap: wrap;
             }}
             .btn {{
-                padding: 10px 20px;
-                border: none;
-                border-radius: 6px;
-                font-size: 14px;
-                font-weight: 600;
-                cursor: pointer;
+                padding: 8px 16px; border: none; border-radius: 6px;
+                font-size: 13px; font-weight: 600; cursor: pointer;
                 transition: opacity 0.2s;
             }}
-            .btn:hover {{
-                opacity: 0.8;
+            .btn:hover {{ opacity: 0.8; }}
+            .btn-start {{ background: #3fb950; color: white; }}
+            .btn-stop {{ background: #f85149; color: white; }}
+            .fill-control {{
+                display: flex; align-items: center; gap: 8px;
+                background: #161b22; border: 1px solid #30363d;
+                border-radius: 6px; padding: 6px 14px;
             }}
-            .btn-start {{
-                background: #3fb950;
-                color: white;
+            .fill-control label {{
+                color: #8b949e; font-size: 12px; font-weight: 600;
+                text-transform: uppercase; white-space: nowrap;
             }}
-            .btn-stop {{
-                background: #f85149;
-                color: white;
+            .fill-control input[type=range] {{ width: 140px; accent-color: #58a6ff; }}
+            .fill-control .fill-value {{
+                color: #58a6ff; font-weight: 700; font-size: 15px;
+                min-width: 36px; text-align: right;
             }}
+            .link-btn {{
+                padding: 8px 16px; border: 1px solid #30363d; border-radius: 6px;
+                font-size: 13px; font-weight: 600; cursor: pointer;
+                background: #161b22; color: #58a6ff; text-decoration: none;
+                transition: border-color 0.2s;
+            }}
+            .link-btn:hover {{ border-color: #58a6ff; }}
+
+            .explorer-viewport {{
+                position: relative; width: 100%; height: 500px;
+                overflow: hidden; border-radius: 4px;
+            }}
+            .explorer-viewport iframe {{
+                position: absolute; top: -60px; left: 0;
+                width: 100%; height: calc(100% + 60px); border: none;
+            }}
+
+            /* WS Terminal */
+            .ws-terminal-bar {{
+                display: flex; gap: 8px; align-items: center;
+                margin-bottom: 10px; flex-wrap: wrap;
+            }}
+            .ws-terminal-bar select, .ws-terminal-bar button {{
+                background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+                border-radius: 4px; padding: 6px 10px; font-size: 13px;
+            }}
+            .ws-terminal-bar select {{ min-width: 120px; }}
+            .ws-terminal-bar button {{ cursor: pointer; font-weight: 600; }}
+            .ws-terminal-bar button:hover {{ border-color: #58a6ff; }}
+            .ws-terminal-bar button.active {{ background: #3fb950; color: #0d1117; border-color: #3fb950; }}
+            .stream-filters {{
+                display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+            }}
+            .stream-filters label {{
+                display: flex; align-items: center; gap: 4px;
+                font-size: 12px; color: #8b949e; cursor: pointer;
+                background: #0d1117; border: 1px solid #30363d;
+                border-radius: 4px; padding: 4px 8px;
+            }}
+            .stream-filters label.checked {{
+                border-color: #58a6ff; color: #58a6ff;
+            }}
+            .stream-filters input {{ display: none; }}
+            #ws-output {{
+                background: #010409; border: 1px solid #21262d; border-radius: 4px;
+                height: 400px; overflow-y: auto; padding: 10px;
+                font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+                font-size: 12px; line-height: 1.5;
+                scroll-behavior: smooth;
+            }}
+            .ws-line {{ margin: 0; white-space: pre-wrap; word-break: break-all; }}
+            .ws-line.ledger {{ color: #58a6ff; }}
+            .ws-line.transaction {{ color: #3fb950; }}
+            .ws-line.validation {{ color: #d29922; }}
+            .ws-line.server {{ color: #8b949e; }}
+            .ws-line.consensus {{ color: #bc8cff; }}
+            .ws-line.peer {{ color: #f0883e; }}
+            .ws-line.error {{ color: #f85149; }}
+            .ws-line.info {{ color: #8b949e; font-style: italic; }}
+            .ws-line.txn-Payment {{ color: #3fb950; }}
+            .ws-line.txn-OfferCreate {{ color: #58a6ff; }}
+            .ws-line.txn-OfferCancel {{ color: #6cb6ff; }}
+            .ws-line.txn-TrustSet {{ color: #d29922; }}
+            .ws-line.txn-AccountSet {{ color: #8b949e; }}
+            .ws-line.txn-NFTokenMint {{ color: #bc8cff; }}
+            .ws-line.txn-NFTokenBurn {{ color: #986ee2; }}
+            .ws-line.txn-NFTokenCreateOffer {{ color: #a371f7; }}
+            .ws-line.txn-NFTokenCancelOffer {{ color: #8957e5; }}
+            .ws-line.txn-NFTokenAcceptOffer {{ color: #c297ff; }}
+            .ws-line.txn-TicketCreate {{ color: #7ee787; }}
+            .ws-line.txn-MPTokenIssuanceCreate {{ color: #f0883e; }}
+            .ws-line.txn-MPTokenIssuanceSet {{ color: #d4762c; }}
+            .ws-line.txn-MPTokenAuthorize {{ color: #e09b4f; }}
+            .ws-line.txn-MPTokenIssuanceDestroy {{ color: #c45e1a; }}
+            .ws-line.txn-AMMCreate {{ color: #f778ba; }}
+            .ws-line.txn-Batch {{ color: #79c0ff; }}
+            .stream-filters label.txn-Payment {{ border-color: #3fb95066; }}
+            .stream-filters label.txn-Payment.checked {{ border-color: #3fb950; color: #3fb950; }}
+            .stream-filters label.txn-OfferCreate {{ border-color: #58a6ff66; }}
+            .stream-filters label.txn-OfferCreate.checked {{ border-color: #58a6ff; color: #58a6ff; }}
+            .stream-filters label.txn-OfferCancel {{ border-color: #6cb6ff66; }}
+            .stream-filters label.txn-OfferCancel.checked {{ border-color: #6cb6ff; color: #6cb6ff; }}
+            .stream-filters label.txn-TrustSet {{ border-color: #d2992266; }}
+            .stream-filters label.txn-TrustSet.checked {{ border-color: #d29922; color: #d29922; }}
+            .stream-filters label.txn-AccountSet {{ border-color: #8b949e66; }}
+            .stream-filters label.txn-AccountSet.checked {{ border-color: #8b949e; color: #8b949e; }}
+            .stream-filters label.txn-NFTokenMint {{ border-color: #bc8cff66; }}
+            .stream-filters label.txn-NFTokenMint.checked {{ border-color: #bc8cff; color: #bc8cff; }}
+            .stream-filters label.txn-NFTokenBurn {{ border-color: #986ee266; }}
+            .stream-filters label.txn-NFTokenBurn.checked {{ border-color: #986ee2; color: #986ee2; }}
+            .stream-filters label.txn-NFTokenCreateOffer {{ border-color: #a371f766; }}
+            .stream-filters label.txn-NFTokenCreateOffer.checked {{ border-color: #a371f7; color: #a371f7; }}
+            .stream-filters label.txn-NFTokenCancelOffer {{ border-color: #8957e566; }}
+            .stream-filters label.txn-NFTokenCancelOffer.checked {{ border-color: #8957e5; color: #8957e5; }}
+            .stream-filters label.txn-NFTokenAcceptOffer {{ border-color: #c297ff66; }}
+            .stream-filters label.txn-NFTokenAcceptOffer.checked {{ border-color: #c297ff; color: #c297ff; }}
+            .stream-filters label.txn-TicketCreate {{ border-color: #7ee78766; }}
+            .stream-filters label.txn-TicketCreate.checked {{ border-color: #7ee787; color: #7ee787; }}
+            .stream-filters label.txn-MPTokenIssuanceCreate {{ border-color: #f0883e66; }}
+            .stream-filters label.txn-MPTokenIssuanceCreate.checked {{ border-color: #f0883e; color: #f0883e; }}
+            .stream-filters label.txn-MPTokenIssuanceSet {{ border-color: #d4762c66; }}
+            .stream-filters label.txn-MPTokenIssuanceSet.checked {{ border-color: #d4762c; color: #d4762c; }}
+            .stream-filters label.txn-MPTokenAuthorize {{ border-color: #e09b4f66; }}
+            .stream-filters label.txn-MPTokenAuthorize.checked {{ border-color: #e09b4f; color: #e09b4f; }}
+            .stream-filters label.txn-MPTokenIssuanceDestroy {{ border-color: #c45e1a66; }}
+            .stream-filters label.txn-MPTokenIssuanceDestroy.checked {{ border-color: #c45e1a; color: #c45e1a; }}
+            .stream-filters label.txn-AMMCreate {{ border-color: #f778ba66; }}
+            .stream-filters label.txn-AMMCreate.checked {{ border-color: #f778ba; color: #f778ba; }}
+            .stream-filters label.txn-Batch {{ border-color: #79c0ff66; }}
+            .stream-filters label.txn-Batch.checked {{ border-color: #79c0ff; color: #79c0ff; }}
+            .ws-status {{ font-size: 12px; margin-left: auto; }}
+            .ws-status.connected {{ color: #3fb950; }}
+            .ws-status.disconnected {{ color: #f85149; }}
+            .msg-count {{ color: #8b949e; font-size: 12px; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🚀 Workload Dashboard</h1>
-            <div class="subtitle">Live monitoring • Auto-refresh every 1s • Ledger {fee_info.ledger_current_index} @ {hostname}</div>
+            <h1>Workload Dashboard</h1>
+            <div class="subtitle" id="subtitle">Loading...</div>
 
             <div class="controls">
-                <button class="btn btn-start" onclick="fetch('/workload/start', {{method: 'POST'}}).then(() => location.reload())">▶️ Start Workload</button>
-                <button class="btn btn-stop" onclick="fetch('/workload/stop', {{method: 'POST'}}).then(() => location.reload())">⏹️ Stop Workload</button>
+                <button class="btn btn-start" onclick="fetch('/workload/start', {{method:'POST'}})">Start</button>
+                <button class="btn btn-stop" onclick="fetch('/workload/stop', {{method:'POST'}})">Stop</button>
+                <div class="fill-control">
+                    <label>Fill</label>
+                    <input type="range" id="fill-slider" min="0" max="100" value="50"
+                           oninput="document.getElementById('fill-val').textContent=this.value+'%'"
+                           onchange="fetch('/workload/fill-fraction',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{fill_fraction:this.value/100}})}})">
+                    <span class="fill-value" id="fill-val">50%</span>
+                </div>
+                <a class="link-btn" href="https://custom.xrpl.org/localhost:6006" target="_blank">XRPL Explorer</a>
+                <a class="link-btn" href="/docs" target="_blank">API Docs</a>
             </div>
 
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-label">Fee (min/open/base)</div>
-                    <div class="stat-value {"warning" if fee_info.minimum_fee > fee_info.base_fee else "success"}">{fee_info.minimum_fee}/{fee_info.open_ledger_fee}/{fee_info.base_fee}</div>
-                    <div class="stat-percentage">drops</div>
-                </div>
+            <!-- Stats cards (updated via JS) -->
+            <div class="stats-grid" id="fee-stats"></div>
+            <div class="stats-grid" id="txn-stats"></div>
 
-                <div class="stat-card">
-                    <div class="stat-label">Queue Utilization</div>
-                    <div class="stat-value info">{fee_info.current_queue_size}/{fee_info.max_queue_size}</div>
-                    <div class="stat-percentage">{(fee_info.current_queue_size / fee_info.max_queue_size * 100) if fee_info.max_queue_size > 0 else 0:.1f}%</div>
-                    <div class="progress-bar">
-                        <div class="progress-fill info" style="width: {(fee_info.current_queue_size / fee_info.max_queue_size * 100) if fee_info.max_queue_size > 0 else 0}%"></div>
-                    </div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-label">Ledger Utilization</div>
-                    <div class="stat-value info">{fee_info.current_ledger_size}/{fee_info.expected_ledger_size}</div>
-                    <div class="stat-percentage">{(fee_info.current_ledger_size / fee_info.expected_ledger_size * 100) if fee_info.expected_ledger_size > 0 else 0:.1f}%</div>
-                    <div class="progress-bar">
-                        <div class="progress-fill info" style="width: {(fee_info.current_ledger_size / fee_info.expected_ledger_size * 100) if fee_info.expected_ledger_size > 0 else 0}%"></div>
-                    </div>
+            <!-- Explorer embed -->
+            <div class="panel">
+                <h2>Ledger Stream</h2>
+                <div class="explorer-viewport">
+                    <iframe src="https://custom.xrpl.org/localhost:6006" id="explorer-frame"></iframe>
                 </div>
             </div>
 
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-label">Total Transactions</div>
-                    <div class="stat-value info">{total:,}</div>
+            <!-- WS Terminal -->
+            <div class="panel">
+                <h2>Node WebSocket</h2>
+                <div class="ws-terminal-bar">
+                    <select id="ws-node"></select>
+                    <button id="ws-connect-btn" onclick="toggleWs()">Connect</button>
+                    <div class="stream-filters" id="stream-filters"></div>
+                    <span class="msg-count" id="ws-msg-count"></span>
+                    <span class="ws-status disconnected" id="ws-status">disconnected</span>
                 </div>
-
-                <div class="stat-card">
-                    <div class="stat-label">Validated</div>
-                    <div class="stat-value success">{validated:,}</div>
-                    <div class="stat-percentage">{val_pct:.1f}%</div>
-                    <div class="progress-bar">
-                        <div class="progress-fill success" style="width: {val_pct}%"></div>
-                    </div>
+                <div class="ws-terminal-bar" style="margin-top:0">
+                    <span style="color:#8b949e;font-size:11px;text-transform:uppercase;font-weight:600">Txn types</span>
+                    <div class="stream-filters" id="txn-type-filters"></div>
                 </div>
-
-                <div class="stat-card">
-                    <div class="stat-label">Rejected</div>
-                    <div class="stat-value error">{rejected:,}</div>
-                    <div class="stat-percentage">{rej_pct:.1f}%</div>
-                    <div class="progress-bar">
-                        <div class="progress-fill error" style="width: {rej_pct}%"></div>
-                    </div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-label">In-Flight</div>
-                    <div class="stat-value warning">{submitted + created:,}</div>
-                    <div class="stat-percentage">Submitted: {submitted} | Created: {created}</div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-label">Retryable</div>
-                    <div class="stat-value warning">{retryable:,}</div>
-                    <div class="stat-percentage">terPRE_SEQ waiting</div>
-                </div>
-
-                <div class="stat-card">
-                    <div class="stat-label">Expired</div>
-                    <div class="stat-value">{expired:,}</div>
-                </div>
+                <div id="ws-output"></div>
             </div>
 
-            {"<div class='failures-table'><h2>Submission Results</h2><table><thead><tr><th>Engine Result</th><th>Count</th></tr></thead><tbody>" + "".join(f"<tr><td><span class='badge {'success' if result == 'tesSUCCESS' else 'warning' if result and result.startswith('ter') else 'error' if result and result.startswith(('tel', 'tec', 'tem', 'tef')) else 'info'}'>{result}</span></td><td>{count:,}</td></tr>" for result, count in sorted_submission_results) + "</tbody></table></div>" if sorted_submission_results else ""}
-
-            {"<div class='failures-table'><h2>Top Failures</h2><table><thead><tr><th>Error Code</th><th>Count</th></tr></thead><tbody>" + "".join(f"<tr><td><span class='badge error'>{result}</span></td><td>{count:,}</td></tr>" for result, count in top_failures) + "</tbody></table></div>" if top_failures else ""}
+            <!-- Submission results + failures (updated via JS) -->
+            <div id="tables-container"></div>
         </div>
+
+        <script>
+        // --- Nodes ---
+        const NODES = {nodes_json};
+        const STREAMS = [
+            {{name:'ledger', label:'Ledger', on:true}},
+            {{name:'transactions', label:'Transactions', on:true}},
+            {{name:'validations', label:'Validations', on:false}},
+            {{name:'consensus', label:'Consensus', on:false}},
+            {{name:'peer_status', label:'Peers', on:false}},
+            {{name:'server', label:'Server', on:false}},
+        ];
+        let ws = null;
+        let msgCount = 0;
+        let activeStreams = new Set(STREAMS.filter(s=>s.on).map(s=>s.name));
+        const MAX_LINES = 500;
+
+        // Populate node dropdown
+        const nodeSelect = document.getElementById('ws-node');
+        NODES.forEach(n => {{
+            const opt = document.createElement('option');
+            opt.value = n.ws;
+            opt.textContent = n.name + ' (:' + n.ws + ')';
+            nodeSelect.appendChild(opt);
+        }});
+
+        // Populate stream filter checkboxes
+        const filtersEl = document.getElementById('stream-filters');
+        STREAMS.forEach(s => {{
+            const lbl = document.createElement('label');
+            lbl.className = s.on ? 'checked' : '';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = s.on;
+            cb.dataset.stream = s.name;
+            cb.onchange = function() {{
+                if (this.checked) activeStreams.add(s.name);
+                else activeStreams.delete(s.name);
+                lbl.className = this.checked ? 'checked' : '';
+                if (ws && ws.readyState === WebSocket.OPEN) resubscribe();
+            }};
+            lbl.appendChild(cb);
+            lbl.appendChild(document.createTextNode(s.label));
+            filtersEl.appendChild(lbl);
+        }});
+
+        // Transaction type filters
+        const TXN_TYPES = [
+            'Payment','OfferCreate','OfferCancel','TrustSet','AccountSet',
+            'NFTokenMint','NFTokenBurn','NFTokenCreateOffer','NFTokenCancelOffer','NFTokenAcceptOffer',
+            'TicketCreate',
+            'MPTokenIssuanceCreate','MPTokenIssuanceSet','MPTokenAuthorize','MPTokenIssuanceDestroy',
+            'AMMCreate','Batch',
+        ];
+        let activeTxnTypes = new Set(TXN_TYPES); // all on by default
+        const txnFiltersEl = document.getElementById('txn-type-filters');
+        TXN_TYPES.forEach(tt => {{
+            const lbl = document.createElement('label');
+            lbl.className = 'checked txn-' + tt;
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = true;
+            cb.onchange = function() {{
+                if (this.checked) activeTxnTypes.add(tt);
+                else activeTxnTypes.delete(tt);
+                lbl.className = (this.checked ? 'checked ' : '') + 'txn-' + tt;
+            }};
+            lbl.appendChild(cb);
+            lbl.appendChild(document.createTextNode(tt));
+            txnFiltersEl.appendChild(lbl);
+        }});
+
+        function wsLog(text, cls) {{
+            const out = document.getElementById('ws-output');
+            const line = document.createElement('div');
+            line.className = 'ws-line ' + (cls || '');
+            const ts = new Date().toLocaleTimeString('en-US', {{hour12:false}});
+            line.textContent = ts + '  ' + text;
+            out.appendChild(line);
+            while (out.children.length > MAX_LINES) out.removeChild(out.firstChild);
+            out.scrollTop = out.scrollHeight;
+        }}
+
+        // Returns [text, cssClass, txnType|null]
+        function formatMsg(data) {{
+            const t = data.type || '';
+            if (t === 'ledgerClosed') {{
+                return [
+                    `LEDGER #${{data.ledger_index}}  txns=${{data.txn_count}}  close=${{data.ledger_time}}`,
+                    'ledger', null
+                ];
+            }}
+            if (t === 'transaction') {{
+                const tx = data.transaction || {{}};
+                const tt = tx.TransactionType || '?';
+                const v = data.validated ? 'validated' : 'proposed';
+                const r = data.engine_result || data.meta?.TransactionResult || '';
+                return [
+                    `${{tt}}  ${{tx.Account?.slice(0,12)}}..  ${{r}}  [${{v}}]  ${{tx.hash?.slice(0,16)}}..`,
+                    'txn-' + tt, tt
+                ];
+            }}
+            if (t === 'validationReceived') {{
+                return [
+                    `VALIDATION  ledger=${{data.ledger_index}}  key=${{data.validation_public_key?.slice(0,16)}}..`,
+                    'validation', null
+                ];
+            }}
+            if (t === 'serverStatus') {{
+                return [
+                    `SERVER  load=${{data.load_factor}}  state=${{data.server_status}}`,
+                    'server', null
+                ];
+            }}
+            if (t === 'consensusPhase') {{
+                return [`CONSENSUS  phase=${{data.consensus}}`, 'consensus', null];
+            }}
+            if (t === 'peerStatusChange') {{
+                return [`PEER  ${{data.action}}  ${{data.address || ''}}`, 'peer', null];
+            }}
+            return [JSON.stringify(data).slice(0, 200), '', null];
+        }}
+
+        function resubscribe() {{
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            // Unsubscribe all, then resubscribe active
+            ws.send(JSON.stringify({{command:'unsubscribe', streams:STREAMS.map(s=>s.name)}}));
+            const streams = Array.from(activeStreams);
+            if (streams.length > 0) {{
+                ws.send(JSON.stringify({{command:'subscribe', streams}}));
+                wsLog('Subscribed: ' + streams.join(', '), 'info');
+            }}
+        }}
+
+        function toggleWs() {{
+            const btn = document.getElementById('ws-connect-btn');
+            const statusEl = document.getElementById('ws-status');
+            if (ws && ws.readyState <= WebSocket.OPEN) {{
+                ws.close();
+                return;
+            }}
+            const port = nodeSelect.value;
+            const url = 'ws://{hostname}:' + port;
+            wsLog('Connecting to ' + url + '...', 'info');
+            ws = new WebSocket(url);
+            ws.onopen = () => {{
+                statusEl.textContent = 'connected';
+                statusEl.className = 'ws-status connected';
+                btn.textContent = 'Disconnect';
+                btn.className = 'active';
+                const streams = Array.from(activeStreams);
+                ws.send(JSON.stringify({{command:'subscribe', streams}}));
+                wsLog('Connected. Subscribed: ' + streams.join(', '), 'info');
+            }};
+            ws.onmessage = (ev) => {{
+                const data = JSON.parse(ev.data);
+                if (data.type === 'response') return; // subscribe ack
+                const [text, cls, txnType] = formatMsg(data);
+                // Filter: if it's a transaction, check txn type filter
+                if (txnType && !activeTxnTypes.has(txnType)) return;
+                wsLog(text, cls);
+                msgCount++;
+                document.getElementById('ws-msg-count').textContent = msgCount + ' msgs';
+            }};
+            ws.onclose = () => {{
+                statusEl.textContent = 'disconnected';
+                statusEl.className = 'ws-status disconnected';
+                btn.textContent = 'Connect';
+                btn.className = '';
+                wsLog('Disconnected', 'info');
+            }};
+            ws.onerror = () => wsLog('WebSocket error', 'error');
+        }}
+
+        // --- Stats polling (no page reload, keeps WS alive) ---
+        function fmt(n) {{ return n == null ? '—' : Number(n).toLocaleString(); }}
+        function pct(a, b) {{ return b > 0 ? (a/b*100).toFixed(1) : '0.0'; }}
+
+        function statCard(label, value, cls, extra, barPct) {{
+            let html = '<div class="stat-card"><div class="stat-label">' + label + '</div>';
+            html += '<div class="stat-value ' + (cls||'') + '">' + value + '</div>';
+            if (extra) html += '<div class="stat-percentage">' + extra + '</div>';
+            if (barPct != null) {{
+                html += '<div class="progress-bar"><div class="progress-fill ' + (cls||'') + '" style="width:' + barPct + '%"></div></div>';
+            }}
+            return html + '</div>';
+        }}
+
+        async function refreshStats() {{
+            try {{
+                const [statsRes, feeRes, ffRes, failedRes] = await Promise.all([
+                    fetch('/state/summary').then(r=>r.json()),
+                    fetch('/state/fees').then(r=>r.json()),
+                    fetch('/workload/fill-fraction').then(r=>r.json()),
+                    fetch('/state/failed').then(r=>r.json()),
+                ]);
+                const s = statsRes;
+                const f = feeRes;
+                const bs = s.by_state || {{}};
+                const total = s.total_tracked || 0;
+                const validated = bs.VALIDATED || 0;
+                const rejected = bs.REJECTED || 0;
+                const submitted = bs.SUBMITTED || 0;
+                const created = bs.CREATED || 0;
+                const retryable = bs.RETRYABLE || 0;
+                const expired = bs.EXPIRED || 0;
+
+                // Subtitle
+                document.getElementById('subtitle').innerHTML =
+                    'Live monitoring &bull; Ledger ' + f.ledger_current_index +
+                    ' @ {hostname} &bull; <a href="https://custom.xrpl.org/localhost:6006" target="_blank">Explorer</a>';
+
+                // Fill slider (don't overwrite while user is dragging)
+                const slider = document.getElementById('fill-slider');
+                if (document.activeElement !== slider) {{
+                    slider.value = Math.round(ffRes.fill_fraction * 100);
+                    document.getElementById('fill-val').textContent = slider.value + '%';
+                }}
+
+                // Fee stats
+                const feeWarn = f.minimum_fee > f.base_fee ? 'warning' : 'success';
+                const qPct = f.max_queue_size > 0 ? (f.current_queue_size/f.max_queue_size*100) : 0;
+                const lPct = f.expected_ledger_size > 0 ? (f.current_ledger_size/f.expected_ledger_size*100) : 0;
+                document.getElementById('fee-stats').innerHTML =
+                    statCard('Fee (min/open/base)', f.minimum_fee+'/'+f.open_ledger_fee+'/'+f.base_fee, feeWarn, 'drops') +
+                    statCard('Queue Utilization', f.current_queue_size+'/'+f.max_queue_size, 'info', qPct.toFixed(1)+'%', qPct) +
+                    statCard('Ledger Utilization', f.current_ledger_size+'/'+f.expected_ledger_size, 'info', lPct.toFixed(1)+'%', lPct);
+
+                // Txn stats
+                document.getElementById('txn-stats').innerHTML =
+                    statCard('Total Transactions', fmt(total), 'info') +
+                    statCard('Validated', fmt(validated), 'success', pct(validated,total)+'%', pct(validated,total)) +
+                    statCard('Rejected', fmt(rejected), 'error', pct(rejected,total)+'%', pct(rejected,total)) +
+                    statCard('In-Flight', fmt(submitted+created), 'warning', 'Submitted: '+submitted+' | Created: '+created) +
+                    statCard('Retryable', fmt(retryable), 'warning', 'terPRE_SEQ waiting') +
+                    statCard('Expired', fmt(expired), '');
+
+                // Tables
+                const sr = s.submission_results || {{}};
+                const sorted_sr = Object.entries(sr).sort((a,b) => b[1]-a[1]);
+                let tablesHtml = '';
+                if (sorted_sr.length) {{
+                    tablesHtml += '<div class="failures-table"><h2>Submission Results</h2><table><thead><tr><th>Engine Result</th><th>Count</th></tr></thead><tbody>';
+                    sorted_sr.forEach(([r,c]) => {{
+                        let cls = 'info';
+                        if (r === 'tesSUCCESS') cls = 'success';
+                        else if (r.startsWith('ter')) cls = 'warning';
+                        else if (/^(tel|tec|tem|tef)/.test(r)) cls = 'error';
+                        tablesHtml += '<tr><td><span class="badge '+cls+'">'+r+'</span></td><td>'+fmt(c)+'</td></tr>';
+                    }});
+                    tablesHtml += '</tbody></table></div>';
+                }}
+                // Top failures
+                const INTERNAL = new Set(['CASCADE_EXPIRED','unknown','']);
+                const failMap = {{}};
+                (failedRes.failed||[]).forEach(f => {{
+                    const r = f.engine_result_first || 'unknown';
+                    if (!INTERNAL.has(r) && !r.startsWith('tes')) failMap[r] = (failMap[r]||0) + 1;
+                }});
+                const topFail = Object.entries(failMap).sort((a,b)=>b[1]-a[1]).slice(0,10);
+                if (topFail.length) {{
+                    tablesHtml += '<div class="failures-table"><h2>Top Failures</h2><table><thead><tr><th>Error Code</th><th>Count</th></tr></thead><tbody>';
+                    topFail.forEach(([r,c]) => {{
+                        tablesHtml += '<tr><td><span class="badge error">'+r+'</span></td><td>'+fmt(c)+'</td></tr>';
+                    }});
+                    tablesHtml += '</tbody></table></div>';
+                }}
+                document.getElementById('tables-container').innerHTML = tablesHtml;
+
+            }} catch(e) {{
+                console.error('Stats refresh error:', e);
+            }}
+        }}
+
+        // Initial load + periodic refresh
+        refreshStats();
+        setInterval(refreshStats, 3000);
+
+        // Try to hide explorer chrome
+        document.getElementById('explorer-frame').addEventListener('load', function() {{
+            try {{
+                const doc = this.contentDocument || this.contentWindow.document;
+                const s = doc.createElement('style');
+                s.textContent = 'body>*:not(.ledger-list){{display:none!important}}.ledger-list{{margin:0!important;padding:10px!important}}nav,header,footer,.navbar,.header,.sidebar{{display:none!important}}';
+                doc.head.appendChild(s);
+            }} catch(e) {{}}
+        }});
+        </script>
     </body>
     </html>
     """
@@ -1184,6 +1546,152 @@ async def set_target_txns(req: TargetTxnsReq):
     }
 
 
+r_network = APIRouter(prefix="/network", tags=["Network"])
+
+
+@r_network.post("/reset")
+async def network_reset():
+    """Reset the network: stop workload, regenerate testnet, restart containers, restart workload.
+
+    This calls `gen auto` to regenerate the testnet, then `docker compose down/up`.
+    Requires gen CLI and docker compose to be available on the host.
+    """
+    import shutil
+    import subprocess
+
+    # 1. Stop workload if running
+    global workload_running, workload_stop_event, workload_task
+    if workload_running and workload_stop_event:
+        workload_stop_event.set()
+        if workload_task:
+            try:
+                await workload_task
+            except Exception:
+                pass
+        workload_running = False
+
+    testnet_dir = os.getenv("TESTNET_DIR", str(Path(__file__).resolve().parents[3] / "prepare-workload" / "testnet"))
+    gen_bin = os.getenv("GEN_BIN", "gen")
+
+    steps = []
+
+    # 2. Docker compose down
+    try:
+        r = subprocess.run(
+            ["docker", "compose", "down"],
+            cwd=testnet_dir, capture_output=True, text=True, timeout=30,
+        )
+        steps.append({"step": "docker compose down", "returncode": r.returncode, "stderr": r.stderr.strip()})
+    except Exception as e:
+        steps.append({"step": "docker compose down", "error": str(e)})
+
+    # 3. Clean old artifacts
+    for name in ["volumes", "ledger.json", "accounts.json", "docker-compose.yml"]:
+        target = Path(testnet_dir) / name
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.is_file():
+            target.unlink()
+    # Clean state.db (check both workload cwd and parent)
+    for db_path in [Path("state.db"), Path(__file__).resolve().parents[3] / "state.db"]:
+        if db_path.is_file():
+            db_path.unlink()
+    steps.append({"step": "clean artifacts", "status": "ok"})
+
+    # 4. Regenerate with gen auto
+    try:
+        r = subprocess.run(
+            [gen_bin, "auto", "-o", testnet_dir, "-v", "5", "-n", "40",
+             "-t", "0:1:USD:1000000000", "--amendment-majority-time", "15 minutes"],
+            capture_output=True, text=True, timeout=60,
+        )
+        steps.append({"step": "gen auto", "returncode": r.returncode, "stdout": r.stdout.strip()[-200:]})
+        if r.returncode != 0:
+            steps.append({"step": "gen auto stderr", "stderr": r.stderr.strip()[-500:]})
+    except Exception as e:
+        steps.append({"step": "gen auto", "error": str(e)})
+
+    # 5. Docker compose up
+    try:
+        r = subprocess.run(
+            ["docker", "compose", "up", "-d"],
+            cwd=testnet_dir, capture_output=True, text=True, timeout=60,
+        )
+        steps.append({"step": "docker compose up", "returncode": r.returncode, "stderr": r.stderr.strip()[-200:]})
+    except Exception as e:
+        steps.append({"step": "docker compose up", "error": str(e)})
+
+    return {
+        "status": "reset complete — restart the workload process to reconnect",
+        "steps": steps,
+    }
+
+
+@r_transaction.post("/ammdeposit")
+async def create_ammdeposit():
+    """Create and submit an AMMDeposit transaction."""
+    return await create("AMMDeposit")
+
+
+@r_transaction.post("/ammwithdraw")
+async def create_ammwithdraw():
+    """Create and submit an AMMWithdraw transaction."""
+    return await create("AMMWithdraw")
+
+
+@r_dex.get("/metrics")
+async def dex_metrics():
+    """Get DEX metrics including AMM pool states, trading activity counts."""
+    return app.state.workload.snapshot_dex_metrics()
+
+
+@r_dex.get("/pools")
+async def dex_pools():
+    """List all tracked AMM pools."""
+    w: Workload = app.state.workload
+    return {
+        "total_pools": len(w._amm_pool_registry),
+        "pools": w._amm_pool_registry,
+    }
+
+
+@r_dex.get("/pools/{index}")
+async def dex_pool_detail(index: int):
+    """Get detailed amm_info for a specific pool by index."""
+    from xrpl.models.currencies import XRP as XRPCurrency
+    from xrpl.models.requests import AMMInfo
+
+    w: Workload = app.state.workload
+    if index >= len(w._amm_pool_registry):
+        raise HTTPException(status_code=404, detail=f"Pool index {index} not found")
+
+    pool = w._amm_pool_registry[index]
+    asset1, asset2 = pool["asset1"], pool["asset2"]
+
+    if asset1.get("currency") == "XRP":
+        a1 = XRPCurrency()
+    else:
+        from xrpl.models import IssuedCurrency
+
+        a1 = IssuedCurrency(currency=asset1["currency"], issuer=asset1["issuer"])
+
+    if asset2.get("currency") == "XRP":
+        a2 = XRPCurrency()
+    else:
+        from xrpl.models import IssuedCurrency
+
+        a2 = IssuedCurrency(currency=asset2["currency"], issuer=asset2["issuer"])
+
+    resp = await w._rpc(AMMInfo(asset=a1, asset2=a2))
+    return resp.result
+
+
+@r_dex.post("/poll")
+async def dex_poll_now():
+    """Manually trigger a DEX metrics poll."""
+    return await app.state.workload.poll_dex_metrics()
+
+
 app.include_router(r_accounts)
 app.include_router(r_pay)
 app.include_router(r_pay, prefix="/pay", include_in_schema=False)  # alias /pay/ for convenience
@@ -1191,3 +1699,5 @@ app.include_router(r_transaction, prefix="/transaction")
 app.include_router(r_transaction, prefix="/txn", include_in_schema=False)  # alias /txn/ because I'm sick of typing...
 app.include_router(r_state)
 app.include_router(r_workload)
+app.include_router(r_dex)
+app.include_router(r_network)

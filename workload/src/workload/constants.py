@@ -16,6 +16,8 @@ ACCOUNT_ZERO: Final = "rrrrrrrrrrrrrrrrrrrrrhoLvTp"
 class TxType(StrEnum):
     ACCOUNT_SET = "AccountSet"
     AMM_CREATE = "AMMCreate"
+    AMM_DEPOSIT = "AMMDeposit"
+    AMM_WITHDRAW = "AMMWithdraw"
     BATCH = "Batch"
     MPTOKEN_ISSUANCE_CREATE = "MPTokenIssuanceCreate"
     MPTOKEN_ISSUANCE_SET = "MPTokenIssuanceSet"
