@@ -20,7 +20,7 @@ uv sync
 
 ### 2. Set up a testnet
 
-The fastest path uses [`generate-ledger`](https://github.com/legleux/generate-ledger) to create a pre-baked network with accounts, trust lines, and AMM pools already in the genesis ledger:
+The workload can target any rippled node, but we **strongly recommend** using [`generate-ledger`](https://github.com/legleux/generate-ledger) to create a local testnet. It pre-bakes accounts, trust lines, and AMM pools into the genesis ledger so the workload starts submitting transactions immediately instead of spending minutes provisioning from scratch.
 
 ```bash
 # Install generate-ledger (once)
