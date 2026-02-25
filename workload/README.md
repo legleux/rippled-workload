@@ -2,48 +2,84 @@
 
 A FastAPI application that generates realistic transaction traffic against an XRPL network. It provisions accounts, establishes trust lines, creates AMM pools, and continuously submits transactions (Payments, OfferCreates, AMMDeposit/Withdraw, TrustSets, NFTokenMints, MPTokens, Batch, etc.) at a rate driven by ledger closes.
 
+## Prerequisites
+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
+- Docker + Docker Compose (for running a local rippled network)
+
 ## Quick Start
 
-### 1. Generate the testnet
-
-Requires the `generate-ledger` package (`gen` CLI):
+### 1. Install the workload
 
 ```bash
-# Generate everything in one shot: ledger.json, rippled configs, docker-compose.yml
-gen auto -o /path/to/testnet -v 5 -n 40 -t "0:1:USD:1000000000"
+cd workload
+uv sync
 ```
 
-### 2. Start the network
+This installs all Python dependencies into a local `.venv`.
+
+### 2. Set up a local XRPL testnet
+
+You need a running rippled network. The fastest way is with the [`generate-ledger`](https://github.com/legleux/generate-ledger) package, which generates configs, a pre-baked genesis ledger (with accounts, trust lines, and AMM pools), and a docker-compose.yml in one command.
+
+#### With generate-ledger (recommended)
 
 ```bash
-cd /path/to/testnet
-docker compose up -d
+# Install generate-ledger (once)
+uv tool install generate-ledger
+# Or from a local clone:
+# uv tool install -e /path/to/generate_ledger
 
-# Verify nodes are synced
-docker exec rippled rippled --silent server_info | python3 -c "
-import sys,json; i=json.load(sys.stdin)['result']['info']
-print(f\"state: {i['server_state']}, ledgers: {i['complete_ledgers']}, peers: {i['peers']}\")"
+# Generate a 5-validator testnet with 40 accounts and pre-baked trust lines
+gen auto -o testnet -v 5 -n 40 -t "0:1:USD:1000000000"
+
+# Start the network
+cd testnet
+docker compose up -d
+```
+
+The generated `testnet/accounts.json` is picked up by the workload automatically, skipping the slow account-provisioning phase.
+
+#### Without generate-ledger
+
+You can point the workload at any rippled network (local or remote). Without a pre-baked genesis, the workload will provision everything from scratch using the genesis account — funding 6 gateways, 1000 users, establishing trust lines, and creating AMM pools. This works but takes several minutes.
+
+```bash
+# If you already have a rippled node running:
+RPC_URL="http://<rippled-host>:5005" WS_URL="ws://<rippled-host>:6006" \
+  uv run uvicorn workload.app:app --port 8000
 ```
 
 ### 3. Run the workload
 
 ```bash
 cd workload
-uv sync
 
-# Start (pointing at the local network)
 RPC_URL="http://localhost:5005" WS_URL="ws://localhost:6006" \
   uv run uvicorn workload.app:app --host 0.0.0.0 --port 8000
 ```
 
-On startup the workload will:
+### 4. Verify it's working
+
+```bash
+# Check the dashboard
+open http://localhost:8000/state/dashboard
+
+# Or via API
+curl -s http://localhost:8000/state/summary | python3 -m json.tool
+```
+
+### What happens on startup
+
 1. Probe the RPC endpoint until it responds
 2. Wait for ledger closes to confirm the network is progressing
 3. Load state via the fastest available path:
    - **SQLite** (`state.db`): If a previous run's state exists, resume from it
-   - **Genesis** (`accounts.json`): If a pre-baked ledger was generated, import accounts and discover AMM pools
-   - **Full init**: Fund 6 gateways, set flags, fund 1000 users, establish trust lines, create 112 AMM pools
+   - **Genesis** (`accounts.json`): If a pre-baked genesis was generated, import accounts and discover AMM pools from the ledger
+   - **Full init**: Fund 6 gateways, set flags, fund 1000 users, establish trust lines, create 112 AMM pools from scratch
 4. Start continuous transaction submission
+
+> **Note**: If you're starting fresh against a new network but `state.db` exists from a previous run, delete it first: `rm -f state.db`
 
 ## Web UI & API
 
