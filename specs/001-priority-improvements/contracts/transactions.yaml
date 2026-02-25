@@ -1,0 +1,191 @@
+openapi: 3.0.0
+info:
+  title: Transaction Submission API
+  version: 1.0.0
+  description: API endpoints for submitting XRPL transactions
+
+paths:
+  /transaction/payment:
+    post:
+      summary: Submit Payment transaction
+      tags: [Transactions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentRequest'
+            examples:
+              xrp_payment:
+                summary: XRP Payment
+                value:
+                  destination: rN7n7otQDd6FczFgLdlqtyMVrn3qHGbXcD
+                  amount: "1000000"
+              iou_payment:
+                summary: Issued Currency Payment
+                value:
+                  destination: rN7n7otQDd6FczFgLdlqtyMVrn3qHGbXcD
+                  amount: "100"
+                  currency: USD
+                  issuer: rPEPPER7kfTD9w2To4CQk6UCfuHM9c6GDY
+      responses:
+        '200':
+          description: Transaction submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+
+  /transaction/mptoken/disburse:
+    post:
+      summary: Submit MPToken disbursement transaction (NEW)
+      tags: [Transactions, MPToken]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MPTokenDisburseRequest'
+            examples:
+              disburse_to_holder:
+                summary: Disburse MPToken to holder
+                value:
+                  token_id: "000000000000000000000000000000000000000000000000000000000000000A"
+                  destination: rN7n7otQDd6FczFgLdlqtyMVrn3qHGbXcD
+                  amount: "1000"
+      responses:
+        '200':
+          description: Disbursement transaction submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+
+  /transaction/offer/create:
+    post:
+      summary: Submit OfferCreate transaction (NEW)
+      tags: [Transactions, Offers]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OfferCreateRequest'
+            examples:
+              xrp_for_usd:
+                summary: Sell XRP for USD
+                value:
+                  taker_pays:
+                    currency: USD
+                    issuer: rPEPPER7kfTD9w2To4CQk6UCfuHM9c6GDY
+                    value: "100"
+                  taker_gets: "1000000"
+      responses:
+        '200':
+          description: Offer created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+
+  /transaction/offer/cancel:
+    post:
+      summary: Submit OfferCancel transaction (NEW)
+      tags: [Transactions, Offers]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OfferCancelRequest'
+      responses:
+        '200':
+          description: Offer cancelled successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+
+components:
+  schemas:
+    PaymentRequest:
+      type: object
+      required: [destination, amount]
+      properties:
+        destination:
+          type: string
+          description: Destination account address
+        amount:
+          oneOf:
+            - type: string
+              description: XRP amount in drops
+            - type: object
+              $ref: '#/components/schemas/IssuedCurrencyAmount'
+        currency:
+          type: string
+          description: Currency code (for issued currencies)
+        issuer:
+          type: string
+          description: Issuer address (for issued currencies)
+
+    MPTokenDisburseRequest:
+      type: object
+      required: [token_id, destination, amount]
+      properties:
+        token_id:
+          type: string
+          description: MPToken ID (64-character hex)
+        destination:
+          type: string
+          description: Recipient account address
+        amount:
+          type: string
+          description: Amount to disburse
+
+    OfferCreateRequest:
+      type: object
+      required: [taker_pays, taker_gets]
+      properties:
+        taker_pays:
+          oneOf:
+            - type: string
+            - $ref: '#/components/schemas/IssuedCurrencyAmount'
+        taker_gets:
+          oneOf:
+            - type: string
+            - $ref: '#/components/schemas/IssuedCurrencyAmount'
+        expiration:
+          type: integer
+          description: Optional expiration ledger index
+
+    OfferCancelRequest:
+      type: object
+      required: [offer_sequence]
+      properties:
+        offer_sequence:
+          type: integer
+          description: Sequence number of offer to cancel
+
+    IssuedCurrencyAmount:
+      type: object
+      required: [currency, issuer, value]
+      properties:
+        currency:
+          type: string
+        issuer:
+          type: string
+        value:
+          type: string
+
+    TransactionResponse:
+      type: object
+      properties:
+        tx_hash:
+          type: string
+          description: Transaction hash
+        result:
+          type: string
+          description: Submission result code
+        status:
+          type: string
+          description: Transaction status

@@ -1,0 +1,161 @@
+openapi: 3.0.0
+info:
+  title: Dashboard API
+  version: 1.0.0
+  description: Dashboard endpoints for network observability (NEW)
+
+paths:
+  /dashboard:
+    get:
+      summary: Get dashboard HTML page (NEW)
+      tags: [Dashboard]
+      responses:
+        '200':
+          description: Dashboard HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /dashboard/overview:
+    get:
+      summary: Get network overview metrics (NEW)
+      tags: [Dashboard]
+      responses:
+        '200':
+          description: Network overview data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkOverview'
+
+  /dashboard/nodes:
+    get:
+      summary: Get per-node detailed metrics (NEW)
+      tags: [Dashboard]
+      responses:
+        '200':
+          description: List of node metrics
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NodeMetrics'
+
+  /dashboard/queue:
+    get:
+      summary: Get transaction queue state (NEW)
+      tags: [Dashboard]
+      responses:
+        '200':
+          description: Queue state for all nodes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/QueueState'
+
+  /dashboard/transactions:
+    get:
+      summary: Get recent transaction activity (NEW)
+      tags: [Dashboard]
+      responses:
+        '200':
+          description: Transaction activity metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionActivity'
+
+  /dashboard/validations:
+    get:
+      summary: Get validation metrics (NEW)
+      tags: [Dashboard]
+      responses:
+        '200':
+          description: Validation metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationMetrics'
+
+  /dashboard/updates:
+    get:
+      summary: WebSocket endpoint for real-time updates (NEW)
+      tags: [Dashboard]
+      description: WebSocket connection for server-push updates on ledger close events
+      responses:
+        '101':
+          description: WebSocket connection established
+
+components:
+  schemas:
+    NetworkOverview:
+      type: object
+      properties:
+        total_nodes:
+          type: integer
+        reachable_nodes:
+          type: integer
+        current_ledger:
+          type: integer
+        validation_rate:
+          type: number
+          format: float
+        sequence_conflict_rate:
+          type: number
+          format: float
+
+    NodeMetrics:
+      type: object
+      properties:
+        url:
+          type: string
+        server_state:
+          type: string
+        ledger_index:
+          type: integer
+        queue_size:
+          type: integer
+        reachable:
+          type: boolean
+
+    QueueState:
+      type: object
+      properties:
+        node_url:
+          type: string
+        queue_size:
+          type: integer
+        max_queue_size:
+          type: integer
+        minimum_fee:
+          type: integer
+        open_ledger_fee:
+          type: integer
+
+    TransactionActivity:
+      type: object
+      properties:
+        total_submitted:
+          type: integer
+        validated:
+          type: integer
+        rejected:
+          type: integer
+        expired:
+          type: integer
+
+    ValidationMetrics:
+      type: object
+      properties:
+        total_validations:
+          type: integer
+        validation_rate:
+          type: number
+        validated_by_polling:
+          type: integer
+        validated_by_websocket:
+          type: integer
