@@ -4,32 +4,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the **rippled-workload** repository for Antithesis testing of the XRPL (XRP Ledger) rippled node. It consists of three main components:
+This is the **rippled-workload** repository for Antithesis testing of the XRPL (XRP Ledger) rippled node. The main component is a **FastAPI-based workload generator** that creates and submits XRPL transactions against a local testnet, tracking their lifecycle through the consensus process.
 
-1. **prepare-workload**: Network configuration generator that creates testnet topologies
-2. **workload**: FastAPI-based workload generator that creates and submits XRPL transactions
-3. **sidecar**: Auxiliary service for monitoring
+A separate **sidecar** container provides passive monitoring and Antithesis assertions.
 
-The project tests rippled nodes under load by generating realistic transaction patterns and tracking their lifecycle through the consensus process.
+Network setup (configs, genesis ledger, docker-compose) is handled by the external `generate_ledger` package (`gen auto` CLI), not by code in this repo.
 
 ## Repository Structure
 
 ```
 rippled-workload/
-├── prepare-workload/     # Network configuration generation
-│   ├── prepare_workload/ # Config templates, UNL generation, compose rendering
-│   └── main.py          # Entry point for network setup
-├── workload/            # Main workload application
+├── workload/                # Main workload application
 │   └── src/workload/
-│       ├── app.py              # FastAPI application & endpoints
-│       ├── workload_core.py    # Core workload logic (Workload class)
-│       ├── txn_factory/        # Transaction generation
-│       │   └── builder.py      # Transaction builders and registry
-│       ├── ws.py               # WebSocket listener for ledger events
-│       ├── constants.py        # Transaction types and states
-│       └── config.toml         # Configuration (gateways, users, currencies, etc.)
-├── sidecar/             # Monitoring sidecar
-└── test_composer/       # Test composition scripts
+│       ├── app.py                 # FastAPI application, endpoints, lifespan, dashboard
+│       ├── workload_core.py       # Core workload logic (Workload class, stores, validation)
+│       ├── txn_factory/           # Transaction generation
+│       │   └── builder.py         # Transaction builders and registry
+│       ├── ws.py                  # WebSocket listener for ledger/tx events
+│       ├── ws_processor.py        # WS event dispatcher (validation, ledger close, server status)
+│       ├── sqlite_store.py        # SQLite persistence (primary store)
+│       ├── constants.py           # Transaction types, states, timeouts
+│       ├── fee_info.py            # Fee escalation data
+│       ├── randoms.py             # SystemRandom for Antithesis determinism
+│       └── config.toml            # Configuration (accounts, currencies, tx weights, etc.)
+├── sidecar/                 # Antithesis monitoring sidecar (separate container)
+├── test_composer/           # Curl-based load test scripts
+├── specs/                   # Feature specs (001-priority-improvements)
+└── prepare-workload/        # LEGACY — superseded by generate_ledger package
 ```
 
 ## Architecture
@@ -40,32 +41,26 @@ rippled-workload/
 
 This workload operates on **ledger close events** as the fundamental unit of time, not wall-clock time:
 
-- ✅ **DO**: Wait for ledger closes, count ledgers, use ledger index as the tick
-- ✅ **DO**: Use time for timeouts (network connectivity issues) and measuring operation duration (metrics)
-- ❌ **DON'T**: Use time-based delays for submission logic (no `await asyncio.sleep()` between batches)
-- ❌ **DON'T**: Spread submissions over time intervals
-- ❌ **DON'T**: Use time to control submission rate
+- DO: Wait for ledger closes, count ledgers, use ledger index as the tick
+- DO: Use time for timeouts (network connectivity issues) and measuring operation duration (metrics)
+- DON'T: Use time-based delays for submission logic (no `await asyncio.sleep()` between batches)
+- DON'T: Spread submissions over time intervals
+- DON'T: Use time to control submission rate
 
-**Rationale**: XRPL consensus operates on discrete ledger closes (~3-4 seconds). Transaction validation, sequence numbers, and queue behavior are all tied to ledger boundaries. Time-based logic creates race conditions and unpredictable behavior. Ledger-based logic is deterministic and aligns with how rippled actually works.
-
-**Examples**:
-- ✅ "Wait for 5 ledger closes before re-checking state"
-- ✅ "Submit batch when ledger closes and accounts have available slots"
-- ❌ "Wait 2 seconds between submissions"
-- ❌ "Submit 100 txns/second"
+**Rationale**: XRPL consensus operates on discrete ledger closes (~3-4 seconds). Transaction validation, sequence numbers, and queue behavior are all tied to ledger boundaries. Time-based logic creates race conditions and unpredictable behavior.
 
 ### Domain Model
 
-The workload follows a layered architecture (see workload/README.md:7-13):
+The workload follows a layered architecture:
 
 - **domain**: Pure data types (`WalletModel`, `IssuedCurrencyModel`)
-- **infrastructure**: External interactions (XRPL client, network I/O, storage)
+- **infrastructure**: External interactions (xrpl client, storage)
 - **application/logic**: Coordination (`txn_factory`, account generation)
-- **interface/API**: Entry points (FastAPI, CLI)
+- **interface/API**: Entry points (FastAPI app)
 
 ### Transaction Lifecycle
 
-Transactions move through these states (workload/src/workload/constants.py:21-28):
+Transactions move through these states (constants.py):
 
 1. `CREATED` - Transaction built and signed locally
 2. `SUBMITTED` - Sent to rippled node
@@ -75,40 +70,51 @@ Transactions move through these states (workload/src/workload/constants.py:21-28
 6. `EXPIRED` - Past LastLedgerSequence without validation
 7. `FAILED_NET` - Network/timeout error
 
-The `Workload` class (workload/src/workload/workload_core.py:248) manages:
-- **Pending transactions**: In-flight txns tracked in `self.pending` dict
-- **Store**: Historical record in `InMemoryStore` for metrics
-- **Account management**: Sequence number allocation with per-account locks
-- **Validation tracking**: Both polling and WebSocket-based confirmation
-
 ### Transaction Generation
 
-The `txn_factory` uses a registry pattern (workload/src/workload/txn_factory/builder.py:122-128):
+The `txn_factory` uses a registry pattern (builder.py):
 
 - `@register_txn(Payment)` decorators register builder functions
-- `TxnContext` provides wallets, currencies, and defaults
-- `generate_txn()` selects a random or specified transaction type
+- `TxnContext` provides wallets, currencies, AMM pools, and defaults
+- `generate_txn()` selects a random or specified transaction type, weighted by config percentages
 - Builders return dicts that are converted to xrpl-py Transaction models
+- Capability-aware: skips types requiring MPT IDs, NFTs, or AMM pools when those don't exist
 
-Supported transaction types: Payment, TrustSet, AccountSet, NFTokenMint, MPTokenIssuanceCreate, Batch (experimental)
+Supported transaction types: Payment, OfferCreate, OfferCancel, TrustSet, AccountSet, AMMCreate, AMMDeposit, AMMWithdraw, NFTokenMint, NFTokenBurn, NFTokenCreateOffer/CancelOffer/AcceptOffer, MPTokenIssuanceCreate/Set/Authorize/Destroy, TicketCreate, Batch
+
+### Validation Tracking
+
+Two concurrent paths to validation (see workload/ws-architecture.md):
+
+1. **WebSocket** (primary): `ws_listener` → event queue → `ws_processor` → `record_validated(src=WS)`
+2. **RPC Polling** (fallback): `periodic_finality_check` every 5s → `record_validated(src=POLL)`
+
+Both paths deduplicate by `(tx_hash, ledger_index)`. See `workload/ws-architecture.md` and `workload/ws-architecture.excalidraw` for the full architecture diagram.
+
+### Store Architecture
+
+- **SQLiteStore** (primary): Persistent storage for accounts, transactions, validations, balances. Survives restarts.
+- **InMemoryStore**: In-process metrics, recent validations deque, validation-by-source counters.
+- **Store Protocol**: Clean interface both stores implement.
+
+### Startup Modes
+
+Three-tier initialization cascade in `app.py:lifespan()`:
+
+1. **SQLite hot-reload**: If `state.db` exists with state, load accounts/balances from it (fastest)
+2. **Genesis load**: If `accounts.json` exists from `generate_ledger`, import pre-provisioned accounts and discover AMM pools from ledger
+3. **Full init**: Fund gateways, set flags, fund users, establish trust lines, create AMM pools from scratch (slowest)
 
 ## Development Commands
 
 ### Setup and Installation
 
 ```bash
-# Install prepare-workload dependencies
-cd prepare-workload
-uv sync
-
-# Install workload dependencies
 cd workload
 uv sync
 ```
 
 ### Linting and Formatting
-
-Both projects use `ruff` for linting and formatting:
 
 ```bash
 # Format and fix imports
@@ -119,110 +125,53 @@ ruff format
 ruff check
 ```
 
-Configuration in `pyproject.toml`:
-- prepare-workload: Google docstring style, line-length 120, Python 3.13+
-- workload: Methods must have return types (ANN201), line-length 120, Python 3.13+
+Configuration in `pyproject.toml`: Methods must have return types (ANN201), line-length 120, Python 3.13+
 
 ### Running the Workload
 
-The workload runs as a FastAPI application. There are two primary ways to run it:
-
-#### Local Development (via docker-compose.yml)
-
 ```bash
-# Start workload container with hot-reload
-docker compose up workload
+cd workload
 
-# The workload will be available at http://localhost:8000
-# API docs at http://localhost:8000/docs
+# Start (pointing at the local network)
+RPC_URL="http://localhost:5005" WS_URL="ws://localhost:6006" \
+  uv run uvicorn workload.app:app --host 0.0.0.0 --port 8000
 ```
 
-#### Full Network Setup
+On startup the workload will:
+1. Probe the RPC endpoint until it responds
+2. Wait for ledger closes to confirm the network is progressing
+3. Load state (SQLite → genesis → full init, whichever is available)
+4. Start continuous transaction submission
 
-Follow the test flow documented in test_start_experiment_flow.md:
+### Network Setup (via generate_ledger)
 
-1. **Generate network configuration**:
 ```bash
-cd prepare-workload
-uvx --from legleux-generate-ledger gen \
-    --config_only False \
-    --include_services sidecar-compose.yml \
-    --include_services workload-compose.yml
-```
+# Generate everything: ledger.json, rippled configs, docker-compose.yml
+gen auto -o /path/to/testnet -v 5 -n 40 -t "0:1:USD:1000000000"
 
-2. **Build images**:
-```bash
-# Build sidecar
-docker build sidecar --file sidecar/Dockerfile --tag sidecar:latest
-
-# Build workload
-docker build . --file Dockerfile --tag workload:latest
-
-# Build config
-docker build . --file Dockerfile.config \
-    --build-arg TEST_NETWORK_DIR=testnet \
-    --tag config:latest
-
-# Build rippled
-docker build . --file Dockerfile.rippled \
-    --tag rippled:latest \
-    --build-arg RIPPLED_REPO=https://github.com/XRPLF/rippled.git \
-    --build-arg RIPPLED_COMMIT=develop
-```
-
-3. **Start the network**:
-```bash
-cd prepare-workload/testnet
+# Start network
+cd /path/to/testnet
 docker compose up -d
 
-# Check network status
-docker exec -it rippled rippled --silent server_info | tail -n+4 | jq .result.info.complete_ledgers
-
-# Access workload API
-workload_ip=$(docker inspect workload | jq -r '.[0].NetworkSettings.Networks[].IPAddress')
-curl -s "${workload_ip}:8000/accounts" | jq
+# Verify nodes are synced
+docker exec rippled rippled --silent server_info | python3 -c "
+import sys,json; i=json.load(sys.stdin)['result']['info']
+print(f\"state: {i['server_state']}, ledgers: {i['complete_ledgers']}, peers: {i['peers']}\")"
 ```
 
 ### Testing
 
-The workload does not currently have a formal test suite, but you can test endpoints via:
+No formal test suite. Test via API endpoints:
 
 ```bash
-# Health check
 curl http://localhost:8000/health
-
-# Create random account
-curl http://localhost:8000/accounts/create/random
-
-# Submit random transaction
 curl http://localhost:8000/transaction/random
-
-# Create specific transaction type
-curl http://localhost:8000/transaction/create/Payment
-
-# Check state
 curl http://localhost:8000/state/summary
-curl http://localhost:8000/state/pending
-curl http://localhost:8000/state/validations
+curl http://localhost:8000/state/dashboard   # HTML dashboard
+curl http://localhost:8000/docs              # Swagger UI
 ```
 
-### Network Management
-
-**IMPORTANT**: Network commands must be run from `prepare-workload/testnet/` directory where docker-compose.yml is located.
-
-```bash
-# From prepare-workload/testnet/ directory:
-
-# Restart the docker compose network
-cd /home/emel/dev/Ripple/rippled-workload/prepare-workload/testnet
-docker compose down && docker compose up -d
-
-# Clear state database before restart (if needed)
-rm /home/emel/dev/Ripple/rippled-workload/state.db
-
-# Full reset (network + state)
-docker compose down && rm /home/emel/dev/Ripple/rippled-workload/state.db && docker compose up -d
-```
+Curl-based load scripts in `test_composer/all_transactions/`.
 
 ## Configuration
 
@@ -230,67 +179,50 @@ docker compose down && rm /home/emel/dev/Ripple/rippled-workload/state.db && doc
 
 Key settings:
 
-- **funding_account**: Genesis account used to fund new accounts
-- **gateways**: Number, balance, and flags for gateway accounts
-- **users**: Number and balance for user accounts
-- **currencies**: Available currency codes and rates
-- **transactions.available**: Enabled transaction types
-- **timeout**: Network startup and RPC timeouts
-- **rippled**: Connection settings (docker/local, ports)
+- **funding_account**: Genesis account (funds all new accounts)
+- **gateways**: Number (6), names, balance, flags (DefaultRipple)
+- **users**: Number (1000) and balance
+- **amm**: Trading fee, pool counts (12 gateway + 100 user), deposit/withdraw amounts
+- **currencies**: 20 currency codes with rates
+- **transactions.disabled**: Transaction types to skip
+- **transactions.percentages**: Weight distribution (Payment=0.25, OfferCreate=0.20, AMMDeposit=0.15, AMMWithdraw=0.10)
+- **genesis**: Path to accounts.json, gateway/user counts, currencies per gateway
+- **rippled**: Connection settings (docker hostname, local IP, ports)
+- **timeout**: Startup timeout (600s), RPC timeout, initial ledger wait
 
-### Network Configuration (prepare-workload)
+### Environment Variables
 
-Settings in `prepare-workload/settings.toml`:
-
-- Network topology (validators, peers, edges)
-- UNL configuration (use_unl, validator_list_sites)
-- Node config templates (ports, features, voting)
-
-Generate with `prepare-workload/main.py`:
-
-```bash
-cd prepare-workload
-./main.py -n network.toml -t testnet -v 5
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RPC_URL` | `http://{rippled_ip}:5005` | RPC endpoint |
+| `WS_URL` | `ws://{rippled_ip}:6006` | WebSocket endpoint |
+| `RIPPLED_IP` | auto-detected | Override rippled host |
 
 ## Key Implementation Details
 
 ### Sequence Number Management
 
-Per-account sequence allocation uses locks to prevent double-spending (workload/src/workload/workload_core.py:329-339):
-
-```python
-async def alloc_seq(self, addr: str) -> int:
-    rec = self._record_for(addr)
-    if rec.next_seq is None:
-        # Fetch from ledger once
-        ai = await self._rpc(AccountInfo(account=addr, ...))
-        rec.next_seq = ai.result["account_data"]["Sequence"]
-
-    async with rec.lock:
-        s = rec.next_seq
-        rec.next_seq += 1
-        return s
-```
+Per-account sequence allocation uses asyncio locks to prevent double-spending. `alloc_seq()` fetches from ledger once, then increments locally. `release_seq()` rolls back on local errors (tel* codes).
 
 ### Transaction Hash Handling
 
-Locally computed hashes may differ from server hashes. The workload handles rekey operations when the server returns a different hash (workload/src/workload/workload_core.py:365-379).
+Locally computed hashes may differ from server hashes. The workload handles rekey operations when the server returns a different hash.
 
-### Validation Tracking
+### LastLedgerSequence Horizon
 
-Two paths to validation (workload/src/workload/workload_core.py:381-409):
+Transactions expire if not validated within `HORIZON = 15` ledgers (~45-60 seconds). Configurable in `constants.py`.
 
-1. **Polling**: `periodic_finality_check()` polls RPC for submitted txns
-2. **WebSocket**: `ws_listener()` receives real-time ledger events
+### AMM Pool Registry
 
-Both call `record_validated()` which deduplicates and records to the store exactly once per (tx_hash, ledger_index).
+AMM pools are tracked in `_amm_pool_registry` (list of pool dicts) with deduplication via `frozenset`. New pools registered on AMMCreate validation. Used by AMMDeposit/AMMWithdraw builders.
 
-### Store Architecture
+### Error Handling
 
-- **InMemoryStore**: Flat dict of transaction records with metrics
-- **ValidationRecord**: Tracks which txns validated via which path (poll vs ws)
-- **Metrics**: Counts by state, validated by source, recent validations deque
+- `tem`/`tef` codes: Terminal rejection, mark as REJECTED
+- `ter` codes: Retryable, submit again
+- `tel` codes: Local error, release sequence
+- Network timeouts: Mark as FAILED_NET
+- Expired (past LastLedgerSequence): Mark as EXPIRED, cascade-expire dependent txns
 
 ## Common Patterns
 
@@ -304,24 +236,18 @@ def build_mynew_txn(ctx: TxnContext) -> dict:
     src = ctx.rand_account()
     return {"TransactionType": "MyNewTxn", "Account": src.address, ...}
 ```
-3. Add to `available` list in config.toml
-4. Add defaults if needed to config.toml `[transactions.mynew_txn]`
+3. Optionally add to `disabled` list in config.toml to exclude from random selection
+4. Optionally add percentage weight in `[transactions.percentages]`
+5. Add defaults if needed to config.toml `[transactions.mynew_txn]`
 
 ### Working with Accounts
 
 The workload maintains three account pools:
 - `self.funding_wallet`: Genesis account (funds new accounts)
-- `self.gateways`: Issuer accounts (with AccountSet flags)
+- `self.gateways`: Issuer accounts (with DefaultRipple flag)
 - `self.users`: Regular user accounts
 
-New accounts are adopted into `self.users` after validation (workload/src/workload/workload_core.py:399-406).
-
-### Error Handling
-
-- `tem`/`tef` codes: Terminal rejection, mark as REJECTED
-- `ter` codes: Retryable, submit again
-- Network timeouts: Mark as FAILED_NET
-- Expired (past LastLedgerSequence): Mark as EXPIRED
+New accounts are adopted into `self.users` after validation of their funding Payment.
 
 ## Docker Images
 
@@ -335,14 +261,20 @@ New accounts are adopted into `self.users` after validation (workload/src/worklo
 
 - The workload uses Python 3.13+ and the `uv` package manager
 - All timestamps are in seconds since epoch (time.time())
-- The LastLedgerSequence horizon is configurable (default: 3 ledgers, see constants.py:35)
-- Account initialization happens at startup in `lifespan()` (app.py:92-133)
-- WebSocket listeners and finality checks run as concurrent tasks in an asyncio.TaskGroup
-- Retry logic is not yet implemented (marked as TODO in several places)
+- Account initialization happens at startup in `lifespan()` (app.py)
+- WebSocket listener, WS processor, finality checker, and DEX metrics poller run as concurrent tasks in an asyncio.TaskGroup
+- `prepare-workload/` is legacy — superseded by the `generate_ledger` package (`gen auto` CLI). Do not add new code there.
+
+## Current Priorities
+
+See `workload/TODO.md` for the full list. The three P0 items are:
+
+1. **Code health**: Dead code cleanup, modularization, modern Python 3.13+ conventions. No backwards compatibility — use StrEnum, match, type parameter syntax, TaskGroup, etc.
+2. **Public network support**: The workload must easily target the public XRPL devnet or testnet (faucet-funded), not just local docker networks.
+3. **XRP accounting / fund recovery**: On shutdown or Ctrl-C, sweep all XRP back to the funding source. The only permanently consumed XRP should be transaction fees (burned) and account reserves. Stretch: AccountDelete to reclaim reserves.
 
 ## Active Technologies
-- Python 3.13+ + FastAPI, xrpl-py (minimal usage), uvicorn, asyncio.TaskGroup (001-priority-improvements)
-- SQLite3 (via sqlite_store.py), in-memory state (InMemoryStore), persistent transaction tracking (001-priority-improvements)
-
-## Recent Changes
-- 001-priority-improvements: Added Python 3.13+ + FastAPI, xrpl-py (minimal usage), uvicorn, asyncio.TaskGroup
+- Python 3.13+ + FastAPI, xrpl-py (minimal usage), uvicorn, asyncio.TaskGroup
+- SQLite3 (via sqlite_store.py) for persistence, InMemoryStore for metrics
+- WebSocket (ws.py + ws_processor.py) for real-time validation tracking
+- generate_ledger package (external) for network setup
