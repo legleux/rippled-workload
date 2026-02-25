@@ -251,11 +251,11 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 
 ## Docker Images
 
-- **workload:latest**: Built from Dockerfile (uvicorn FastAPI app)
-- **workload:dev**: Development target with sleep infinity
-- **rippled:latest**: Built from Dockerfile.rippled (clones and builds rippled)
-- **config:latest**: Built from Dockerfile.config (network configs)
-- **sidecar:latest**: Built from sidecar/Dockerfile (monitoring service)
+- **workload:latest**: Built from `workload/Dockerfile` (uvicorn FastAPI app). For local development, run natively with `uv run uvicorn` instead.
+- **workload (Antithesis)**: Built from root `Dockerfile` (includes test_composer scripts at `/opt/antithesis/test/`)
+- **rippled:latest**: Built from `Dockerfile.rippled` (clones and builds rippled with Antithesis instrumentation)
+- **config:latest**: Built from `Dockerfile.config` (network configs)
+- **sidecar:latest**: Built from `sidecar/Dockerfile` (monitoring service)
 
 ## Important Notes
 

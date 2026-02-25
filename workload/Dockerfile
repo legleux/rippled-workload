@@ -2,13 +2,9 @@ FROM ghcr.io/astral-sh/uv:0.9-python3.13-trixie AS base
 
 ENV PYTHONUNBUFFERED=1
 WORKDIR /workload
-# Some convenient things
 RUN apt-get update && apt-get install -y curl vim jq
-# Enable bytecode compilation
 ENV UV_COMPILE_BYTECODE=1
-# Copy from the cache instead of linking since it's a mounted volume
 ENV UV_LINK_MODE=copy
-# Ensure installed tools can be executed out of the box
 ENV UV_TOOL_BIN_DIR=/usr/local/bin
 
 # Install dependencies in a separate layer
@@ -21,20 +17,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY workload/ /workload
 
 EXPOSE 8000
-
-# Dev target (used by devcontainer)
-FROM base AS dev
-CMD ["sleep", "infinity"]
-
-## Don't know if I still need this:
-# CMD ["uvicorn", "workload.app:app", "--host", "0.0.0.0", "--port", "8000",
-#      "--reload", "--reload-dir", "/opt/antithesis/catalog/workload/src/workload"]
-
-
-
-# # Run target (used in Antithesis)
-# FROM base AS run
-# EXPOSE 8000
-# Sync the project
-# RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
-# CMD ["uv", "run", "uvicorn", "workload_app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "workload.app:app", "--host", "0.0.0.0", "--port", "8000"]
