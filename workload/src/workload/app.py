@@ -70,7 +70,6 @@ TIMEOUT = 3.0
 OVERALL = to["overall"]
 OVERALL_STARTUP_TIMEOUT = to["startup"]
 LEDGERS_TO_WAIT = to["initial_ledgers"]
-WS = "ws://rippled:6006"
 
 
 async def _probe_rippled(url: str, max_retries: int = 30, retry_delay: float = 2.0) -> None:

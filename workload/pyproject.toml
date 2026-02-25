@@ -16,6 +16,7 @@ dependencies = [
     "names>=0.3.0",
     "asyncio>=4.0.0",
     "pydantic-settings>=2.11.0",
+    "generate-ledger",
 ]
 readme = "README.md"
 requires-python = ">= 3.13"
@@ -57,6 +58,9 @@ lint.select = [
 quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
+
+[tool.uv.sources]
+generate-ledger = { path = "../../generate_ledger", editable = true }
 
 [dependency-groups]
 dev = [
