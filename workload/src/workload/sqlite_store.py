@@ -359,10 +359,17 @@ class SQLiteStore:
                 SELECT json_extract(data, '$.engine_result_first') as result, COUNT(*) as count
                 FROM transactions
                 WHERE json_extract(data, '$.engine_result_first') IS NOT NULL
+                  AND json_extract(data, '$.engine_result_first') != 'CASCADE_EXPIRED'
                 GROUP BY result
                 ORDER BY count DESC
             """)
             submission_results = {row[0]: row[1] for row in cursor.fetchall()}
+
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM transactions
+                WHERE json_extract(data, '$.engine_result_first') = 'CASCADE_EXPIRED'
+            """)
+            cascade_expired_count = cursor.fetchone()[0]
 
             return {
                 "by_state": dict(self.count_by_state),
@@ -370,6 +377,7 @@ class SQLiteStore:
                 "validated_by_source": dict(self.validated_by_source),
                 "validated_by_result": validated_by_result,  # New: tesSUCCESS vs tec codes
                 "submission_results": submission_results,  # Shows terPRE_SEQ, telCAN_NOT_QUEUE, etc.
+                "cascade_expired": cascade_expired_count,
                 "total_tracked": total,
                 "recent_validations": len(self.validations),
             }

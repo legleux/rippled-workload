@@ -97,8 +97,20 @@ async def _probe_rippled(url: str, max_retries: int = 30, retry_delay: float = 2
                 )
                 await asyncio.sleep(retry_delay)
             else:
-                log.error(f"RPC failed after {max_retries} attempts")
-                raise
+                log.error(
+                    "\n"
+                    "========================================================\n"
+                    f"  Cannot reach rippled at {url}\n"
+                    f"  Failed after {max_retries} attempts ({e.__class__.__name__})\n"
+                    "\n"
+                    "  Is the network running? Start it with:\n"
+                    "    cd /path/to/testnet && docker compose up -d\n"
+                    "\n"
+                    "  Or point at a different node:\n"
+                    "    RPC_URL=http://<host>:5005 WS_URL=ws://<host>:6006\n"
+                    "========================================================"
+                )
+                raise SystemExit(1)
 
 
 async def wait_for_ledgers(url: str, count: int) -> None:
@@ -118,8 +130,17 @@ async def wait_for_ledgers(url: str, count: int) -> None:
                         log.info("Observed %s ledgers closed. Convinced network is progessing.", ledger_count)
                         break
     except Exception as e:
-        log.error(f"Failed to wait for ledgers via WebSocket: {e}")
-        raise  # Fail startup if we can't confirm network status
+        log.error(
+            "\n"
+            "========================================================\n"
+            f"  Cannot connect to rippled WebSocket at {url}\n"
+            f"  {e.__class__.__name__}: {e}\n"
+            "\n"
+            "  The RPC endpoint responded but the WebSocket is not\n"
+            "  reachable. Check that port 6006 is exposed/forwarded.\n"
+            "========================================================"
+        )
+        raise SystemExit(1)
 
 
 async def _dump_tasks(tag: str):
@@ -137,13 +158,24 @@ async def lifespan(app: FastAPI):
     check_interval = 2
     stop = asyncio.Event()
 
+    log.info("=" * 60)
+    log.info("XRPL Workload starting up...")
+    log.info("  RPC: %s", RPC)
+    log.info("  WS:  %s", WS)
+    log.info("=" * 60)
+
     async with asyncio.timeout(OVERALL_STARTUP_TIMEOUT):
-        log.info("Probing RPC endpoint...")
+        log.info("[1/4] Probing RPC endpoint...")
         await _probe_rippled(RPC)
-        log.info("RPC OK. Waiting for network to be ready (seeing ledger progress)")
+        log.info("[2/4] Waiting for ledger progress (%d closes)...", LEDGERS_TO_WAIT)
         await wait_for_ledgers(WS, LEDGERS_TO_WAIT)
 
-    log.info("Network is ready. Initializing workload...")
+    log.info(
+        "[3/4] Network confirmed. Loading state...\n"
+        "  Dashboard:  http://localhost:8000/state/dashboard\n"
+        "  API docs:   http://localhost:8000/docs\n"
+        "  Explorer:   https://custom.xrpl.org/localhost:6006"
+    )
 
     from workload.sqlite_store import SQLiteStore
 
@@ -182,6 +214,7 @@ async def lifespan(app: FastAPI):
 
         log.info("Background tasks started: ws_listener, finality_checker, ws_processor, dex_metrics_poller")
 
+        log.info("Loading state from database...")
         state_loaded = app.state.workload.load_state_from_store()
 
         if state_loaded:
@@ -245,9 +278,8 @@ async def lifespan(app: FastAPI):
                 "init_completed_ledger": init_ledger,
             }
         )
-        workload_ready_msg = "Workload initialization complete"
-        log.info(f"Network initialization complete at ledger {init_ledger}. Ready to accept requests!")
-        setup_complete(details={"message": workload_ready_msg})
+        log.info("[4/4] Initialization complete at ledger %d. Starting workload.", init_ledger)
+        setup_complete(details={"message": "Workload initialization complete"})
         await asyncio.sleep(5)
         await start_workload()
         try:
@@ -257,7 +289,11 @@ async def lifespan(app: FastAPI):
             stop.set()
             app.state.ws_stop_event.set()
 
-            await asyncio.sleep(5)
+            # Flush in-memory state to SQLite before exit
+            log.info("Flushing state to persistent store...")
+            await app.state.workload.flush_to_persistent_store()
+
+            await asyncio.sleep(2)
             log.info("Exiting TaskGroup (will cancel any remaining tasks)...")
 
     log.info("Shutdown complete")
@@ -323,6 +359,35 @@ def health():
     return {"status": "ok"}  # Not the most thorough of healthchecks...
 
 
+@r_accounts.get("")
+async def list_accounts():
+    """List all accounts available to the workload.
+
+    Returns the total count, breakdown by role (funding, gateway, user),
+    and the addresses in each pool. These are the accounts used by
+    generate_txn() for random transaction generation.
+    """
+    wl = app.state.workload
+    pending_counts = wl.get_pending_txn_counts_by_account()
+    available = sum(1 for addr in wl.wallets if pending_counts.get(addr, 0) < wl.max_pending_per_account)
+
+    return {
+        "total_wallets": len(wl.wallets),
+        "available_for_txn": available,
+        "max_pending_per_account": wl.max_pending_per_account,
+        "funding": wl.funding_wallet.address,
+        "gateways": {
+            "count": len(wl.gateways),
+            "addresses": [g.address for g in wl.gateways],
+            "names": wl.gateway_names,
+        },
+        "users": {
+            "count": len(wl.users),
+            "addresses": [u.address for u in wl.users],
+        },
+    }
+
+
 @r_accounts.get("/create")
 async def api_create_account():
     return await app.state.workload.create_account()
@@ -358,11 +423,11 @@ async def get_account_balances(account_id: str):
     from workload.sqlite_store import SQLiteStore
 
     w: Workload = app.state.workload
-    if isinstance(w.store, SQLiteStore):
-        balances = w.store.get_balances(account_id)
+    if isinstance(w.persistent_store, SQLiteStore):
+        balances = w.persistent_store.get_balances(account_id)
         return {"account": account_id, "balances": balances}
     else:
-        raise HTTPException(status_code=503, detail="Balance tracking not available (not using SQLiteStore)")
+        raise HTTPException(status_code=503, detail="Balance tracking not available (no persistent store)")
 
 
 @r_accounts.get("/{account_id}/lines")
@@ -634,12 +699,12 @@ async def state_dashboard():
             .link-btn:hover {{ border-color: #58a6ff; }}
 
             .explorer-viewport {{
-                position: relative; width: 100%; height: 500px;
+                position: relative; width: 100%; height: 400px;
                 overflow: hidden; border-radius: 4px;
             }}
             .explorer-viewport iframe {{
-                position: absolute; top: -60px; left: 0;
-                width: 100%; height: calc(100% + 60px); border: none;
+                position: absolute; top: -385px; left: 0;
+                width: 100%; height: calc(100% + 600px); border: none;
             }}
 
             /* WS Terminal */
@@ -700,6 +765,8 @@ async def state_dashboard():
             .ws-line.txn-MPTokenAuthorize {{ color: #e09b4f; }}
             .ws-line.txn-MPTokenIssuanceDestroy {{ color: #c45e1a; }}
             .ws-line.txn-AMMCreate {{ color: #f778ba; }}
+            .ws-line.txn-AMMDeposit {{ color: #da70d6; }}
+            .ws-line.txn-AMMWithdraw {{ color: #b8527a; }}
             .ws-line.txn-Batch {{ color: #79c0ff; }}
             .stream-filters label.txn-Payment {{ border-color: #3fb95066; }}
             .stream-filters label.txn-Payment.checked {{ border-color: #3fb950; color: #3fb950; }}
@@ -733,8 +800,27 @@ async def state_dashboard():
             .stream-filters label.txn-MPTokenIssuanceDestroy.checked {{ border-color: #c45e1a; color: #c45e1a; }}
             .stream-filters label.txn-AMMCreate {{ border-color: #f778ba66; }}
             .stream-filters label.txn-AMMCreate.checked {{ border-color: #f778ba; color: #f778ba; }}
+            .stream-filters label.txn-AMMDeposit {{ border-color: #da70d666; }}
+            .stream-filters label.txn-AMMDeposit.checked {{ border-color: #da70d6; color: #da70d6; }}
+            .stream-filters label.txn-AMMWithdraw {{ border-color: #b8527a66; }}
+            .stream-filters label.txn-AMMWithdraw.checked {{ border-color: #b8527a; color: #b8527a; }}
             .stream-filters label.txn-Batch {{ border-color: #79c0ff66; }}
             .stream-filters label.txn-Batch.checked {{ border-color: #79c0ff; color: #79c0ff; }}
+            /* Grouped txn type layout */
+            .txn-type-groups {{ display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }}
+            .txn-type-group {{ display: flex; flex-direction: column; gap: 4px; }}
+            .txn-type-group-label {{ color: #8b949e; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 2px; }}
+            /* Transaction Control pane toggles */
+            .txn-control-grid {{ display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }}
+            .txn-control-group {{ display: flex; flex-direction: column; gap: 4px; }}
+            .txn-control-group-label {{ color: #8b949e; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 2px; }}
+            .txn-toggle {{ display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid #30363d; background: #0d1117; color: #484f58; transition: all 0.15s ease; user-select: none; }}
+            .txn-toggle.enabled {{ background: #161b22; }}
+            .txn-toggle:hover {{ opacity: 0.85; }}
+            .txn-toggle.config-disabled {{ opacity: 0.35; cursor: not-allowed; text-decoration: line-through; }}
+            .txn-toggle.config-disabled:hover {{ opacity: 0.35; }}
+            .txn-control-group-label {{ cursor: pointer; }}
+            .txn-control-group-label:hover {{ color: #c9d1d9; }}
             .ws-status {{ font-size: 12px; margin-left: auto; }}
             .ws-status.connected {{ color: #3fb950; }}
             .ws-status.disconnected {{ color: #f85149; }}
@@ -749,13 +835,6 @@ async def state_dashboard():
             <div class="controls">
                 <button class="btn btn-start" onclick="fetch('/workload/start', {{method:'POST'}})">Start</button>
                 <button class="btn btn-stop" onclick="fetch('/workload/stop', {{method:'POST'}})">Stop</button>
-                <div class="fill-control">
-                    <label>Fill</label>
-                    <input type="range" id="fill-slider" min="0" max="100" value="50"
-                           oninput="document.getElementById('fill-val').textContent=this.value+'%'"
-                           onchange="fetch('/workload/fill-fraction',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{fill_fraction:this.value/100}})}})">
-                    <span class="fill-value" id="fill-val">50%</span>
-                </div>
                 <a class="link-btn" href="https://custom.xrpl.org/localhost:6006" target="_blank">XRPL Explorer</a>
                 <a class="link-btn" href="/docs" target="_blank">API Docs</a>
             </div>
@@ -763,6 +842,27 @@ async def state_dashboard():
             <!-- Stats cards (updated via JS) -->
             <div class="stats-grid" id="fee-stats"></div>
             <div class="stats-grid" id="txn-stats"></div>
+
+            <!-- Transaction Control -->
+            <div class="panel">
+                <h2>Transaction Control</h2>
+                <div style="display:flex;align-items:center;gap:20px;margin-bottom:12px;flex-wrap:wrap">
+                    <div class="fill-control">
+                        <label>Fill</label>
+                        <input type="range" id="fill-slider" min="0" max="100" value="50"
+                               oninput="document.getElementById('fill-val').textContent=this.value+'%'"
+                               onchange="fetch('/workload/fill-fraction',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{fill_fraction:this.value/100}})}})">
+                        <span class="fill-value" id="fill-val">50%</span>
+                    </div>
+                    <div class="fill-control">
+                        <label>Target txns/ledger</label>
+                        <input type="number" id="target-txns-input" min="1" max="500" value="30"
+                               style="width:70px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:14px;font-weight:600;text-align:center"
+                               onchange="fetch('/workload/target-txns',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{target_txns:parseInt(this.value)}})}})" >
+                    </div>
+                </div>
+                <div class="txn-control-grid" id="txn-control-pane"></div>
+            </div>
 
             <!-- Explorer embed -->
             <div class="panel">
@@ -782,9 +882,9 @@ async def state_dashboard():
                     <span class="msg-count" id="ws-msg-count"></span>
                     <span class="ws-status disconnected" id="ws-status">disconnected</span>
                 </div>
-                <div class="ws-terminal-bar" style="margin-top:0">
-                    <span style="color:#8b949e;font-size:11px;text-transform:uppercase;font-weight:600">Txn types</span>
-                    <div class="stream-filters" id="txn-type-filters"></div>
+                <div class="ws-terminal-bar" style="margin-top:0;align-items:flex-start">
+                    <span style="color:#8b949e;font-size:11px;text-transform:uppercase;font-weight:600;padding-top:4px">Txn types</span>
+                    <div class="txn-type-groups" id="txn-type-filters"></div>
                 </div>
                 <div id="ws-output"></div>
             </div>
@@ -838,31 +938,131 @@ async def state_dashboard():
             filtersEl.appendChild(lbl);
         }});
 
-        // Transaction type filters
-        const TXN_TYPES = [
-            'Payment','OfferCreate','OfferCancel','TrustSet','AccountSet',
-            'NFTokenMint','NFTokenBurn','NFTokenCreateOffer','NFTokenCancelOffer','NFTokenAcceptOffer',
-            'TicketCreate',
-            'MPTokenIssuanceCreate','MPTokenIssuanceSet','MPTokenAuthorize','MPTokenIssuanceDestroy',
-            'AMMCreate','Batch',
+        // Shared txn type definitions
+        const TXN_TYPE_GROUPS = [
+            {{label: 'Core', types: ['Payment','TrustSet','AccountSet','TicketCreate']}},
+            {{label: 'DEX', types: ['OfferCreate','OfferCancel']}},
+            {{label: 'AMM', types: ['AMMCreate','AMMDeposit','AMMWithdraw']}},
+            {{label: 'NFT', types: ['NFTokenMint','NFTokenBurn','NFTokenCreateOffer','NFTokenCancelOffer','NFTokenAcceptOffer']}},
+            {{label: 'MPT', types: ['MPTokenIssuanceCreate','MPTokenIssuanceSet','MPTokenAuthorize','MPTokenIssuanceDestroy']}},
+            {{label: 'Other', types: ['Batch']}},
         ];
-        let activeTxnTypes = new Set(TXN_TYPES); // all on by default
+        const TXN_TYPES = TXN_TYPE_GROUPS.flatMap(g => g.types);
+        const TXN_COLORS = {{
+            Payment:'#3fb950', TrustSet:'#d29922', AccountSet:'#8b949e', TicketCreate:'#7ee787',
+            OfferCreate:'#58a6ff', OfferCancel:'#6cb6ff',
+            AMMCreate:'#f778ba', AMMDeposit:'#da70d6', AMMWithdraw:'#b8527a',
+            NFTokenMint:'#bc8cff', NFTokenBurn:'#986ee2', NFTokenCreateOffer:'#a371f7',
+            NFTokenCancelOffer:'#8957e5', NFTokenAcceptOffer:'#c297ff',
+            MPTokenIssuanceCreate:'#f0883e', MPTokenIssuanceSet:'#d4762c',
+            MPTokenAuthorize:'#e09b4f', MPTokenIssuanceDestroy:'#c45e1a',
+            Batch:'#79c0ff',
+        }};
+
+        // WS terminal display filters (client-side only)
+        let activeTxnTypes = new Set(TXN_TYPES);
         const txnFiltersEl = document.getElementById('txn-type-filters');
-        TXN_TYPES.forEach(tt => {{
-            const lbl = document.createElement('label');
-            lbl.className = 'checked txn-' + tt;
-            const cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.checked = true;
-            cb.onchange = function() {{
-                if (this.checked) activeTxnTypes.add(tt);
-                else activeTxnTypes.delete(tt);
-                lbl.className = (this.checked ? 'checked ' : '') + 'txn-' + tt;
-            }};
-            lbl.appendChild(cb);
-            lbl.appendChild(document.createTextNode(tt));
-            txnFiltersEl.appendChild(lbl);
+        TXN_TYPE_GROUPS.forEach(group => {{
+            const groupDiv = document.createElement('div');
+            groupDiv.className = 'txn-type-group';
+            const groupLabel = document.createElement('div');
+            groupLabel.className = 'txn-type-group-label';
+            groupLabel.textContent = group.label;
+            groupDiv.appendChild(groupLabel);
+            group.types.forEach(tt => {{
+                const lbl = document.createElement('label');
+                lbl.className = 'checked txn-' + tt;
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = true;
+                cb.onchange = function() {{
+                    if (this.checked) activeTxnTypes.add(tt);
+                    else activeTxnTypes.delete(tt);
+                    lbl.className = (this.checked ? 'checked ' : '') + 'txn-' + tt;
+                }};
+                lbl.appendChild(cb);
+                lbl.appendChild(document.createTextNode(tt));
+                groupDiv.appendChild(lbl);
+            }});
+            txnFiltersEl.appendChild(groupDiv);
         }});
+
+        // Transaction Control pane (controls actual generation)
+        const txnControlEl = document.getElementById('txn-control-pane');
+        let enabledGenTypes = new Set(TXN_TYPES);
+        let configDisabledTypes = new Set();
+
+        function renderTxnControl() {{
+            txnControlEl.innerHTML = '';
+            TXN_TYPE_GROUPS.forEach(group => {{
+                const groupDiv = document.createElement('div');
+                groupDiv.className = 'txn-control-group';
+                const groupLabel = document.createElement('div');
+                groupLabel.className = 'txn-control-group-label';
+                groupLabel.textContent = group.label;
+                // Group toggle: click label to toggle all toggleable types in group
+                const toggleable = group.types.filter(t => !configDisabledTypes.has(t));
+                if (toggleable.length > 0) {{
+                    groupLabel.onclick = async () => {{
+                        const anyOn = toggleable.some(t => enabledGenTypes.has(t));
+                        const newEnabled = !anyOn;
+                        for (const tt of toggleable) {{
+                            try {{
+                                await fetch('/workload/toggle-type', {{
+                                    method: 'POST',
+                                    headers: {{'Content-Type': 'application/json'}},
+                                    body: JSON.stringify({{txn_type: tt, enabled: newEnabled}}),
+                                }});
+                                if (newEnabled) enabledGenTypes.add(tt);
+                                else enabledGenTypes.delete(tt);
+                            }} catch(e) {{ console.error('Group toggle failed:', e); }}
+                        }}
+                        renderTxnControl();
+                    }};
+                }}
+                groupDiv.appendChild(groupLabel);
+                group.types.forEach(tt => {{
+                    const btn = document.createElement('div');
+                    const isConfigDisabled = configDisabledTypes.has(tt);
+                    const isOn = enabledGenTypes.has(tt);
+                    btn.className = 'txn-toggle' + (isOn ? ' enabled' : '') + (isConfigDisabled ? ' config-disabled' : '');
+                    btn.textContent = tt;
+                    const color = TXN_COLORS[tt] || '#8b949e';
+                    if (isConfigDisabled) {{
+                        btn.title = tt + ' — disabled in config.toml (amendment not available)';
+                    }} else {{
+                        if (isOn) {{ btn.style.borderColor = color; btn.style.color = color; }}
+                        btn.onclick = async () => {{
+                            const newEnabled = !enabledGenTypes.has(tt);
+                            try {{
+                                await fetch('/workload/toggle-type', {{
+                                    method: 'POST',
+                                    headers: {{'Content-Type': 'application/json'}},
+                                    body: JSON.stringify({{txn_type: tt, enabled: newEnabled}}),
+                                }});
+                                if (newEnabled) enabledGenTypes.add(tt);
+                                else enabledGenTypes.delete(tt);
+                                renderTxnControl();
+                            }} catch(e) {{ console.error('Toggle failed:', e); }}
+                        }};
+                    }}
+                    groupDiv.appendChild(btn);
+                }});
+                txnControlEl.appendChild(groupDiv);
+            }});
+        }}
+
+        async function refreshDisabledTypes() {{
+            try {{
+                const res = await fetch('/workload/disabled-types');
+                const data = await res.json();
+                enabledGenTypes = new Set(data.enabled_types);
+                configDisabledTypes = new Set(data.config_disabled || []);
+                renderTxnControl();
+            }} catch(e) {{ /* workload not ready yet */ }}
+        }}
+        refreshDisabledTypes();
+        setInterval(refreshDisabledTypes, 10000);
 
         function wsLog(text, cls) {{
             const out = document.getElementById('ws-output');
@@ -982,10 +1182,11 @@ async def state_dashboard():
 
         async function refreshStats() {{
             try {{
-                const [statsRes, feeRes, ffRes, failedRes] = await Promise.all([
+                const [statsRes, feeRes, ffRes, ttRes, failedRes] = await Promise.all([
                     fetch('/state/summary').then(r=>r.json()),
                     fetch('/state/fees').then(r=>r.json()),
                     fetch('/workload/fill-fraction').then(r=>r.json()),
+                    fetch('/workload/target-txns').then(r=>r.json()),
                     fetch('/state/failed').then(r=>r.json()),
                 ]);
                 const s = statsRes;
@@ -1009,6 +1210,11 @@ async def state_dashboard():
                 if (document.activeElement !== slider) {{
                     slider.value = Math.round(ffRes.fill_fraction * 100);
                     document.getElementById('fill-val').textContent = slider.value + '%';
+                }}
+                // Target txns input (don't overwrite while user is editing)
+                const ttInput = document.getElementById('target-txns-input');
+                if (document.activeElement !== ttInput) {{
+                    ttInput.value = ttRes.target_txns_per_ledger;
                 }}
 
                 // Fee stats
@@ -1042,20 +1248,24 @@ async def state_dashboard():
                         else if (/^(tel|tec|tem|tef)/.test(r)) cls = 'error';
                         tablesHtml += '<tr><td><span class="badge '+cls+'">'+r+'</span></td><td>'+fmt(c)+'</td></tr>';
                     }});
+                    const cascadeCount = s.cascade_expired || 0;
+                    if (cascadeCount > 0) {{
+                        tablesHtml += '<tr><td><span class="badge" style="opacity:0.5">CASCADE_EXPIRED</span></td><td style="opacity:0.5">'+fmt(cascadeCount)+' (internal)</td></tr>';
+                    }}
                     tablesHtml += '</tbody></table></div>';
                 }}
                 // Top failures
                 const INTERNAL = new Set(['CASCADE_EXPIRED','unknown','']);
                 const failMap = {{}};
                 (failedRes.failed||[]).forEach(f => {{
-                    const r = f.engine_result_first || 'unknown';
+                    const r = f.engine_result_final || f.engine_result_first || 'unknown';
                     if (!INTERNAL.has(r) && !r.startsWith('tes')) failMap[r] = (failMap[r]||0) + 1;
                 }});
                 const topFail = Object.entries(failMap).sort((a,b)=>b[1]-a[1]).slice(0,10);
                 if (topFail.length) {{
                     tablesHtml += '<div class="failures-table"><h2>Top Failures</h2><table><thead><tr><th>Error Code</th><th>Count</th></tr></thead><tbody>';
                     topFail.forEach(([r,c]) => {{
-                        tablesHtml += '<tr><td><span class="badge error">'+r+'</span></td><td>'+fmt(c)+'</td></tr>';
+                        tablesHtml += '<tr><td><a href="/state/failed/'+r+'/page" target="_blank" style="text-decoration:none"><span class="badge error" style="cursor:pointer">'+r+'</span></a></td><td>'+fmt(c)+'</td></tr>';
                     }});
                     tablesHtml += '</tbody></table></div>';
                 }}
@@ -1070,16 +1280,7 @@ async def state_dashboard():
         refreshStats();
         setInterval(refreshStats, 3000);
 
-        // Try to hide explorer chrome
-        document.getElementById('explorer-frame').addEventListener('load', function() {{
-            try {{
-                const doc = this.contentDocument || this.contentWindow.document;
-                const s = doc.createElement('style');
-                s.textContent = 'body>*:not(.ledger-list){{display:none!important}}.ledger-list{{margin:0!important;padding:10px!important}}nav,header,footer,.navbar,.header,.sidebar{{display:none!important}}';
-                doc.head.appendChild(s);
-            }} catch(e) {{}}
-        }});
-        </script>
+</script>
     </body>
     </html>
     """
@@ -1095,6 +1296,63 @@ async def state_pending():
 @r_state.get("/failed")
 async def state_failed():
     return {"failed": app.state.workload.snapshot_failed()}
+
+
+@r_state.get("/failed/{error_code}")
+async def state_failed_by_code(error_code: str):
+    """Get failed transactions filtered by engine result code."""
+    all_failed = app.state.workload.snapshot_failed()
+    filtered = [f for f in all_failed if f.get("engine_result_final") == error_code or f.get("engine_result_first") == error_code]
+    return {"error_code": error_code, "count": len(filtered), "transactions": filtered}
+
+
+@r_state.get("/failed/{error_code}/page")
+async def state_failed_page(error_code: str):
+    """HTML page showing failed transactions for a specific error code."""
+    all_failed = app.state.workload.snapshot_failed()
+    filtered = [f for f in all_failed if f.get("engine_result_final") == error_code or f.get("engine_result_first") == error_code]
+
+    rows = ""
+    for f in filtered:
+        rows += (
+            f"<tr>"
+            f"<td><code>{f.get('tx_hash', '')[:16]}...</code></td>"
+            f"<td>{f.get('transaction_type', '')}</td>"
+            f"<td><code>{f.get('account', '')[:16]}...</code></td>"
+            f"<td>{f.get('sequence', '')}</td>"
+            f"<td>{f.get('state', '')}</td>"
+            f"<td>{f.get('created_ledger', '')}</td>"
+            f"<td>{f.get('last_ledger_seq', '')}</td>"
+            f"</tr>"
+        )
+
+    html = f"""<!DOCTYPE html>
+    <html><head>
+    <title>Failed: {error_code}</title>
+    <style>
+        body {{ background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; padding: 20px; }}
+        h1 {{ color: #f85149; }}
+        a {{ color: #58a6ff; }}
+        table {{ border-collapse: collapse; width: 100%; margin-top: 16px; }}
+        th, td {{ padding: 8px 12px; border: 1px solid #30363d; text-align: left; font-size: 13px; }}
+        th {{ background: #161b22; color: #8b949e; text-transform: uppercase; font-size: 11px; }}
+        tr:hover {{ background: #161b22; }}
+        code {{ color: #58a6ff; }}
+        .badge {{ padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; background: #3d1f1f; color: #f85149; }}
+        .count {{ color: #8b949e; font-size: 14px; }}
+    </style>
+    </head><body>
+    <a href="/state/dashboard">&larr; Dashboard</a>
+    <h1><span class="badge">{error_code}</span> <span class="count">{len(filtered)} transactions</span></h1>
+    <table>
+        <thead><tr>
+            <th>Hash</th><th>Type</th><th>Account</th><th>Seq</th><th>State</th><th>Created Ledger</th><th>Last Ledger Seq</th>
+        </tr></thead>
+        <tbody>{rows if rows else '<tr><td colspan="7" style="text-align:center;color:#8b949e">No transactions found</td></tr>'}</tbody>
+    </table>
+    <p style="margin-top:16px;color:#8b949e">JSON: <a href="/state/failed/{error_code}">/state/failed/{error_code}</a></p>
+    </body></html>"""
+    return HTMLResponse(content=html)
 
 
 @r_state.get("/expired")
@@ -1308,10 +1566,17 @@ async def continuous_workload():
     workload_stats["started_at"] = perf_counter()
 
     try:
-        while not workload_stop_event.is_set():
-            ledger_size = await wl._expected_ledger_size()
+        from workload.txn_factory.builder import generate_txn
 
-            if random() < 0.50:
+        while not workload_stop_event.is_set():
+            # Fetch fee info once per batch — gives us fee, ledger index, and capacity
+            fee_info = await wl.get_fee_info()
+            batch_fee = fee_info.minimum_fee
+            batch_ledger = fee_info.ledger_current_index
+            batch_lls = batch_ledger + C.HORIZON
+
+            # Occasionally create a new account (grows the account pool)
+            if random() < 0.50 and "Payment" not in wl.disabled_txn_types:
                 funding_pending = wl.get_pending_txn_counts_by_account().get(wl.funding_wallet.address, 0)
                 if funding_pending == 0:
                     try:
@@ -1319,88 +1584,80 @@ async def continuous_workload():
                         large_balance = str(int(default_balance) * 10)
                         result = await wl.create_account(initial_xrp_drops=large_balance)
                         workload_stats["submitted"] += 1
-                        log.debug(f"✓ New account created: {result['address']}...")
                     except Exception as e:
-                        log.error(f"Failed to create new account: {e}")
+                        log.debug("Failed to create new account: %s", e)
                         workload_stats["failed"] += 1
 
+            # Compute available slots
             pending_counts = wl.get_pending_txn_counts_by_account()
-
-            account_slots = {
-                addr: wl.max_pending_per_account - pending_counts.get(addr, 0) for addr in wl.wallets.keys()
-            }
-            available_accounts = [addr for addr, slots in account_slots.items() if slots > 0]
-            total_available_slots = sum(slots for slots in account_slots.values() if slots > 0)
-
+            available_accounts = [
+                addr for addr in wl.wallets
+                if pending_counts.get(addr, 0) < wl.max_pending_per_account
+            ]
+            total_available_slots = sum(
+                wl.max_pending_per_account - pending_counts.get(addr, 0)
+                for addr in available_accounts
+            )
             batch_size = min(total_available_slots, wl.target_txns_per_ledger)
 
             if batch_size == 0:
-                log.debug("No available slots (all accounts at max pending), waiting...")
-                await asyncio.sleep(0.5)  # TODO: Remove time
+                # All accounts saturated — yield to let validations clear pending slots
+                await asyncio.sleep(0.3)
                 continue
-            current_ledger = await wl._current_ledger_index()
+
             log.info(
-                f"📊 Building batch @ ledger {current_ledger}: {batch_size} txns ({len(available_accounts)} accounts, {total_available_slots} slots, target_size={ledger_size})"
+                "Building batch: %d txns (%d accounts, %d slots, cap=%d, fee=%d, ledger=%d)",
+                batch_size, len(available_accounts), total_available_slots,
+                wl.target_txns_per_ledger, batch_fee, batch_ledger,
             )
 
+            # Pre-filter: only give the builder accounts with available slots
+            wl.ctx.wallets = [wl.wallets[addr] for addr in available_accounts]
+
+            # Build and submit in one parallel pass.
+            # Each task: generate_txn → build_sign_and_track → submit_pending
+            async def _build_and_submit() -> dict | None:
+                try:
+                    txn = await generate_txn(wl.ctx)
+                    pending = await wl.build_sign_and_track(
+                        txn, wl.wallets[txn.account],
+                        fee_drops=batch_fee, created_ledger=batch_ledger, last_ledger_seq=batch_lls,
+                    )
+                    return await wl.submit_pending(pending)
+                except Exception as e:
+                    log.debug("Build/submit failed: %s", e)
+                    return None
+
             try:
-                from workload.txn_factory.builder import generate_txn
-
-                pending_txns = []
-                txns_built = 0
-                max_retries = batch_size * 2  # Avoid infinite loop
-                retries = 0
-
-                while txns_built < batch_size and retries < max_retries and not workload_stop_event.is_set():
-                    retries += 1
-                    try:
-                        wl.ctx.wallets = list(wl.wallets.values())
-
-                        txn = await generate_txn(wl.ctx)
-
-                        src_addr = txn.account
-
-                        current_pending = wl.get_pending_txn_counts_by_account().get(src_addr, 0)
-                        if current_pending >= wl.max_pending_per_account:
-                            continue  # Try another transaction
-
-                        pending = await wl.build_sign_and_track(txn, wl.wallets[src_addr])
-                        pending_txns.append(pending)
-                        txns_built += 1
-
-                    except Exception as e:
-                        log.error(f"Failed to build transaction: {e}")
-                        workload_stats["failed"] += 1
-
-                if not pending_txns:
-                    log.warning("No transactions built this batch")
-                    await asyncio.sleep(0.5)  # TODO: Remove time - we tick on LEDGERS not time!
-                    continue
-
-                log.info(f"📤 Submitting {len(pending_txns)} transactions in parallel...")
-
                 async with asyncio.TaskGroup() as tg:
-                    submit_tasks = [tg.create_task(wl.submit_pending(p)) for p in pending_txns]
+                    tasks = [tg.create_task(_build_and_submit()) for _ in range(batch_size)]
 
-                for task in submit_tasks:
-                    try:
-                        result = task.result()
-                        workload_stats["submitted"] += 1
-                        er = result.get("engine_result") if result else None
+                submitted = 0
+                failed = 0
+                errors: dict[str, int] = {}
+                for task in tasks:
+                    result = task.result()
+                    if result is None:
+                        failed += 1
+                        errors["build_failed"] = errors.get("build_failed", 0) + 1
+                    else:
+                        er = result.get("engine_result")
                         if er and er.startswith(("ter", "tem", "tef", "tel")):
-                            workload_stats["failed"] += 1
-                    except Exception as e:
-                        log.error(f"Submit error: {e}")
-                        workload_stats["failed"] += 1
-
+                            failed += 1
+                            errors[er] = errors.get(er, 0) + 1
+                        else:
+                            submitted += 1
+                workload_stats["submitted"] += submitted
+                workload_stats["failed"] += failed
+                if errors:
+                    log.warning("Batch results: %d submitted, %d failed — %s", submitted, failed, errors)
             except* Exception as eg:
                 for exc in eg.exceptions:
-                    log.error(f"Batch error: {type(exc).__name__}: {exc}")
-                workload_stats["failed"] += len(pending_txns) if pending_txns else 0
+                    log.error("Batch error: %s: %s", type(exc).__name__, exc)
+                workload_stats["failed"] += batch_size
 
-            next_ledger = current_ledger + 1
-            while await wl._current_ledger_index() < next_ledger and not workload_stop_event.is_set():
-                await asyncio.sleep(0.5)  # TODO: Remove time
+            # No ledger-wait — loop immediately to fill the next batch.
+            # rippled's transaction queue handles pacing; we just keep it fed.
 
     except asyncio.CancelledError:
         log.debug("Continuous workload cancelled")
@@ -1543,6 +1800,53 @@ async def set_target_txns(req: TargetTxnsReq):
         "new_value": app.state.workload.target_txns_per_ledger,
         "status": "updated",
         "note": "Change takes effect on next workload batch",
+    }
+
+
+@r_workload.get("/disabled-types")
+async def get_disabled_types():
+    """Get currently disabled transaction types for random generation."""
+    from workload.txn_factory.builder import _BUILDERS
+
+    all_types = list(_BUILDERS.keys())
+    disabled = sorted(app.state.workload.disabled_txn_types)
+    enabled = [t for t in all_types if t not in app.state.workload.disabled_txn_types]
+    return {
+        "all_types": all_types,
+        "enabled_types": enabled,
+        "disabled_types": disabled,
+        "config_disabled": sorted(app.state.workload._config_disabled_types),
+    }
+
+
+class ToggleTypeReq(BaseModel):
+    txn_type: str
+    enabled: bool
+
+
+@r_workload.post("/toggle-type")
+async def toggle_txn_type(req: ToggleTypeReq):
+    """Toggle a single transaction type on or off for random generation.
+
+    Takes effect immediately on the next transaction generation.
+    """
+    from workload.txn_factory.builder import _BUILDERS
+
+    if req.txn_type not in _BUILDERS:
+        raise HTTPException(status_code=400, detail=f"Unknown transaction type: {req.txn_type}. Valid: {list(_BUILDERS.keys())}")
+
+    if req.txn_type in app.state.workload._config_disabled_types:
+        raise HTTPException(status_code=400, detail=f"{req.txn_type} is disabled in config.toml (amendment not available). Cannot toggle at runtime.")
+
+    if req.enabled:
+        app.state.workload.disabled_txn_types.discard(req.txn_type)
+    else:
+        app.state.workload.disabled_txn_types.add(req.txn_type)
+
+    return {
+        "txn_type": req.txn_type,
+        "enabled": req.enabled,
+        "disabled_types": sorted(app.state.workload.disabled_txn_types),
     }
 
 

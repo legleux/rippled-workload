@@ -99,20 +99,34 @@ async def ws_listener(
                     for t in pending:
                         t.cancel()
 
-                    if halt_task in done:
+                    if halt_task in done or stop.is_set():
                         log.info("WS listener received stop signal")
                         return
 
                     try:
                         msg = recv_task.result()
                         await _process_message(msg, event_queue)
+                    except websockets.exceptions.ConnectionClosedError:
+                        if stop.is_set():
+                            return  # Expected during shutdown
+                        log.warning("WS connection closed unexpectedly, will reconnect")
+                        break  # Break inner loop to trigger reconnect
                     except Exception as e:
-                        log.error("Error processing WS message: %s", e, exc_info=True)
+                        if stop.is_set():
+                            return
+                        log.error("Error processing WS message: %s", e)
 
         except asyncio.CancelledError:
             log.info("WS listener cancelled")
             raise
+        except websockets.exceptions.ConnectionClosedError:
+            if stop.is_set():
+                log.info("WS connection closed during shutdown")
+                return
+            log.warning("WS connection closed, will reconnect")
         except Exception as e:
+            if stop.is_set():
+                return
             log.error("WS connection error: %s", e)
 
         if stop.is_set():

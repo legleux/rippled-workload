@@ -267,7 +267,7 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 
 ## Current Priorities
 
-See `workload/TODO.md` for the full list. The three P0 items are:
+See `workload/docs/todo/TODO.md` for the full list. The three P0 items are:
 
 1. **Code health**: Dead code cleanup, modularization, modern Python 3.13+ conventions. No backwards compatibility — use StrEnum, match, type parameter syntax, TaskGroup, etc.
 2. **Public network support**: The workload must easily target the public XRPL devnet or testnet (faucet-funded), not just local docker networks.

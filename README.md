@@ -11,16 +11,9 @@ Built for [Antithesis](https://antithesis.com/) testing of [rippled](https://git
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
 - Docker + Docker Compose (for running a local rippled network)
 
-### 1. Install
+### 1. Start a testnet
 
-```bash
-cd workload
-uv sync
-```
-
-### 2. Set up a testnet
-
-The workload can target any rippled node, but we **strongly recommend** using [`generate-ledger`](https://github.com/legleux/generate-ledger) to create a local testnet. It pre-bakes accounts, trust lines, and AMM pools into the genesis ledger so the workload starts submitting transactions immediately instead of spending minutes provisioning from scratch.
+The workload can target any rippled node, but we **strongly recommend** using [`generate-ledger`](https://github.com/legleux/generate-ledger) to create a local testnet. It pre-bakes accounts, trust lines, and AMM pools into the genesis ledger so the workload starts submitting immediately.
 
 ```bash
 # Install generate-ledger (once)
@@ -29,36 +22,45 @@ uv tool install generate-ledger
 # Generate a 5-validator testnet
 gen auto -o testnet -v 5 -n 40 -t "0:1:USD:1000000000"
 
-# Start it
+# Start it (leave this running)
 cd testnet && docker compose up -d
 ```
+
+This exposes rippled on `localhost:5005` (RPC) and `localhost:6006` (WebSocket).
 
 <details>
 <summary>Don't have generate-ledger?</summary>
 
 You can point the workload at any running rippled node. It will provision accounts, trust lines, and AMM pools from scratch using the genesis account. This works but takes several minutes.
 
-```bash
-RPC_URL="http://<rippled-host>:5005" WS_URL="ws://<rippled-host>:6006" \
-  uv run uvicorn workload.app:app --port 8000
-```
-
 </details>
 
-### 3. Run
+### 2. Run the workload
+
+In a new terminal:
 
 ```bash
 cd workload
+uv sync                       # first time only
 
-RPC_URL="http://localhost:5005" WS_URL="ws://localhost:6006" \
-  uv run uvicorn workload.app:app --host 0.0.0.0 --port 8000
+uv run workload
 ```
 
-### 4. Open the dashboard
+If the network isn't reachable, the workload will tell you:
 
-http://localhost:8000/state/dashboard — live stats, transaction stream, fill-fraction control
+```
+Cannot reach rippled at http://localhost:5005
+Is the network running? Start it with:
+  cd /path/to/testnet && docker compose up -d
+```
 
-http://localhost:8000/docs — Swagger UI for all API endpoints
+### 3. Verify it's working
+
+| URL | What you'll see |
+|-----|----------------|
+| http://localhost:8000/state/dashboard | Live dashboard — stats, transaction stream, type controls |
+| http://localhost:8000/docs | Swagger UI for all API endpoints |
+| https://custom.xrpl.org/localhost:6006 | XRPL Explorer showing your network's ledger progression |
 
 ## What It Does
 
@@ -97,4 +99,4 @@ rippled-workload/
 
 - **[workload/README.md](workload/README.md)** — Full API reference, configuration, architecture
 - **[workload/ws-architecture.md](workload/ws-architecture.md)** — WebSocket validation architecture
-- **[workload/TODO.md](workload/TODO.md)** — Prioritized roadmap
+- **[workload/docs/todo/TODO.md](workload/docs/todo/TODO.md)** — Prioritized roadmap

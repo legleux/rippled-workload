@@ -52,7 +52,9 @@
       "Bash(git:*)",
       "Bash(kill 821339:*)",
       "WebSearch",
-      "Bash(docker rm:*)"
+      "Bash(docker rm:*)",
+      "Bash(uv tool:*)",
+      "WebFetch(domain:custom.xrpl.org)"
     ],
     "deny": [],
     "ask": []

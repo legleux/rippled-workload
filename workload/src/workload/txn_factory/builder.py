@@ -69,6 +69,7 @@ class TxnContext:
     offers: dict[str, dict] | None = None  # Offers: {offer_id: {type, owner, ...}}
     tickets: dict[str, set[int]] | None = None  # Tickets: {account: {ticket_seq, ...}}
     balances: dict[str, dict[str | tuple[str, str], float]] | None = None  # In-memory balance tracking
+    disabled_types: set[str] | None = None  # Runtime-overridable disabled types
 
     def rand_accounts(self, n: int, omit: list[str] | None = None) -> list["Wallet"]:
         """Pick n unique random accounts, optionally excluding addresses.
@@ -842,7 +843,7 @@ async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides
     if txn_type is None:
         configured_types = list(_BUILDERS.keys())
 
-        disabled_types = ctx.config.get("transactions", {}).get("disabled", [])
+        disabled_types = ctx.disabled_types if ctx.disabled_types is not None else set(ctx.config.get("transactions", {}).get("disabled", []))
         if disabled_types:
             configured_types = [t for t in configured_types if t not in disabled_types]
             log.debug("Disabled transaction types: %s", disabled_types)

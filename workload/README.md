@@ -45,18 +45,21 @@ The generated `testnet/accounts.json` is picked up by the workload automatically
 You can point the workload at any rippled network (local or remote). Without a pre-baked genesis, the workload will provision everything from scratch using the genesis account — funding 6 gateways, 1000 users, establishing trust lines, and creating AMM pools. This works but takes several minutes.
 
 ```bash
-# If you already have a rippled node running:
-RPC_URL="http://<rippled-host>:5005" WS_URL="ws://<rippled-host>:6006" \
-  uv run uvicorn workload.app:app --port 8000
+# If you already have a rippled node running on a different host:
+RPC_URL="http://<rippled-host>:5005" WS_URL="ws://<rippled-host>:6006" uv run workload
 ```
 
 ### 3. Run the workload
 
 ```bash
 cd workload
+uv run workload
+```
 
-RPC_URL="http://localhost:5005" WS_URL="ws://localhost:6006" \
-  uv run uvicorn workload.app:app --host 0.0.0.0 --port 8000
+By default this connects to `localhost:5005` (RPC) and `localhost:6006` (WS) on `0.0.0.0:8000`. Override with env vars if needed:
+
+```bash
+RPC_URL="http://other-host:5005" WS_URL="ws://other-host:6006" uv run workload
 ```
 
 ### 4. Verify it's working
@@ -218,8 +221,7 @@ cd workload
 
 # Run locally (no Docker needed)
 uv sync
-RPC_URL="http://localhost:5005" WS_URL="ws://localhost:6006" \
-  uv run uvicorn workload.app:app --port 8000
+uv run workload
 
 # Format and lint
 uv run ruff check --select I --fix && uv run ruff format

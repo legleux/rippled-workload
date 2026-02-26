@@ -1,20 +1,34 @@
 # TODO
 
+## P00: Absolutely do this first thing next session
+Flesh out test framework
+- [ ] Test that auto-generated txns can survive fee escalation. Initially it'll be ok to mark as `xfail` until the feature is actually implemented.
+- [ ] Test the txn lifecycle. How to actually do that?
+- [ ]
 ## P0: Code Health — Dead Code Cleanup, Modularization, Python 3.13+
 
 Top priority. The codebase works but has accumulated dead code, debug artifacts, and rough edges. Clean it up before adding features.
 
 **Target**: Modern Python 3.13+ only. No backwards compatibility. Use StrEnum, match statements, type parameter syntax (`type Foo = ...`), `asyncio.TaskGroup`, etc. wherever appropriate.
 
+## Features
+- [ ] Dashboard page links to "DEX" data. Start off with just a lis of open offers on IOUs from/to/price. very basic
+- [ ] Text box/field/separate page that allows us to  just submit arbitrary txn JSON data.
+- [ ] Ability to send a txn to a _specific_ host .for when we have more than one p2p node defined or just to submit txns directory to the validators. Should be able to translate that payload in such a wway that it can put the txn on the wire via JSON-RPC or WS with the user only needing to specify which API to use.
+- [ ] Standalone mode functionality
+- [ ] Dev/testnet connection
+
 ### Dead Code Removal
-- [ ] `workload_core.py`: Remove dead `_post()` method (bare `except: pass`, broken variable reference)
-- [ ] `workload_core.py`: Remove dead `validator_state()` method (malformed docker inspect template)
+- [x] `workload_core.py`: Remove dead `_post()` method — DONE (had SyntaxWarning: return in finally)
+- [x] `workload_core.py`: Remove dead `validator_state()` method — DONE (malformed docker inspect)
+- [ ] `workload_core.py`: Remove 9 additional dead methods (see [code-audit-report.md](../code-audit-report.md) P1 #11)
 - [ ] `workload_core.py`: Remove duplicate `logging.basicConfig()` at module level
 - [ ] `workload_core.py`: Fix duplicate `log` variable assignment (workload vs workload.core)
 - [ ] `workload_core.py`: Remove `AccountSet: pass` dead branch in `submit_pending()`
 - [ ] `app.py`: Remove duplicated import block at top (lines 1-18)
 - [ ] `app.py`: Remove `print("Submit result:", res)` debug artifact in `debug_fund()`
 - [ ] `utils.py`: Delete or gut — sync-era leftover, `check_validator_proposing()` not called anywhere
+- [ ] Redefine the way we aggregate groups of txns to be submitted to not use the term "batch" in the source (or docs) to avoid confusion with the new Batch txn type and the rippled batch submission feature.
 
 ### Bug Fixes
 - [ ] `_workload_started` is checked in `ws_processor.py` but never set → Antithesis assertion silently dead
@@ -50,6 +64,8 @@ The workload must easily target the public XRPL devnet or testnet, not just loca
 
 ## P0: XRP Accounting — Zero-Loss Fund Recovery
 
+See also: [shutdown_procedure.md](shutdown_procedure.md) — current shutdown behavior and open questions.
+
 When workload completes (or on Ctrl-C / crash), all XRP should be returned to the funding source. The only XRP permanently consumed should be:
 - Transaction fees (burned)
 - Account reserves (if accounts not deleted)
@@ -83,6 +99,12 @@ When workload completes (or on Ctrl-C / crash), all XRP should be returned to th
 - [ ] Track MPToken issuance IDs after MPTokenIssuanceCreate validation
 - [ ] This unblocks: NFTokenBurn, NFTokenCreateOffer/CancelOffer/AcceptOffer, OfferCancel in continuous mode
 
+### State Reload Performance
+- [ ] `load_state_from_store()` takes ~38s for ~3K wallets — will not scale to longer runs with 10K+ accounts
+- [ ] Profile: is it SQLite reads, `Wallet.from_seed()` deserialization, or `_record_for()` lock creation?
+- [ ] Consider bulk loading wallets without per-wallet crypto key derivation on startup (defer to first use)
+- [ ] Consider caching derived wallet objects in SQLite (store public/private key bytes, not just seed)
+
 ### AMM Improvements
 - [ ] Persist AMM pool registry to SQLite (currently lost on hot-reload)
 - [ ] Parallelize `poll_dex_metrics` with `asyncio.gather` (112 sequential RPC calls)
@@ -94,12 +116,23 @@ When workload completes (or on Ctrl-C / crash), all XRP should be returned to th
 ## P2: Dashboard & UI
 
 - [ ] Pie chart of txn types by volume
-- [ ] Color-code MPT and NFT txn types separately in the WS terminal
-- [ ] Group related txn types in columns
+- [x] Color-code MPT and NFT txn types separately in the WS terminal — DONE (grouped by family)
+- [x] Group related txn types in columns — DONE (Core, DEX, AMM, NFT, MPT, Other)
+- [x] Transaction Control pane with runtime enable/disable — DONE (group toggles + config-disabled indicators)
+- [x] Fill slider and target-txns control moved into Transaction Control pane — DONE
+- [x] Clickable error codes in Top Failures → detail page — DONE (`/state/failed/{code}/page`)
+- [x] Explorer embed cropped to ledger list only — DONE (see [explorer-embed-proposal.md](../explorer-embed-proposal.md) for upstream fix)
 - [ ] Don't abbreviate addresses in the terminal validation stream
 - [ ] Match filter button colors to stream colors
 - [ ] Interactive txn buttons — click to submit, tag and track the specific txn
 - [ ] Book depth visualization for asset pairs
+
+---
+
+## P2: Observability & Metrics Export
+
+- [ ] Add Prometheus-compatible metrics export to `scripts/ledger_monitor.py` — the `LedgerClose` dataclass and `CadenceStats` are already structured for it. Expose a `/metrics` endpoint or write to a Prometheus pushgateway.
+- [ ] Consider `prometheus_client` Python package for the workload itself — expose txn rates, pending counts, validation latency as Prometheus gauges/counters
 
 ---
 
@@ -135,4 +168,4 @@ When workload completes (or on Ctrl-C / crash), all XRP should be returned to th
 ## Open Questions
 
 - What exactly happens at a flag ledger? (examine ledgers 256 & 257)
-- Is the per-account rippled queue limit still 10? (config.toml TODO)
+- Is the per-account rippled queue limit still 10 (as defined in xrpld source)? (`config.toml` TODO)
