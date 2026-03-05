@@ -270,6 +270,77 @@ class SQLiteStore:
             finally:
                 conn.close()
 
+    async def bulk_upsert(self, records: list[tuple[str, dict]]) -> int:
+        """Upsert many transaction records in a single SQLite transaction.
+
+        Much faster than calling mark() per record — one connection, one commit.
+        Does not insert validation records or call _recount() per row.
+
+        Args:
+            records: List of (tx_hash, fields) pairs. fields may include state,
+                     account, sequence, transaction_type, validated_ledger, etc.
+
+        Returns:
+            Number of records upserted.
+        """
+        if not records:
+            return 0
+
+        now = time.time()
+        rows = []
+        for tx_hash, fields in records:
+            state = fields.get("state")
+            if isinstance(state, C.TxState):
+                state = state.name
+
+            finalized_at = fields.get("finalized_at")
+            terminal_names = {s.name for s in TERMINAL_STATE}
+            if state in terminal_names and finalized_at is None:
+                finalized_at = now
+
+            data = {**fields, "tx_hash": tx_hash, "state": state}
+            if finalized_at is not None:
+                data["finalized_at"] = finalized_at
+
+            rows.append((
+                tx_hash,
+                state,
+                fields.get("source"),
+                fields.get("account"),
+                fields.get("validated_ledger"),
+                finalized_at,
+                now,  # created_at (ignored on conflict)
+                now,  # updated_at
+                json.dumps(data),
+            ))
+
+        async with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                conn.executemany(
+                    """
+                    INSERT INTO transactions (tx_hash, state, source, account,
+                                             validated_ledger, finalized_at,
+                                             created_at, updated_at, data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(tx_hash) DO UPDATE SET
+                        state = excluded.state,
+                        source = excluded.source,
+                        account = excluded.account,
+                        validated_ledger = excluded.validated_ledger,
+                        finalized_at = excluded.finalized_at,
+                        updated_at = excluded.updated_at,
+                        data = excluded.data
+                    """,
+                    rows,
+                )
+                conn.commit()
+                self._recount()
+            finally:
+                conn.close()
+
+        return len(rows)
+
     async def rekey(self, old_hash: str, new_hash: str) -> None:
         """Replace a record's key when hash changes."""
         async with self._lock:

@@ -9,6 +9,7 @@ WebSocket listener that:
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from typing import Literal
 
 import websockets
@@ -26,7 +27,7 @@ async def ws_listener(
     stop: asyncio.Event,
     ws_url: str,
     event_queue: asyncio.Queue,
-    accounts_provider: callable = None,
+    accounts_provider: Callable | None = None,
 ) -> None:
     """
     Connect to rippled WebSocket, subscribe to streams, and publish events to queue.
@@ -65,12 +66,12 @@ async def ws_listener(
                     streams = ["ledger", "server"]  # TODO: Abstract out subscriptions
                     subscribe_msg = {"id": 1, "command": "subscribe", "streams": streams, "accounts": accounts}
                     if len(streams) > 2:
-                        steams_string = ", ".join(streams[:-1]) + f"and {streams[-1]}"
+                        streams_string = ", ".join(streams[:-1]) + f"and {streams[-1]}"
                     elif len(streams) == 2:
-                        steams_string = " and ".join(streams)
+                        streams_string = " and ".join(streams)
                     else:
-                        steams_string, _ = streams
-                    log.info("Subscribing to %s + %s specific accounts", steams_string, len(accounts))
+                        streams_string, _ = streams
+                    log.info("Subscribing to %s + %s specific accounts", streams_string, len(accounts))
                 else:
                     subscribe_msg = {"id": 1, "command": "subscribe", "streams": ["transactions", "ledger", "server"]}
                     log.info(

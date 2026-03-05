@@ -1,14 +1,16 @@
 import asyncio
-import contextlib
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from time import perf_counter
 
 import httpx
-from fastapi import APIRouter, FastAPI
+import xrpl
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, PositiveInt
+from pydantic import BaseModel
 from xrpl.asyncio.clients import AsyncJsonRpcClient, AsyncWebsocketClient
 from xrpl.models import StreamParameter, Subscribe
 from xrpl.models.transactions import Payment
@@ -26,23 +28,6 @@ except ImportError:
     def setup_complete(details=None):
         pass
 
-
-import asyncio
-import contextlib
-import json
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from pathlib import Path
-
-import xrpl
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from pydantic import AnyUrl, BaseModel
-from xrpl.asyncio.clients import AsyncWebsocketClient
-from xrpl.models import StreamParameter, Subscribe
 
 import workload.constants as C
 from workload.config import cfg
@@ -143,15 +128,6 @@ async def wait_for_ledgers(url: str, count: int) -> None:
         raise SystemExit(1)
 
 
-async def _dump_tasks(tag: str):
-    log.warning("=== TASK DUMP: %s ===", tag)
-    for t in asyncio.all_tasks():
-        if t is asyncio.current_task():
-            continue
-        log.warning("task %r done=%s cancelled=%s", t.get_name(), t.done(), t.cancelled())
-        for frame in t.get_stack(limit=5):
-            log.warning("  at %s:%s in %s", frame.f_code.co_filename, frame.f_lineno, frame.f_code.co_name)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -187,10 +163,7 @@ async def lifespan(app: FastAPI):
     app.state.ws_queue = asyncio.Queue(maxsize=1000)  # TODO: Constant
     log.debug("Created WS event queue (maxsize=1000)")
 
-    app.state.ws_stop_event = asyncio.Event()
     async with asyncio.TaskGroup() as tg:
-        app.state.tg = tg
-
         tg.create_task(
             ws_listener(
                 app.state.stop, WS, app.state.ws_queue, accounts_provider=app.state.workload.get_all_account_addresses
@@ -286,12 +259,25 @@ async def lifespan(app: FastAPI):
             yield
         finally:
             log.info("Shutting down...")
+
+            # Stop workload first to prevent new submissions during flush
+            if workload_running and workload_stop_event:
+                log.info("Stopping workload before flush...")
+                workload_stop_event.set()
+                if workload_task:
+                    try:
+                        await workload_task
+                    except Exception:
+                        pass
+
             stop.set()
-            app.state.ws_stop_event.set()
 
             # Flush in-memory state to SQLite before exit
-            log.info("Flushing state to persistent store...")
-            await app.state.workload.flush_to_persistent_store()
+            log.info("Flushing state to persistent store... (Ctrl-C again to skip)")
+            try:
+                await app.state.workload.flush_to_persistent_store()
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                log.warning("Flush interrupted, skipping")
 
             await asyncio.sleep(2)
             log.info("Exiting TaskGroup (will cancel any remaining tasks)...")
@@ -301,7 +287,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="XRPL Workload",
-    debug=True,
     lifespan=lifespan,
     openapi_tags=[
         {"name": "Accounts", "description": "Create and query accounts"},
@@ -340,12 +325,6 @@ class CreateAccountResp(BaseModel):
     seed: str | None = None
     funded: bool
     tx_hash: str | None = None
-
-
-class PaymentReq(BaseModel):
-    sender_address: str = cfg["funding_account"]["address"]
-    receiver_address: str = xrpl.wallet.Wallet.create().address
-    drops: PositiveInt = 10
 
 
 class SendPaymentReq(BaseModel):
@@ -564,8 +543,7 @@ async def debug_fund(dest: str):
     p = await w.build_sign_and_track(fund_tx, w.funding_wallet)
     log.debug("bsat: %s", p)
     res = await w.submit_pending(p)
-    log.debug("response frmo submit_pending() %s", res)
-    print("Submit result:", res)
+    log.debug("response from submit_pending() %s", res)
     return res
 
 
@@ -580,19 +558,21 @@ async def state_dashboard():
     hostname = RPC.split("//")[1].split(":")[0] if "//" in RPC else RPC.split(":")[0]
 
     # Build node list from compose config for the WS terminal dropdown
-    from generate_ledger.config import ComposeConfig
-    cc = ComposeConfig()
     nodes = []
-    for i in range(cc.num_validators):
-        name = f"{cc.validator_name}{i}"
-        ws = cc.ws_port + i + cc.num_hubs
-        nodes.append({"name": name, "ws": ws})
-    for i in range(cc.num_hubs):
-        name = cc.hub_name if cc.num_hubs == 1 else f"{cc.hub_name}{i}"
-        ws = cc.ws_port + i
-        nodes.append({"name": name, "ws": ws})
-    import json as _json
-    nodes_json = _json.dumps(nodes)
+    try:
+        from generate_ledger.config import ComposeConfig
+        cc = ComposeConfig()
+        for i in range(cc.num_validators):
+            name = f"{cc.validator_name}{i}"
+            ws = cc.ws_port + i + cc.num_hubs
+            nodes.append({"name": name, "ws": ws})
+        for i in range(cc.num_hubs):
+            name = cc.hub_name if cc.num_hubs == 1 else f"{cc.hub_name}{i}"
+            ws = cc.ws_port + i
+            nodes.append({"name": name, "ws": ws})
+    except ImportError:
+        log.debug("generate_ledger not installed, WS terminal node list will be empty")
+    nodes_json = json.dumps(nodes)
 
     html_content = f"""
     <!DOCTYPE html>
@@ -1312,13 +1292,20 @@ async def state_failed_page(error_code: str):
     all_failed = app.state.workload.snapshot_failed()
     filtered = [f for f in all_failed if f.get("engine_result_final") == error_code or f.get("engine_result_first") == error_code]
 
+    hostname = RPC.split("//")[1].split(":")[0] if "//" in RPC else RPC.split(":")[0]
+    explorer_base = f"https://custom.xrpl.org/{hostname}:6006"
     rows = ""
     for f in filtered:
+        account = f.get('account', '')
+        account_cell = (
+            f'<a href="{explorer_base}/accounts/{account}" target="_blank"><code>{account}</code></a>'
+            if account else ''
+        )
         rows += (
             f"<tr>"
-            f"<td><code>{f.get('tx_hash', '')[:16]}...</code></td>"
+            f"<td><code>{f.get('tx_hash', '')}</code></td>"
             f"<td>{f.get('transaction_type', '')}</td>"
-            f"<td><code>{f.get('account', '')[:16]}...</code></td>"
+            f"<td>{account_cell}</td>"
             f"<td>{f.get('sequence', '')}</td>"
             f"<td>{f.get('state', '')}</td>"
             f"<td>{f.get('created_ledger', '')}</td>"
@@ -1680,6 +1667,7 @@ async def start_workload():
     workload_stop_event = asyncio.Event()
     workload_task = asyncio.create_task(continuous_workload())
     workload_running = True
+    app.state.workload._workload_started = True
 
     return {
         "status": "started",
@@ -1701,6 +1689,7 @@ async def stop_workload():
     stop_ledger = await app.state.workload._current_ledger_index()
     log.info("Stopped workload at ledger %s", stop_ledger)
     workload_running = False
+    app.state.workload._workload_started = False
 
     return {"status": "stopped", "stats": workload_stats}
 

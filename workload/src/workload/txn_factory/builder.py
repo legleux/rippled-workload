@@ -697,17 +697,18 @@ def _build_amm_deposit(ctx: TxnContext) -> dict:
     """Build an AMMDeposit transaction to add liquidity to an existing AMM pool.
 
     Uses TF_TWO_ASSET flag for dual-asset deposit.
+    Picks from known LP holders (pool creator + prior depositors) who are likely to have the required assets.
     """
     pool = ctx.rand_amm_pool()
     asset1 = pool["asset1"]
     asset2 = pool["asset2"]
 
-    omit = []
-    if isinstance(asset2, dict) and "issuer" in asset2:
-        omit.append(asset2["issuer"])
-    if isinstance(asset1, dict) and "issuer" in asset1:
-        omit.append(asset1["issuer"])
-    src = ctx.rand_account(omit=omit if omit else None)
+    wallet_map = {w.address: w for w in ctx.wallets}
+    lp_holders = pool.get("lp_holders", [pool["creator"]])
+    owned = [wallet_map[addr] for addr in lp_holders if addr in wallet_map]
+    if not owned:
+        raise RuntimeError(f"No managed LP holders for pool {asset1}/{asset2}")
+    src = choice(owned)
 
     amm_cfg = ctx.config.get("amm", {})
 
@@ -750,17 +751,18 @@ def _build_amm_withdraw(ctx: TxnContext) -> dict:
 
     Uses TF_TWO_ASSET flag for proportional dual-asset withdrawal.
     Withdraws 10% of deposit amounts to keep pools healthy.
+    Only picks from known LP holders — accounts guaranteed to hold LP tokens.
     """
     pool = ctx.rand_amm_pool()
     asset1 = pool["asset1"]
     asset2 = pool["asset2"]
 
-    omit = []
-    if isinstance(asset2, dict) and "issuer" in asset2:
-        omit.append(asset2["issuer"])
-    if isinstance(asset1, dict) and "issuer" in asset1:
-        omit.append(asset1["issuer"])
-    src = ctx.rand_account(omit=omit if omit else None)
+    wallet_map = {w.address: w for w in ctx.wallets}
+    lp_holders = pool.get("lp_holders", [pool["creator"]])
+    owned = [wallet_map[addr] for addr in lp_holders if addr in wallet_map]
+    if not owned:
+        raise RuntimeError(f"No managed LP holders for pool {asset1}/{asset2}")
+    src = choice(owned)
 
     amm_cfg = ctx.config.get("amm", {})
     withdraw_xrp = str(int(int(amm_cfg.get("deposit_amount_xrp", "1000000000")) * 0.1))

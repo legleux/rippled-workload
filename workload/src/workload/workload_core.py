@@ -2,8 +2,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import multiprocessing
-import sys
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -20,8 +18,6 @@ from xrpl.models import IssuedCurrency, SubmitOnly, Transaction
 from xrpl.models.amounts import IssuedCurrencyAmount
 from xrpl.models.requests import (
     AccountInfo,
-    AccountLines,
-    AccountObjects,
     Ledger,
     ServerState,
     Tx,
@@ -37,13 +33,6 @@ from xrpl.wallet import Wallet
 
 import workload.constants as C
 from workload.txn_factory.builder import TxnContext, generate_txn
-
-num_cpus = multiprocessing.cpu_count()
-
-log = logging.getLogger("workload.core")
-
-
-logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(asctime)s %(levelname)s %(message)s")
 
 log = logging.getLogger("workload")
 
@@ -231,19 +220,6 @@ def issue_currencies(issuer: str, currency_code: list[str]) -> list[IssuedCurren
     return issued_currencies
 
 
-async def debug_last_tx(client: AsyncJsonRpcClient, account: str):
-    ai = await client.request(AccountInfo(account=account, ledger_index="validated"))
-    try:
-        log.debug(
-            "acct %s seq=%s bal=%s",
-            account,
-            ai.result["account_data"]["Sequence"],
-            ai.result["account_data"]["Balance"],
-        )
-    except KeyError as e:
-        pass
-
-
 class Workload:
     def __init__(self, config: dict, client: AsyncJsonRpcClient, *, store: Store | None = None):
         self.config = config
@@ -263,9 +239,6 @@ class Workload:
 
         self.store: InMemoryStore = InMemoryStore()  # Hot-path runtime store
         self.persistent_store: Store | None = store   # SQLite for durability (flushed periodically)
-
-        self._fee_cache: int | None = None
-        self._fee_lock = asyncio.Lock()
 
         self.ledger_fill_fraction: float = 0.5
 
@@ -336,7 +309,7 @@ class Workload:
 
     def _register_amm_pool(self, asset1: dict, asset2: dict, creator: str) -> None:
         """Register a new AMM pool after successful AMMCreate validation."""
-        pool_info = {"asset1": asset1, "asset2": asset2, "creator": creator}
+        pool_info = {"asset1": asset1, "asset2": asset2, "creator": creator, "lp_holders": [creator]}
         self._amm_pool_registry.append(pool_info)
 
         id1 = "XRP" if asset1.get("currency") == "XRP" else f"{asset1['currency']}.{asset1.get('issuer', '')}"
@@ -734,51 +707,6 @@ class Workload:
             engine_result_first=p.engine_result_first,
         )
 
-    async def _update_account_balances(self, account: str) -> None:
-        """Fetch and store current balances for an account from the ledger."""
-        from workload.sqlite_store import SQLiteStore
-
-        if not isinstance(self.persistent_store, SQLiteStore):
-            return  # Balance tracking only works with SQLiteStore
-
-        try:
-            acc_info = await self._rpc(AccountInfo(account=account, ledger_index="validated"), t=2.0)
-            if not acc_info.is_successful():
-                log.debug(f"AccountInfo failed for {account}: {acc_info.result}")
-                return
-
-            xrp_balance = acc_info.result.get("account_data", {}).get("Balance")
-            if xrp_balance:
-                self.persistent_store.update_balance(account, "XRP", xrp_balance)
-
-            acc_lines = await self._rpc(AccountLines(account=account, ledger_index="validated"), t=2.0)
-            if acc_lines.is_successful():
-                for line in acc_lines.result.get("lines", []):
-                    currency = line.get("currency")
-                    issuer = line.get("account")  # The counterparty is the issuer
-                    balance = line.get("balance")
-                    if currency and issuer and balance:
-                        self.persistent_store.update_balance(account, "IOU", balance, currency=currency, issuer=issuer)
-
-            acc_objects = await self._rpc(
-                AccountObjects(account=account, ledger_index="validated", type="mptoken"), t=2.0
-            )
-            if acc_objects.is_successful():
-                for obj in acc_objects.result.get("account_objects", []):
-                    if obj.get("LedgerEntryType") == "MPToken":
-                        mpt_id = obj.get("MPTokenIssuanceID")
-                        balance = obj.get("MPTAmount", "0")
-                        if mpt_id:
-                            self.persistent_store.update_balance(account, "MPToken", balance, currency=mpt_id, issuer=None)
-
-            log.debug(f"Updated balances for {account}")
-        except asyncio.CancelledError:
-            raise
-        except asyncio.TimeoutError:
-            log.debug(f"Balance update timed out for {account} (expected during heavy load)")
-        except Exception as e:
-            log.debug(f"Failed to update balances for {account}: {type(e).__name__}: {e}")
-
     async def record_validated(self, rec: ValidationRecord, meta_result: str | None = None) -> dict:
         p_live = self.pending.get(rec.txn)  # keep this reference
 
@@ -800,12 +728,28 @@ class Workload:
         p_live = self.pending.get(rec.txn)
         w = getattr(p_live, "wallet", None)
         if w is not None:
-            self.wallets[w.address] = w
-            self._record_for(w.address)
-            self.users.append(w)
-            self.save_wallet_to_store(w, is_user=True, funded_ledger_index=rec.seq)  # Persist with funding ledger
-            self.update_txn_context()
-            log.debug("Adopted new account after validation: %s", w.address)
+            # Check the funded amount from the tx before adding to the pool.
+            # An account that can't afford to send anything is dead weight.
+            funded_drops = 0
+            tx_amount = (p_live.tx_json or {}).get("Amount")
+            if isinstance(tx_amount, str):
+                funded_drops = int(tx_amount)
+            balances: dict = {"XRP": float(funded_drops)}
+
+            if self._is_viable_for_pool(balances):
+                self.wallets[w.address] = w
+                self._record_for(w.address)
+                self.users.append(w)
+                self.save_wallet_to_store(w, is_user=True, funded_ledger_index=rec.seq)
+                self.update_txn_context()
+                log.debug("Adopted new account %s (funded: %d drops)", w.address, funded_drops)
+            else:
+                log.warning(
+                    "Skipped adopting %s — funded amount %d drops insufficient for any configured payment "
+                    "(need > %d drops for XRP payment + reserve + fees)",
+                    w.address, funded_drops,
+                    int(self.config.get("transactions", {}).get("payment", {}).get("amount", 0)) + 2_010_000,
+                )
 
         if p_live and meta_result == "tesSUCCESS" and p_live.transaction_type == C.TxType.PAYMENT:
             try:
@@ -880,6 +824,18 @@ class Workload:
         if p_live and meta_result == "tesSUCCESS":
             if p_live.transaction_type == C.TxType.AMM_DEPOSIT:
                 self._dex_metrics["total_deposits"] += 1
+                # Track this account as an LP holder so future withdrawals can pick them
+                tx_json = p_live.tx_json or {}
+                dep_asset1 = tx_json.get("Asset")
+                dep_asset2 = tx_json.get("Asset2")
+                if dep_asset1 and dep_asset2 and p_live.account:
+                    for pool in self._amm_pool_registry:
+                        id1 = "XRP" if pool["asset1"].get("currency") == "XRP" else f"{pool['asset1']['currency']}.{pool['asset1'].get('issuer', '')}"
+                        id2 = "XRP" if pool["asset2"].get("currency") == "XRP" else f"{pool['asset2']['currency']}.{pool['asset2'].get('issuer', '')}"
+                        d1 = "XRP" if dep_asset1.get("currency") == "XRP" else f"{dep_asset1['currency']}.{dep_asset1.get('issuer', '')}"
+                        d2 = "XRP" if dep_asset2.get("currency") == "XRP" else f"{dep_asset2['currency']}.{dep_asset2.get('issuer', '')}"
+                        if frozenset([id1, id2]) == frozenset([d1, d2]) and p_live.account not in pool["lp_holders"]:
+                            pool["lp_holders"].append(p_live.account)
             elif p_live.transaction_type == C.TxType.AMM_WITHDRAW:
                 self._dex_metrics["total_withdrawals"] += 1
             elif p_live.transaction_type == C.TxType.OFFER_CREATE:
@@ -982,6 +938,43 @@ class Workload:
                     f"EXPIRED: {p.transaction_type} account={p.account} seq={p.sequence} hash={tx_hash} - will cascade and sync from ledger"
                 )
             await self._cascade_expire_account(p.account, p.sequence, exclude_hash=tx_hash, fetch_seq_from_ledger=True)
+
+    def _is_viable_for_pool(self, balances: dict) -> bool:
+        """Return True if an account has enough balance to send at least one transaction.
+
+        Checks each asset class against its configured minimum send amount plus
+        a small fee/reserve buffer. Accounts that can't afford anything should
+        not be added to the submission pool.
+
+        Args:
+            balances: Dict of {asset_key: amount} where asset_key is:
+                - "XRP"             → amount in drops (float/int)
+                - (currency, issuer) → IOU amount (float)
+                - ("MPT", mpt_id)   → MPToken amount (float)
+
+        Returns:
+            True if the account can afford at least one configured transaction type.
+        """
+        BASE_RESERVE_DROPS = 2_000_000   # 2 XRP minimum account reserve
+        FEE_BUFFER_DROPS   = 10_000      # headroom for fees on a few txns
+
+        # XRP check: must cover reserve + fee buffer + at least one payment
+        xrp_balance = balances.get("XRP", 0.0)
+        xrp_payment = int(self.config.get("transactions", {}).get("payment", {}).get("amount", 0))
+        if xrp_balance >= BASE_RESERVE_DROPS + FEE_BUFFER_DROPS + xrp_payment:
+            return True
+
+        # IOU check: any non-zero IOU balance is sufficient to attempt a payment
+        for key, amount in balances.items():
+            if isinstance(key, tuple) and len(key) == 2 and key[0] != "MPT" and amount > 0:
+                return True
+
+        # MPToken check: any non-zero MPT balance
+        for key, amount in balances.items():
+            if isinstance(key, tuple) and len(key) == 2 and key[0] == "MPT" and amount > 0:
+                return True
+
+        return False
 
     def find_by_state(self, *states: C.TxState) -> list[PendingTx]:
         return [p for p in self.pending.values() if p.state in set(states)]
@@ -1095,11 +1088,7 @@ class Workload:
                 p.sequence,
                 p.tx_hash,
             )
-            if p.transaction_type == "AccountSet":
-                pass
             resp = await asyncio.wait_for(self.client.request(SubmitOnly(tx_blob=p.signed_blob_hex)), timeout=timeout)
-            if p.transaction_type == "AccountSet":
-                log.debug(resp)
             res = resp.result
             er = res.get("engine_result")
             if p.engine_result_first is None:
@@ -1229,11 +1218,6 @@ class Workload:
             )
             return {"engine_result": "error", "message": str(e)}
 
-    def log_validation(self, tx_hash, ledger_index, result, validation_src):
-        log.debug(
-            "Validated via %s tx=%s li=%s result=%s", validation_src, tx_hash, ledger_index, result
-        )  # FIX: DEbug only...
-
     async def check_finality(self, p: PendingTx, grace: int = 2) -> tuple[C.TxState, int | None]:
         try:
             txr = await self.client.request(Tx(transaction=p.tx_hash))
@@ -1259,134 +1243,6 @@ class Workload:
             p.state = C.TxState.RETRYABLE
             await self.store.mark(p.tx_hash, state=p.state)
         return p.state, None
-
-    async def submit_signed_tx_blobs(self, items: list):
-        def _to_blob(x):
-            if isinstance(x, str):
-                return x
-            if isinstance(x, (tuple, list)):
-                return x[0]
-            blob = getattr(x, "signed_blob_hex", None)
-            if isinstance(blob, str):
-                return blob
-            raise TypeError(f"unsupported tx item: {type(x)}")
-
-        blobs = [_to_blob(i) for i in items]
-        async with asyncio.TaskGroup() as tg:
-            tasks = [tg.create_task(self.client.request(SubmitOnly(tx_blob=b))) for b in blobs]
-        return [t.result().result for t in tasks]
-
-    async def _is_account_active(self, address: str) -> bool:
-        try:
-            r = await self.client.request(AccountInfo(account=address, ledger_index="validated"))
-            return r.is_successful()
-        except Exception:
-            return False  # TODO: Say something?
-
-    async def _ensure_funded(self, wallet: Wallet, amt_drops: str):
-        """Fund a wallet from the workload funding_wallet account if it hasn't been created yet."""
-        if await self._is_account_active(wallet.address):
-            return
-        amt_drops = str(amt_drops)
-        fund_tx = Payment(
-            account=self.funding_wallet.address,
-            destination=wallet.address,
-            amount=amt_drops,
-        )
-
-        p = await self.build_sign_and_track(fund_tx, self.funding_wallet)
-
-        await debug_last_tx(self.client, p.account)
-        await self.submit_pending(p)
-        log.debug(f"Funded {wallet.address} with {int(xrpl.utils.drops_to_xrp(amt_drops))} XRP")
-        await debug_last_tx(self.client, p.account)
-
-    async def _acctset_flags(self, wallet: Wallet, *, require_auth=False, default_ripple=True):
-        flags = []
-        if require_auth:
-            flags.append(AccountSetAsfFlag.ASF_REQUIRE_AUTH)
-        if default_ripple:
-            flags.append(AccountSetAsfFlag.ASF_DEFAULT_RIPPLE)
-        for f in flags:
-            t = AccountSet(account=wallet.address, set_flag=f)
-            p = await self.build_sign_and_track(t, wallet)
-            log.debug("Submitting AccountSet")
-            await self.submit_pending(p)
-            log.debug("Submitted AccountSet %s", p.tx_json)
-            log.debug(json.dumps(p.tx_json))
-
-    async def wait_for_validation(self, tx_hash: str, *, overall: float = 15.0, per_rpc: float = 2.0) -> dict:
-        from xrpl.models.requests import Tx
-
-        try:
-            async with asyncio.timeout(overall):
-                while True:
-                    r = await asyncio.wait_for(self.client.request(Tx(transaction=tx_hash)), timeout=per_rpc)
-                    if r.result.get("validated"):
-                        return r.result
-                    await asyncio.sleep(0.5)
-        except TimeoutError:
-            return {"validated": False, "timeout": True}
-
-    async def bootstrap_gateway(self, w, *, drops=1_000_000_000, require_auth=False, default_ripple=False):
-        fund = Payment(account=w.address, destination=w.address, amount=str(drops))  # or from funder→w
-        p0 = await self.build_sign_and_track(fund, self.funding_wallet)
-        await self.submit_pending(p0)
-
-        flags = []
-        if require_auth:
-            flags.append(AccountSetAsfFlag.ASF_REQUIRE_AUTH)
-        if default_ripple:
-            flags.append(AccountSetAsfFlag.ASF_DEFAULT_RIPPLE)
-
-        pendings = []
-        for f in flags:
-            tx = AccountSet(account=w.address, set_flag=f)
-            p = await self.build_sign_and_track(tx, w)  # allocator hands next Sequence
-            pendings.append(p)
-            await self.submit_pending(p)
-
-        for p in [p0, *pendings]:
-            _ = await self.wait_for_validation(p.tx_hash, overall=15.0)
-
-    async def _apply_gateway_flags(self, *, req_auth: bool, def_ripple: bool) -> dict[str, Any]:
-        """Apply per-gateway account flags. One AccountSet per asf flag."""
-        flags: list[AccountSetAsfFlag] = []
-        if req_auth:
-            flags.append(AccountSetAsfFlag.ASF_REQUIRE_AUTH)
-        if def_ripple:
-            flags.append(AccountSetAsfFlag.ASF_DEFAULT_RIPPLE)
-
-        if not flags or not self.gateways:
-            return {"applied": 0, "results": []}
-
-        results: list[dict[str, Any]] = []
-        for w in self.gateways:
-            addr = w.classic_address
-            for f in flags:
-                tx = AccountSet(account=addr, set_flag=f)
-
-                p = await self.build_sign_and_track(tx, w)
-
-                res = await self.submit_pending(p, timeout=max(getattr(self, "rpc_timeout", 3.0), 15.0))
-
-                er = (res or {}).get("engine_result")
-                txh = (res or {}).get("tx_json", {}).get("hash") if res else None
-
-                results.append(
-                    {
-                        "address": addr,
-                        "flag": f.name,
-                        "engine_result": er,
-                        "tx_hash": txh,
-                        "state": p.state.name,
-                    }
-                )
-
-                if isinstance(er, str) and er != "tesSUCCESS":
-                    log.error("AccountSet failed addr=%s flag=%s res=%s", addr, f.name, res)
-
-        return {"applied": len(flags) * len(self.gateways), "results": results}
 
     async def wait_until_validated(
         self, tx_hash: str, *, overall: float = 15.0, per_rpc: float = 2.0
@@ -1430,7 +1286,7 @@ class Workload:
             log.warning("Validation timeout tx=%s after %.1fs", tx_hash, overall)
             return {"validated": False, "timeout": True}
 
-    async def submit_random_txn(self, n: int | None = None):
+    async def submit_random_txn(self):
         txn = await generate_txn(self.ctx)
         pending_txn = await self.build_sign_and_track(txn, self.wallets[txn.account])
         x = await self.submit_pending(pending_txn)
@@ -1547,45 +1403,6 @@ class Workload:
                 break
 
         return result_counts
-
-    async def _establish_trust_lines(self) -> None:
-        """Create TrustSet transactions from all users to all configured currencies.
-
-        Submits in batches respecting the 10 txn per-account queue limit.
-        """
-        if not self.users or not self._currencies:
-            log.warning("No users or currencies to establish trust lines")
-            return
-
-        trust_limit = str(self.config["transactions"]["trustset"]["limit"])
-        total_trustsets = len(self.users) * len(self._currencies)
-
-        log.info(
-            f"Establishing trust lines: {len(self.users)} users × {len(self._currencies)} currencies = {total_trustsets} TrustSets"
-        )
-
-        all_pending = []
-        for user in self.users:
-            for currency in self._currencies:
-                trust_tx = TrustSet(
-                    account=user.address,
-                    limit_amount=IssuedCurrencyAmount(
-                        currency=currency.currency,
-                        issuer=currency.issuer,
-                        value=trust_limit,
-                    ),
-                )
-                pending = await self.build_sign_and_track(trust_tx, user)
-                all_pending.append(pending)
-
-        log.info(f"  Built {len(all_pending)} TrustSets")
-
-        result_counts = await self._submit_batched_by_account(all_pending, "TrustSet")
-        log.info(f"  Submission results: {dict(result_counts)}")
-
-        validated_count = sum(1 for p in all_pending if p.state == C.TxState.VALIDATED)
-        current = await self._current_ledger_index()
-        log.info(f"TrustSet complete in {current}: {validated_count}/{total_trustsets} validated")
 
     async def _wait_all_validated(
         self,
@@ -1727,47 +1544,6 @@ class Workload:
             counts[state] = counts.get(state, 0) + 1
         log.warning(f"{label} timeout after {timeout}s: {counts}")
         return counts
-
-    async def _distribute_initial_tokens(self) -> None:
-        """Gateways send initial token balances to all users.
-
-        Submits in batches respecting the 10 txn per-account queue limit.
-        """
-        if not self.users or not self._currencies:
-            log.warning("No users or currencies to distribute tokens")
-            return
-
-        initial_amount = str(self.config.get("currencies", {}).get("token_distribution", 1_000_000))
-
-        all_pending = []
-        for currency in self._currencies:
-            issuer_wallet = self.wallets.get(currency.issuer)
-            if not issuer_wallet:
-                log.error(f"Cannot find wallet for gateway {currency.issuer}")
-                continue
-
-            for user in self.users:
-                payment_tx = Payment(
-                    account=currency.issuer,
-                    destination=user.address,
-                    amount=IssuedCurrencyAmount(
-                        currency=currency.currency,
-                        issuer=currency.issuer,
-                        value=initial_amount,
-                    ),
-                )
-                pending = await self.build_sign_and_track(payment_tx, issuer_wallet)
-                all_pending.append(pending)
-
-        total_payments = len(all_pending)
-        log.info(f"Distributing tokens: {total_payments} payments")
-
-        result_counts = await self._submit_batched_by_account(all_pending, "TokenDist")
-        log.info(f"  Submission results: {dict(result_counts)}")
-
-        validated_count = sum(1 for p in all_pending if p.state == C.TxState.VALIDATED)
-        current = await self._current_ledger_index()
-        log.info(f"Token distribution complete at {current}: {validated_count}/{total_payments} validated")
 
     async def _init_batch(
         self,
@@ -2577,33 +2353,38 @@ class Workload:
     async def flush_to_persistent_store(self) -> int:
         """Flush in-memory transaction records to the persistent store (SQLite).
 
-        Called periodically and on shutdown to ensure durability.
-        Only flushes records that have reached a terminal state since
-        the last flush. Returns the number of records flushed.
+        Called on shutdown to ensure durability. Uses a single bulk upsert
+        instead of one connection per record.
         """
-        if self.persistent_store is None:
+        from workload.sqlite_store import SQLiteStore
+
+        if not isinstance(self.persistent_store, SQLiteStore):
             return 0
 
-        flushed = 0
-        for tx_hash, p in list(self.pending.items()):
-            try:
-                await self.persistent_store.mark(
-                    tx_hash,
-                    state=p.state,
-                    account=p.account,
-                    sequence=p.sequence,
-                    transaction_type=p.transaction_type,
-                    engine_result_first=p.engine_result_first,
-                    validated_ledger=p.validated_ledger,
-                    meta_txn_result=p.meta_txn_result,
-                )
-                flushed += 1
-            except Exception as e:
-                log.warning("Failed to flush %s to persistent store: %s", tx_hash[:16], e)
+        records = [
+            (tx_hash, {
+                "state": p.state,
+                "account": p.account,
+                "sequence": p.sequence,
+                "transaction_type": p.transaction_type,
+                "engine_result_first": p.engine_result_first,
+                "validated_ledger": p.validated_ledger,
+                "meta_txn_result": p.meta_txn_result,
+                "finalized_at": p.finalized_at,
+            })
+            for tx_hash, p in self.pending.items()
+        ]
 
-        if flushed:
+        if not records:
+            return 0
+
+        try:
+            flushed = await self.persistent_store.bulk_upsert(records)
             log.info("Flushed %d records to persistent store", flushed)
-        return flushed
+            return flushed
+        except Exception as e:
+            log.warning("Bulk flush failed: %s", e)
+            return 0
 
     async def poll_dex_metrics(self) -> dict:
         """Poll amm_info for all tracked AMM pools and update DEX metrics."""
