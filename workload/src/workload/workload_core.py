@@ -420,9 +420,9 @@ class Workload:
         with open(path) as f:
             account_data = _json.load(f)
 
+        gateway_count = self.config["gateways"]["number"]
+        user_count = self.config["users"]["number"]
         genesis_cfg = self.config.get("genesis", {})
-        gateway_count = genesis_cfg.get("gateway_count", 6)
-        user_count = genesis_cfg.get("user_count", 1000)
         currency_codes = genesis_cfg.get("currencies", ["USD", "CNY", "BTC", "ETH"])
         gateway_names = self.config.get("gateways", {}).get("names", [])
 

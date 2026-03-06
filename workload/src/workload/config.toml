@@ -88,8 +88,6 @@ initial_ledgers = 1
 # Path to accounts.json from generate_ledger (address+seed pairs)
 # Set to false or empty to disable genesis loading
 accounts_json = "testnet/accounts.json"
-gateway_count = 4       # First N accounts are gateways (must match [gateways] number)
-user_count = 100        # Next N accounts are users (must match [users] number)
 currencies = ["USD", "CNY", "BTC", "ETH"]  # Currencies per gateway
 
 [rippled]

@@ -116,25 +116,31 @@ uv sync
 
 ### Linting and Formatting
 
-```bash
-# Format and fix imports
-ruff check --select I --fix
-ruff format
+Pre-commit hooks run ruff automatically on commit (ruff-check with `--fix` + ruff-format). To run manually:
 
-# Check for issues
-ruff check
+```bash
+cd workload
+
+# Via pre-commit (recommended — matches CI)
+uv run --group dev pre-commit run --all-files
+
+# Or directly
+uv run --group lint ruff check --fix
+uv run --group lint ruff format
 ```
 
-Configuration in `pyproject.toml`: Methods must have return types (ANN201), line-length 120, Python 3.13+
+Configuration in `pyproject.toml`: Methods must have return types (ANN201), line-length 120, Python 3.13+ target
 
 ### Running the Workload
 
 ```bash
 cd workload
 
-# Start (pointing at the local network)
-RPC_URL="http://localhost:5005" WS_URL="ws://localhost:6006" \
-  uv run uvicorn workload.app:app --host 0.0.0.0 --port 8000
+# Start (defaults to localhost:5005 RPC, localhost:6006 WS)
+uv run workload
+
+# Or with explicit endpoints
+RPC_URL="http://localhost:5005" WS_URL="ws://localhost:6006" uv run workload
 ```
 
 On startup the workload will:
@@ -251,7 +257,7 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 
 ## Docker Images
 
-- **workload:latest**: Built from `workload/Dockerfile` (uvicorn FastAPI app). For local development, run natively with `uv run uvicorn` instead.
+- **workload:latest**: Built from `workload/Dockerfile` (uvicorn FastAPI app). For local development, run natively with `uv run workload` instead.
 - **workload (Antithesis)**: Built from root `Dockerfile` (includes test_composer scripts at `/opt/antithesis/test/`)
 - **rippled:latest**: Built from `Dockerfile.rippled` (clones and builds rippled with Antithesis instrumentation)
 - **config:latest**: Built from `Dockerfile.config` (network configs)
@@ -259,7 +265,8 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 
 ## Important Notes
 
-- The workload uses Python 3.13+ and the `uv` package manager
+- The workload uses Python 3.14 (requires 3.13+) and the `uv` package manager
+- `generate-ledger` is currently a local editable dependency (`../../generate_ledger` in pyproject.toml `[tool.uv.sources]`) — may change to a published package later
 - All timestamps are in seconds since epoch (time.time())
 - Account initialization happens at startup in `lifespan()` (app.py)
 - WebSocket listener, WS processor, finality checker, and DEX metrics poller run as concurrent tasks in an asyncio.TaskGroup
@@ -274,7 +281,7 @@ See `workload/docs/todo/TODO.md` for the full list. The three P0 items are:
 3. **XRP accounting / fund recovery**: On shutdown or Ctrl-C, sweep all XRP back to the funding source. The only permanently consumed XRP should be transaction fees (burned) and account reserves. Stretch: AccountDelete to reclaim reserves.
 
 ## Active Technologies
-- Python 3.13+ + FastAPI, xrpl-py (minimal usage), uvicorn, asyncio.TaskGroup
+- Python 3.14 (3.13+ required) + FastAPI, xrpl-py (minimal usage), uvicorn, asyncio.TaskGroup
 - SQLite3 (via sqlite_store.py) for persistence, InMemoryStore for metrics
 - WebSocket (ws.py + ws_processor.py) for real-time validation tracking
 - generate_ledger package (external) for network setup
