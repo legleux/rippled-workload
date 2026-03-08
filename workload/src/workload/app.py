@@ -33,7 +33,7 @@ import workload.constants as C
 from workload.config import cfg
 from workload.logging_config import setup_logging
 from workload.txn_factory.builder import generate_txn
-from workload.workload_core import ValidationRecord, Workload, periodic_dex_metrics, periodic_finality_check
+from workload.workload_core import Workload, periodic_dex_metrics, periodic_finality_check
 
 setup_logging()
 log = logging.getLogger("workload.app")
@@ -1400,23 +1400,6 @@ async def state_validations(limit: int = 100):
     return [{"txn": v.txn, "ledger": v.seq, "source": v.src} for v in reversed(vals)]
 
 
-@r_state.get("/heartbeat")
-async def state_heartbeat():
-    """
-    Return heartbeat status - our canary for ledger health.
-
-    We should see exactly ONE heartbeat transaction per ledger.
-    Missing heartbeats indicate network issues, WS disconnection, or other problems.
-
-    Returns:
-        - last_heartbeat_ledger: Most recent ledger where heartbeat was attempted
-        - total_heartbeats: Total number of heartbeats submitted
-        - missed_heartbeats: Ledger indices where heartbeat failed
-        - missed_count: Total number of missed heartbeats
-        - recent_heartbeats: Last 20 heartbeat attempts with status
-    """
-    return app.state.workload.snapshot_heartbeat()
-
 
 @r_state.get("/wallets")
 def api_state_wallets():
@@ -1542,7 +1525,7 @@ async def continuous_workload():
 
     Uses XRP-only payments for simplicity and predictable base fees.
     """
-    from random import random, sample
+    from workload.randoms import random
 
     from xrpl.models.transactions import Payment
 
@@ -1667,7 +1650,7 @@ async def start_workload():
     workload_stop_event = asyncio.Event()
     workload_task = asyncio.create_task(continuous_workload())
     workload_running = True
-    app.state.workload._workload_started = True
+    app.state.workload.workload_started = True
 
     return {
         "status": "started",
@@ -1689,7 +1672,7 @@ async def stop_workload():
     stop_ledger = await app.state.workload._current_ledger_index()
     log.info("Stopped workload at ledger %s", stop_ledger)
     workload_running = False
-    app.state.workload._workload_started = False
+    app.state.workload.workload_started = False
 
     return {"status": "stopped", "stats": workload_stats}
 

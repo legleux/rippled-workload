@@ -70,7 +70,7 @@ async def ws_listener(
                     elif len(streams) == 2:
                         streams_string = " and ".join(streams)
                     else:
-                        streams_string, _ = streams
+                        streams_string = streams[0]
                     log.info("Subscribing to %s + %s specific accounts", streams_string, len(accounts))
                 else:
                     subscribe_msg = {"id": 1, "command": "subscribe", "streams": ["transactions", "ledger", "server"]}

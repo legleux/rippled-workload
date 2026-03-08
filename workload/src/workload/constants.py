@@ -52,6 +52,9 @@ RPC_TIMEOUT = 2.0
 SUBMIT_TIMEOUT = 20
 LOCK_TIMEOUT = 2.0
 
+TERMINAL_STATE: frozenset[TxState] = frozenset({TxState.VALIDATED, TxState.REJECTED, TxState.EXPIRED, TxState.FAILED_NET})
+PENDING_STATES: frozenset[TxState] = frozenset({TxState.CREATED, TxState.SUBMITTED, TxState.RETRYABLE})
+
 __all__ = [
     "ACCOUNT_ZERO",
     "DEFAULT_CREATE_AMOUNT",
@@ -61,6 +64,8 @@ __all__ = [
     "MAX_CREATE_AMOUNT",
     "RPC_TIMEOUT",
     "SUBMIT_TIMEOUT",
+    "PENDING_STATES",
+    "TERMINAL_STATE",
     "TxType",
     "TxState",
 ]

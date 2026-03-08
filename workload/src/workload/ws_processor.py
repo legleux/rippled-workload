@@ -12,8 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from workload.workload_core import Workload
 
-import workload.constants as C
-from workload.workload_core import ValidationRecord, ValidationSrc
+from workload.validation import ValidationRecord, ValidationSrc
 
 try:
     from antithesis.assertions import always, sometimes
@@ -161,68 +160,31 @@ async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
 
 
 async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
-    """
-    Handle a ledger close notification.
-
-    Fetches ledger transaction count and runs Antithesis assertions to validate:
-    - Ledgers contain transactions at least sometimes (workload is functioning)
-    - Network is processing submitted transactions
-
-    Also submits heartbeat transaction for this ledger.
-
-    Message structure:
-    {
-        "type": "ledgerClosed",
-        "ledger_index": 12345,
-        "ledger_hash": "ABC123...",
-        "ledger_time": 742623456,
-        ...
-    }
-    """
+    """Handle a ledger close notification. Fetches tx count and fires Antithesis assertions."""
     ledger_index = msg.get("ledger_index")
     ledger_hash = msg.get("ledger_hash")
 
     log.debug("Ledger %s closed (hash: %s)", ledger_index, ledger_hash)
 
     try:
-        from xrpl.models.requests import Ledger
+        txn_count = await workload.fetch_ledger_tx_count(ledger_index)
+        if txn_count is None:
+            return
 
-        ledger_req = Ledger(
-            ledger_index=ledger_index,
-            transactions=True,  # Include tx hashes (not full txns)
-            expand=False,  # Don't expand to full transaction objects
+        log.debug("Ledger %s closed with %d transactions", ledger_index, txn_count)
+
+        sometimes(
+            txn_count > 0,
+            "ledger_contains_transactions",
+            {"ledger_index": ledger_index, "txn_count": txn_count, "ledger_hash": ledger_hash},
         )
 
-        ledger_resp = await workload._rpc(ledger_req)
-
-        if ledger_resp.is_successful():
-            ledger_data = ledger_resp.result.get("ledger", {})
-            transactions = ledger_data.get("transactions", [])
-            txn_count = len(transactions)
-
-            log.debug("Ledger %s closed with %d transactions", ledger_index, txn_count)
-
-            sometimes(
+        if workload.workload_started:
+            always(
                 txn_count > 0,
-                "ledger_contains_transactions",
-                {
-                    "ledger_index": ledger_index,
-                    "txn_count": txn_count,
-                    "ledger_hash": ledger_hash,
-                },
+                "active_workload_produces_transactions",
+                {"ledger_index": ledger_index, "txn_count": txn_count},
             )
-
-            if hasattr(workload, "_workload_started") and workload._workload_started:
-                always(
-                    txn_count > 0,
-                    "active_workload_produces_transactions",
-                    {
-                        "ledger_index": ledger_index,
-                        "txn_count": txn_count,
-                    },
-                )
-        else:
-            log.warning("Failed to fetch ledger %s: %s", ledger_index, ledger_resp.result)
 
     except Exception as e:
         log.error("Error fetching ledger %s for assertions: %s", ledger_index, e)
@@ -259,51 +221,13 @@ async def _handle_tx_response(workload: "Workload", msg: dict) -> None:
 
 
 async def _handle_server_status(workload: "Workload", msg: dict) -> None:
-    """Handle server status updates from the server stream.
-
-    Stores the raw message and computes human-readable fee multipliers.
-
-    Message structure:
-    {
-        "type": "serverStatus",
-        "server_status": "normal|full|busy|...",
-        "load_base": 256,
-        "load_factor": 256,
-        "load_factor_server": 256,
-        "load_factor_fee_escalation": 256,
-        "load_factor_fee_queue": 256,
-        "load_factor_fee_reference": 256,
-        ...
-    }
-    """
-    import time
-
-    workload.latest_server_status = msg
-    workload.latest_server_status_time = time.time()
-
-    load_factor = msg.get("load_factor", 256)
-    load_factor_fee_escalation = msg.get("load_factor_fee_escalation")
-    load_factor_fee_queue = msg.get("load_factor_fee_queue")
-    load_factor_fee_reference = msg.get("load_factor_fee_reference", 256)
-    server_status = msg.get("server_status", "unknown")
-
-    queue_multiplier = load_factor_fee_queue / load_factor_fee_reference if load_factor_fee_queue else 1.0
-    escalation_multiplier = (
-        load_factor_fee_escalation / load_factor_fee_reference if load_factor_fee_escalation else 1.0
-    )
-    general_load_multiplier = load_factor / 256.0
-
-    workload.latest_server_status_computed = {
-        "server_status": server_status,
-        "queue_fee_multiplier": queue_multiplier,
-        "open_ledger_fee_multiplier": escalation_multiplier,
-        "general_load_multiplier": general_load_multiplier,
-    }
-
+    """Handle server status updates — delegates state update to Workload."""
+    workload.update_server_status(msg)
+    computed = workload.latest_server_status_computed
     log.debug(
         "Server status: %s | Load: %.1fx | Queue: %.1fx | Open ledger: %.1fx",
-        server_status,
-        general_load_multiplier,
-        queue_multiplier,
-        escalation_multiplier,
+        computed.get("server_status", "unknown"),
+        computed.get("general_load_multiplier", 1.0),
+        computed.get("queue_fee_multiplier", 1.0),
+        computed.get("open_ledger_fee_multiplier", 1.0),
     )

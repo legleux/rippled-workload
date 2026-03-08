@@ -13,7 +13,7 @@ from xrpl.models import IssuedCurrency
 from xrpl.wallet import Wallet
 
 import workload.constants as C
-from workload.workload_core import TERMINAL_STATE, ValidationRecord
+from workload.validation import ValidationRecord
 
 log = logging.getLogger("workload.sqlite_store")
 
@@ -140,136 +140,6 @@ class SQLiteStore:
         finally:
             conn.close()
 
-    async def update_record(self, tx: dict) -> None:
-        """Insert or update a transaction record."""
-        tx_hash = tx.get("tx_hash")
-        if not tx_hash:
-            raise ValueError("update_record() requires 'tx_hash'")
-
-        async with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            try:
-                now = time.time()
-                conn.execute(
-                    """
-                    INSERT INTO transactions (tx_hash, state, source, account,
-                                             validated_ledger, finalized_at,
-                                             created_at, updated_at, data)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(tx_hash) DO UPDATE SET
-                        state = excluded.state,
-                        source = excluded.source,
-                        account = excluded.account,
-                        validated_ledger = excluded.validated_ledger,
-                        finalized_at = excluded.finalized_at,
-                        updated_at = excluded.updated_at,
-                        data = excluded.data
-                    """,
-                    (
-                        tx_hash,
-                        tx.get("state"),
-                        tx.get("source"),
-                        tx.get("account"),
-                        tx.get("validated_ledger"),
-                        tx.get("finalized_at"),
-                        tx.get("created_at", now),
-                        now,
-                        json.dumps(tx),
-                    ),
-                )
-                conn.commit()
-                self._recount()
-            finally:
-                conn.close()
-
-    async def get(self, tx_hash: str) -> dict | None:
-        """Retrieve a transaction record by hash."""
-        async with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            try:
-                cursor = conn.execute("SELECT data FROM transactions WHERE tx_hash = ?", (tx_hash,))
-                row = cursor.fetchone()
-                return json.loads(row[0]) if row else None
-            finally:
-                conn.close()
-
-    async def mark(self, tx_hash: str, *, source: str | None = None, **fields) -> None:
-        """Update or insert a transaction record with state transitions."""
-        log.debug("Mark %s", tx_hash)
-        async with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            try:
-                cursor = conn.execute("SELECT data FROM transactions WHERE tx_hash = ?", (tx_hash,))
-                row = cursor.fetchone()
-                rec = json.loads(row[0]) if row else {}
-
-                prev_state = rec.get("state")
-                rec.update(fields)
-
-                if source is not None:
-                    rec["source"] = source
-
-                state = rec.get("state")
-                if isinstance(state, C.TxState):
-                    state = state.name
-                    rec["state"] = state
-
-                if state in TERMINAL_STATE:
-                    rec.setdefault("finalized_at", time.time())
-
-                    if state == "VALIDATED" and prev_state != "VALIDATED":
-                        seq = rec.get("validated_ledger") or 0
-                        src = source or rec.get("source", "unknown")
-
-                        cursor = conn.execute(
-                            "SELECT 1 FROM validations WHERE tx_hash = ? AND ledger_seq = ?",
-                            (tx_hash, seq),
-                        )
-                        if not cursor.fetchone():
-                            conn.execute(
-                                "INSERT INTO validations (tx_hash, ledger_seq, source, validated_at) "
-                                "VALUES (?, ?, ?, ?)",
-                                (tx_hash, seq, src, time.time()),
-                            )
-                            if not any(v.txn == tx_hash and v.seq == seq for v in self.validations):
-                                log.debug("%s ValidationRecord in %s by %s -- %s", state, seq, src, tx_hash)
-                                self.validations.append(ValidationRecord(txn=tx_hash, seq=seq, src=src))
-
-                rec["tx_hash"] = tx_hash
-                now = time.time()
-                conn.execute(
-                    """
-                    INSERT INTO transactions (tx_hash, state, source, account,
-                                             validated_ledger, finalized_at,
-                                             created_at, updated_at, data)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(tx_hash) DO UPDATE SET
-                        state = excluded.state,
-                        source = excluded.source,
-                        account = excluded.account,
-                        validated_ledger = excluded.validated_ledger,
-                        finalized_at = excluded.finalized_at,
-                        updated_at = excluded.updated_at,
-                        data = excluded.data
-                    """,
-                    (
-                        tx_hash,
-                        rec.get("state"),
-                        rec.get("source"),
-                        rec.get("account"),
-                        rec.get("validated_ledger"),
-                        rec.get("finalized_at"),
-                        rec.get("created_at", now),
-                        now,
-                        json.dumps(rec),
-                    ),
-                )
-                conn.commit()
-                self._recount()
-                log.debug("%s --> %s  %s", prev_state, state, tx_hash)
-            finally:
-                conn.close()
-
     async def bulk_upsert(self, records: list[tuple[str, dict]]) -> int:
         """Upsert many transaction records in a single SQLite transaction.
 
@@ -294,7 +164,7 @@ class SQLiteStore:
                 state = state.name
 
             finalized_at = fields.get("finalized_at")
-            terminal_names = {s.name for s in TERMINAL_STATE}
+            terminal_names = {s.name for s in C.TERMINAL_STATE}
             if state in terminal_names and finalized_at is None:
                 finalized_at = now
 
@@ -340,69 +210,6 @@ class SQLiteStore:
                 conn.close()
 
         return len(rows)
-
-    async def rekey(self, old_hash: str, new_hash: str) -> None:
-        """Replace a record's key when hash changes."""
-        async with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            try:
-                cursor = conn.execute("SELECT data FROM transactions WHERE tx_hash = ?", (old_hash,))
-                row = cursor.fetchone()
-                if not row:
-                    return
-
-                rec = json.loads(row[0])
-                rec["tx_hash"] = new_hash
-
-                conn.execute("DELETE FROM transactions WHERE tx_hash = ?", (old_hash,))
-                now = time.time()
-                conn.execute(
-                    """
-                    INSERT INTO transactions (tx_hash, state, source, account,
-                                             validated_ledger, finalized_at,
-                                             created_at, updated_at, data)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        new_hash,
-                        rec.get("state"),
-                        rec.get("source"),
-                        rec.get("account"),
-                        rec.get("validated_ledger"),
-                        rec.get("finalized_at"),
-                        rec.get("created_at", now),
-                        now,
-                        json.dumps(rec),
-                    ),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-
-    async def find_by_state(self, *states: C.TxState | str) -> list[dict]:
-        """Return records matching any of the given states."""
-        wanted = {s.name if isinstance(s, C.TxState) else s for s in states}
-        async with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            try:
-                placeholders = ",".join("?" * len(wanted))
-                cursor = conn.execute(
-                    f"SELECT data FROM transactions WHERE state IN ({placeholders})",
-                    tuple(wanted),
-                )
-                return [json.loads(row[0]) for row in cursor.fetchall()]
-            finally:
-                conn.close()
-
-    async def all_records(self) -> list[dict]:
-        """Return all transaction records."""
-        async with self._lock:
-            conn = sqlite3.connect(self.db_path)
-            try:
-                cursor = conn.execute("SELECT data FROM transactions")
-                return [json.loads(row[0]) for row in cursor.fetchall()]
-            finally:
-                conn.close()
 
     def snapshot_stats(self) -> dict:
         """Return current statistics."""

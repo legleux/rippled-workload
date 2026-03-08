@@ -36,7 +36,7 @@ from xrpl.models.transactions import (
 from xrpl.transaction import transaction_json_to_binary_codec_form
 from xrpl.wallet import Wallet
 
-from workload.randoms import randrange
+from workload.randoms import randrange, random
 
 log = logging.getLogger("workload.txn")
 
@@ -556,8 +556,6 @@ def _build_mptoken_issuance_destroy(ctx: TxnContext) -> dict:
 
 async def _build_batch(ctx: TxnContext) -> dict:
     """Build a Batch transaction with random inner transactions of various types."""
-    from random import random
-
     src = ctx.rand_account()
 
     num_inner = randrange(2, 9)

@@ -55,7 +55,10 @@
       "Bash(docker rm:*)",
       "Bash(uv tool:*)",
       "WebFetch(domain:custom.xrpl.org)",
-      "Bash(gen auto:*)"
+      "Bash(gen auto:*)",
+      "Bash(/tmp/methods.txt:*)",
+      "Read(//tmp/**)",
+      "Bash(do:*)"
     ],
     "deny": [],
     "ask": []

@@ -17,6 +17,7 @@ dependencies = [
     "asyncio>=4.0.0",
     "pydantic-settings>=2.11.0",
     "generate-ledger",
+    "complexipy>=5.2.0",
 ]
 readme = "README.md"
 requires-python = ">= 3.13"
