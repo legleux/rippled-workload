@@ -103,6 +103,19 @@ When workload completes (or on Ctrl-C / crash), all XRP should be returned to th
 
 ## P1: Architectural Improvements
 
+### Transaction Finality Assurance — When to Stop Waiting
+
+Currently we stop waiting for a tx when either (a) the WS stream reports it validated, or (b) its `LastLedgerSequence` expires and the finality checker marks it `EXPIRED`. `FAILED_NET` txns (submission timeout / connection drop) stay locked until LLS for safety — the tx may have reached rippled's queue even though we got no response.
+
+Options to investigate for faster/more reliable finality signaling:
+
+- **WebSocket tx stream** (already active): `ws_processor` fires `record_validated()` on hash match. Latency = one ledger close after the tx validates. Should be sufficient for most cases.
+- **rippled gRPC stream**: Connect directly to validator nodes for sub-ledger event delivery. Faster than WS for high-throughput scenarios. User has an existing script to connect to the gRPC stream — evaluate whether the latency improvement justifies the added infrastructure.
+- **Validator log parsing**: Fragile — couples to log format, hard to maintain. Not recommended.
+- **Periodic RPC poll** (`Tx` lookup): Current fallback via `periodic_finality_check`. Works but is ~5s delayed and doesn't scale well at high txn volume.
+
+Long-term goal: a single, reliable event source that tells us definitively "tx X is terminal" so accounts can be freed immediately without waiting for LLS expiry as a safety margin.
+
 ### Ledger-Close Event Bridge
 - [ ] Bridge WS processor ledger_closed events to the workload submission loop
 - [ ] Eliminate the `asyncio.sleep` polling loops in `continuous_workload()`
@@ -188,3 +201,9 @@ When workload completes (or on Ctrl-C / crash), all XRP should be returned to th
 
 - What exactly happens at a flag ledger? (examine ledgers 256 & 257)
 - Is the per-account rippled queue limit still 10 (as defined in xrpld source)? (`config.toml` TODO)
+
+---
+
+## Historical Reference Docs
+
+- **`workload/XRPL_RELIABLE_SUBMISSION.md`** — Audit of our implementation against the XRPL reliable submission best practices. Gaps 1 (sequence collision) and 3 (tec code distinction) are now resolved; line numbers are stale. Keep for reference.

@@ -1,13 +1,11 @@
 import asyncio
 import hashlib
-import json
 import logging
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
 import xrpl
 from xrpl.asyncio.clients import AsyncJsonRpcClient
 from xrpl.asyncio.ledger import get_latest_validated_ledger_sequence
@@ -17,7 +15,6 @@ from xrpl.models import IssuedCurrency, SubmitOnly, Transaction
 from xrpl.models.amounts import IssuedCurrencyAmount
 from xrpl.models.requests import (
     AccountInfo,
-    Ledger,
     ServerState,
     Tx,
 )
@@ -58,6 +55,7 @@ class PendingTx:
     meta_txn_result: str | None = None
     created_at: float = field(default_factory=time.time)
     finalized_at: float | None = None
+    account_generation: int = 0  # AccountRecord.generation at build time; used to detect stale pre-signed txns
 
     def __str__(self):
         return f"{self.transaction_type} -- {self.account} -- {self.state}"
@@ -173,6 +171,7 @@ class InMemoryStore:
 class AccountRecord:
     lock: asyncio.Lock
     next_seq: int | None = None
+    generation: int = 0  # incremented on every cascade-expire / sequence reset
 
 
 def _sha512half(b: bytes) -> bytes:
@@ -208,9 +207,7 @@ class Workload:
         self.store: InMemoryStore = InMemoryStore()  # Hot-path runtime store
         self.persistent_store: SQLiteStore | None = store  # SQLite for durability (flushed periodically)
 
-        self.ledger_fill_fraction: float = 0.5
-
-        self.max_pending_per_account: int = self.config.get("transactions", {}).get("max_pending_per_account", 10)
+        self.max_pending_per_account: int = self.config.get("transactions", {}).get("max_pending_per_account", 1)
 
         self.target_txns_per_ledger: int = 100
 
@@ -541,11 +538,12 @@ class Workload:
 
         async with rec.lock:
             if rec.next_seq is None:
-                ai = await self._rpc(AccountInfo(account=addr, ledger_index="current", strict=True))
+                ai = await self._rpc(AccountInfo(account=addr, ledger_index="validated", strict=True))
                 acct = ai.result.get("account_data")
                 if acct is None:
                     raise RuntimeError(f"Account {addr[:12]}... not found on ledger (unfunded?)")
                 rec.next_seq = acct["Sequence"]
+                log.info("ALLOC_SEQ_FIRST: %s fetched seq=%d from current ledger", addr[:12], rec.next_seq)
 
             s = rec.next_seq
             rec.next_seq += 1
@@ -786,7 +784,7 @@ class Workload:
         if not (p_live and p_live.transaction_type == C.TxType.BATCH and p_live.account):
             return
         try:
-            ai = await self._rpc(AccountInfo(account=p_live.account, ledger_index="current"))
+            ai = await self._rpc(AccountInfo(account=p_live.account, ledger_index="validated"))
             rec_acct = self._record_for(p_live.account)
             async with rec_acct.lock:
                 old_seq = rec_acct.next_seq
@@ -868,10 +866,11 @@ class Workload:
 
         rec = self._record_for(account)
         async with rec.lock:
+            rec.generation += 1
             old_seq = rec.next_seq
             if fetch_seq_from_ledger:
                 try:
-                    ai = await self._rpc(AccountInfo(account=account, ledger_index="current"))
+                    ai = await self._rpc(AccountInfo(account=account, ledger_index="validated"))
                     new_seq = ai.result["account_data"]["Sequence"]
                     rec.next_seq = new_seq
                     delta = new_seq - old_seq if old_seq else None
@@ -986,6 +985,7 @@ class Workload:
         fee_drops: int | None = None,
         created_ledger: int | None = None,
         last_ledger_seq: int | None = None,
+        preallocated_seq: int | None = None,
     ) -> PendingTx:
         if created_ledger is not None and last_ledger_seq is not None:
             created_li = created_ledger
@@ -1001,7 +1001,18 @@ class Workload:
         need_seq = "TicketSequence" not in tx and not tx.get("Sequence")
         need_fee = not tx.get("Fee")
 
-        seq = await self.alloc_seq(wallet.address) if need_seq else tx.get("Sequence")
+        if need_seq:
+            if preallocated_seq is not None:
+                seq = preallocated_seq
+            else:
+                seq = await self.alloc_seq(wallet.address)
+            # In asyncio (cooperative): no await between here and seq assignment,
+            # so generation reflects the state at alloc_seq time.
+            acct_gen = self._record_for(wallet.address).generation
+        else:
+            seq = tx.get("Sequence")
+            acct_gen = 0  # Ticket-based tx; generation not applicable
+
         base_fee = fee_drops if (fee_drops is not None and need_fee) else (await self._open_ledger_fee() if need_fee else int(tx["Fee"]))
 
         txn_type = tx.get("TransactionType")
@@ -1039,6 +1050,7 @@ class Workload:
             last_ledger_seq=lls,
             transaction_type=tx.get("TransactionType"),
             created_ledger=created_li,
+            account_generation=acct_gen,
         )
         await self.record_created(p)
         return p
@@ -1095,9 +1107,22 @@ class Workload:
                 # this account (i.e., its next_seq hasn't already been reset
                 # below this txn's sequence by a prior cascade).
                 rec = self._record_for(p.account)
+                try:
+                    _ai = await self._rpc(AccountInfo(account=p.account, ledger_index="current"))
+                    _actual = _ai.result["account_data"]["Sequence"]
+                    log.error(
+                        "TEF_PAST_SEQ_DETAIL: %s %s submitted_seq=%d current_ledger_seq=%d delta=%d next_seq_before=%s",
+                        p.transaction_type, p.account[:12], p.sequence, _actual, _actual - p.sequence, rec.next_seq,
+                    )
+                except Exception as _e:
+                    log.error("TEF_PAST_SEQ_DETAIL: fetch failed: %s", _e)
+
                 if rec.next_seq is not None and rec.next_seq > p.sequence:
-                    log.debug(
-                        f"tefPAST_SEQ (cascade victim): {p.transaction_type} account={p.account} seq={p.sequence} - already reset to {rec.next_seq}"
+                    log.info(
+                        f"tefPAST_SEQ (cascade victim): {p.transaction_type} account={p.account} seq={p.sequence} - next_seq={rec.next_seq}, forcing ledger resync"
+                    )
+                    await self._cascade_expire_account(
+                        p.account, p.sequence, exclude_hash=p.tx_hash, fetch_seq_from_ledger=True
                     )
                 else:
                     log.info(
@@ -1124,7 +1149,7 @@ class Workload:
 
                 if p.transaction_type == C.TxType.BATCH and p.account:
                     try:
-                        ai = await self._rpc(AccountInfo(account=p.account, ledger_index="current"))
+                        ai = await self._rpc(AccountInfo(account=p.account, ledger_index="validated"))
                         rec_acct = self._record_for(p.account)
                         async with rec_acct.lock:
                             old_seq = rec_acct.next_seq
@@ -1209,13 +1234,17 @@ class Workload:
             await self.record_expired(p.tx_hash)
             return p.state, None
 
-        if p.state != C.TxState.SUBMITTED:
+        # Don't transition FAILED_NET → RETRYABLE: the tx may still be queued in rippled.
+        # Keep it locked (pending) until LLS expires or WS confirms validation.
+        if p.state not in (C.TxState.SUBMITTED, C.TxState.FAILED_NET):
             p.state = C.TxState.RETRYABLE
             await self.store.mark(p.tx_hash, state=p.state)
         return p.state, None
 
     async def submit_random_txn(self):
         txn = await generate_txn(self.ctx)
+        if txn is None:
+            return None
         pending_txn = await self.build_sign_and_track(txn, self.wallets[txn.account])
         x = await self.submit_pending(pending_txn)
         log.debug(f"Submitting random {txn.transaction_type.name.title().replace('_', ' ')} txn.")
@@ -2428,7 +2457,7 @@ async def periodic_finality_check(w: Workload, stop: asyncio.Event, interval: in
     iteration = 0
     while not stop.is_set():
         try:
-            for p in w.find_by_state(C.TxState.SUBMITTED, C.TxState.RETRYABLE):
+            for p in w.find_by_state(C.TxState.SUBMITTED, C.TxState.RETRYABLE, C.TxState.FAILED_NET):
                 try:
                     await w.check_finality(p)
                 except Exception:

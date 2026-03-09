@@ -1,0 +1,120 @@
+@startuml tx_lifecycle_sequence
+title Transaction Lifecycle: Generation → Submission → Validation
+
+skinparam sequenceArrowColor #555555
+skinparam sequenceActorBorderColor #2980B9
+skinparam sequenceParticipantBackgroundColor #EEF6FF
+skinparam sequenceParticipantBorderColor #2980B9
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam sequenceGroupBorderColor #E67E22
+skinparam sequenceGroupBodyBackgroundColor #FFF5E6
+skinparam noteBorderColor #F39C12
+skinparam noteBackgroundColor #FFF9E6
+skinparam BackgroundColor #FAFAFA
+
+participant "continuous_workload" as cw
+participant "generate_txn" as gen
+participant "Workload" as wl
+participant "AccountRecord\n(lock)" as ar
+participant "InMemoryStore" as mem
+participant "rippled (RPC)" as rpc
+participant "ws_listener" as wslist
+participant "ws_processor" as wsproc
+participant "periodic_finality\n_check" as pfc
+
+== Per-Ledger Batch (triggered on ledger_closed event) ==
+
+cw -> wl: get_fee_info()
+wl -> rpc: fee command
+rpc --> wl: fee result
+wl --> cw: FeeInfo (open_ledger_fee, ledger_current_index)
+
+note over cw
+  Compute free_accounts:
+  accounts with pending_count == 0
+  Shuffle + slice to target_txns_per_ledger
+end note
+
+cw -> cw: batch_wallets = free_accounts[:target]
+
+group TaskGroup — N concurrent tasks (one per wallet)
+
+    cw -> gen: generate_txn(ctx[forced_account=wallet])
+    gen --> cw: Transaction (xrpl-py model)
+
+    cw -> wl: build_sign_and_track(txn, wallet)
+
+    wl -> ar: alloc_seq(wallet.address)
+    note right of ar
+      Acquires asyncio.Lock per account.
+      Fetches from ledger on first call,
+      increments locally thereafter.
+    end note
+    ar --> wl: sequence number
+
+    wl -> wl: sign transaction (xrpl keypairs)
+    wl -> wl: create PendingTx(state=CREATED)
+    wl -> wl: pending[tx_hash] = pending_tx
+
+    wl -> mem: mark(tx_hash, state=CREATED, ...)
+    mem --> wl: ok
+
+    wl --> cw: PendingTx
+
+    cw -> wl: submit_pending(pending_tx)
+    wl -> rpc: SubmitOnly(signed_blob_hex)
+    rpc --> wl: engine_result
+
+    alt tesSUCCESS or tel*
+        wl -> mem: mark(tx_hash, state=SUBMITTED, engine_result=...)
+    else tem* / tef* (terminal rejection)
+        wl -> ar: release_seq(wallet.address) [if tel*]
+        wl -> mem: mark(tx_hash, state=REJECTED)
+        wl -> wl: cascade_expire() [if tefPAST_SEQ]
+    else terPRE_SEQ
+        wl -> mem: mark(tx_hash, state=EXPIRED)
+        wl -> wl: cascade_expire()
+    else TimeoutError / Exception
+        wl -> mem: mark(tx_hash, state=FAILED_NET)
+    end
+
+end
+
+== Validation Path A: WebSocket (Primary) ==
+
+rpc -> wslist: accounts stream\ntx_validated message
+wslist -> wslist: _process_message(raw_msg)
+wslist -> wslist: event_queue.put(("tx_validated", obj))
+
+wsproc -> wsproc: event_queue.get()
+wsproc -> wl: record_validated(\n  ValidationRecord(hash, ledger_index, WS))
+
+wl -> wl: dedup check\n(ValidationRecord deque)
+wl -> mem: mark(tx_hash, state=VALIDATED,\n  validated_ledger=..., src="ws")
+wl -> wl: side-effects\n(balance_tracker, amm.register(), etc.)
+
+== Validation Path B: RPC Poll (Fallback) ==
+
+note over pfc: Runs every 5 seconds\nfor all SUBMITTED/RETRYABLE txns
+
+pfc -> rpc: Tx(hash) for each pending tx
+rpc --> pfc: tx result (validated=true/false)
+
+alt validated=true
+    pfc -> wl: record_validated(\n  ValidationRecord(hash, ledger, POLL))
+    wl -> mem: mark(tx_hash, state=VALIDATED, src="poll")
+else past last_ledger_seq + grace
+    pfc -> wl: record_expired(hash)
+    wl -> mem: mark(tx_hash, state=EXPIRED)
+    wl -> wl: _cascade_expire_account(\n  fetch_seq_from_ledger=True)
+end
+
+== Shutdown / Flush ==
+
+cw -> wl: flush_to_persistent_store()
+wl -> mem: all_records()
+mem --> wl: list[dict] (all transactions)
+wl -> "SQLiteStore" as sql: bulk_upsert(records)
+sql --> wl: ok (near-instant — single transaction)
+
+@enduml

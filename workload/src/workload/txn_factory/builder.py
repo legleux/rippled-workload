@@ -70,18 +70,21 @@ class TxnContext:
     tickets: dict[str, set[int]] | None = None  # Tickets: {account: {ticket_seq, ...}}
     balances: dict[str, dict[str | tuple[str, str], float]] | None = None  # In-memory balance tracking
     disabled_types: set[str] | None = None  # Runtime-overridable disabled types
+    forced_account: "Wallet | None" = None  # When set, rand_account() always returns this wallet as source
 
     def rand_accounts(self, n: int, omit: list[str] | None = None) -> list["Wallet"]:
         """Pick n unique random accounts, optionally excluding addresses.
 
-        Args:
-            n: Number of unique accounts to return.
-            omit: List of addresses to exclude (e.g., currency issuers to prevent temDST_IS_SRC).
-
-        Returns:
-            List of n unique Wallets.
+        When forced_account is set, it is guaranteed to be the first element
+        (unless its address is in omit, in which case it is excluded normally).
         """
-        available = self.wallets if omit is None else [w for w in self.wallets if w.address not in omit]
+        omit_set = set(omit) if omit else set()
+        if self.forced_account is not None and self.forced_account.address not in omit_set:
+            rest = [w for w in self.wallets if w.address != self.forced_account.address and w.address not in omit_set]
+            if len(rest) < n - 1:
+                raise ValueError(f"Need {n} accounts but only {len(rest) + 1} available after excluding {omit}")
+            return [self.forced_account] + sample(rest, n - 1)
+        available = [w for w in self.wallets if w.address not in omit_set]
         if len(available) < n:
             raise ValueError(f"Need {n} accounts but only {len(available)} available after excluding {omit}")
         return sample(available, n)
@@ -89,11 +92,7 @@ class TxnContext:
     def rand_account(self, omit: list[str] | None = None) -> "Wallet":
         """Pick a single random account, optionally excluding addresses.
 
-        Args:
-            omit: List of addresses to exclude (e.g., currency issuers to prevent temDST_IS_SRC).
-
-        Returns:
-            Single Wallet.
+        When forced_account is set, returns it unless its address is in omit.
         """
         return self.rand_accounts(1, omit)[0]
 
@@ -201,14 +200,8 @@ def deep_update(base: dict, override: dict) -> dict:
 
 def _build_payment(ctx: TxnContext) -> dict:
     """Build a Payment transaction with random source and destination."""
-    wl = list(ctx.wallets)
-    if len(wl) >= 2:
-        src, dst = sample(wl, 2)
-    else:
-        src = wl[0] if wl else ctx.funding_wallet
-        dst = ctx.funding_wallet if ctx.funding_wallet is not src else src
-
-    from random import random
+    src = ctx.rand_account()
+    dst = ctx.rand_account(omit=[src.address])
 
     use_xrp = random() < ctx.config.get("amm", {}).get("xrp_chance", 0.1)
 
@@ -280,8 +273,6 @@ def _build_offer_create(ctx: TxnContext) -> dict:
 
     Creates offers to exchange XRP/IOU or IOU/IOU pairs.
     """
-    from random import random
-
     src = ctx.rand_account()
 
     use_xrp = random() < 0.5
@@ -398,8 +389,6 @@ def _build_nftoken_create_offer(ctx: TxnContext) -> dict:
     - Sell offer: owner offers to sell their NFT
     - Buy offer: non-owner offers to buy someone's NFT
     """
-    from random import random
-
     is_sell_offer = random() < 0.5
 
     if is_sell_offer:
@@ -691,22 +680,35 @@ def _build_amm_create(ctx: TxnContext) -> dict:
     }
 
 
-def _build_amm_deposit(ctx: TxnContext) -> dict:
+def _build_amm_deposit(ctx: TxnContext) -> dict | None:
     """Build an AMMDeposit transaction to add liquidity to an existing AMM pool.
 
     Uses TF_TWO_ASSET flag for dual-asset deposit.
-    Picks from known LP holders (pool creator + prior depositors) who are likely to have the required assets.
+    Only picks pools where src account has the required assets.
     """
-    pool = ctx.rand_amm_pool()
+    src = ctx.rand_account()
+    account_currencies = {(c.currency, c.issuer) for c in ctx.get_account_currencies(src)}
+    has_balance_data = bool(account_currencies)
+
+    eligible_pools = []
+    for p in (ctx.amm_pool_registry or []):
+        a1, a2 = p["asset1"], p["asset2"]
+        if a1.get("currency") == "XRP":
+            # XRP/IOU pool: account always has XRP; if we have balance data, verify IOU too
+            if not has_balance_data or (a2["currency"], a2["issuer"]) in account_currencies:
+                eligible_pools.append(p)
+        else:
+            # IOU/IOU pool: only proceed if we can confirm both assets
+            if has_balance_data and (a1["currency"], a1["issuer"]) in account_currencies \
+                    and (a2["currency"], a2["issuer"]) in account_currencies:
+                eligible_pools.append(p)
+
+    if not eligible_pools:
+        return None
+    pool = choice(eligible_pools)
+
     asset1 = pool["asset1"]
     asset2 = pool["asset2"]
-
-    wallet_map = {w.address: w for w in ctx.wallets}
-    lp_holders = pool.get("lp_holders", [pool["creator"]])
-    owned = [wallet_map[addr] for addr in lp_holders if addr in wallet_map]
-    if not owned:
-        raise RuntimeError(f"No managed LP holders for pool {asset1}/{asset2}")
-    src = choice(owned)
 
     amm_cfg = ctx.config.get("amm", {})
 
@@ -744,23 +746,24 @@ def _build_amm_deposit(ctx: TxnContext) -> dict:
     }
 
 
-def _build_amm_withdraw(ctx: TxnContext) -> dict:
+def _build_amm_withdraw(ctx: TxnContext) -> dict | None:
     """Build an AMMWithdraw transaction to remove liquidity from an existing AMM pool.
 
     Uses TF_TWO_ASSET flag for proportional dual-asset withdrawal.
     Withdraws 10% of deposit amounts to keep pools healthy.
-    Only picks from known LP holders — accounts guaranteed to hold LP tokens.
+    Only picks pools where src holds LP tokens — returns None if no eligible pool found.
     """
-    pool = ctx.rand_amm_pool()
+    src = ctx.rand_account()
+    eligible_pools = [
+        p for p in (ctx.amm_pool_registry or [])
+        if src.address in p.get("lp_holders", [p.get("creator", "")])
+    ]
+    if not eligible_pools:
+        return None
+    pool = choice(eligible_pools)
+
     asset1 = pool["asset1"]
     asset2 = pool["asset2"]
-
-    wallet_map = {w.address: w for w in ctx.wallets}
-    lp_holders = pool.get("lp_holders", [pool["creator"]])
-    owned = [wallet_map[addr] for addr in lp_holders if addr in wallet_map]
-    if not owned:
-        raise RuntimeError(f"No managed LP holders for pool {asset1}/{asset2}")
-    src = choice(owned)
 
     amm_cfg = ctx.config.get("amm", {})
     withdraw_xrp = str(int(int(amm_cfg.get("deposit_amount_xrp", "1000000000")) * 0.1))
@@ -821,6 +824,98 @@ _BUILDERS: dict[str, tuple[Callable[[TxnContext], dict], type[Transaction]]] = {
     "AMMWithdraw": (_build_amm_withdraw, AMMWithdraw),
     "Batch": (_build_batch, Batch),
 }
+
+
+def pick_eligible_txn_type(wallet: "Wallet", ctx: TxnContext) -> str | None:
+    """Return a weight-sampled eligible transaction type for wallet, or None if none available.
+
+    Applies global capability filters (disabled, MPT IDs, NFTs, offers, AMM pools)
+    and per-account filters (LP holder for AMMWithdraw, asset availability for AMMDeposit,
+    offer ownership for OfferCancel). Excludes Batch (async builder, multi-seq allocation).
+    """
+    candidates = list(_BUILDERS.keys())
+
+    disabled = ctx.disabled_types if ctx.disabled_types is not None else set(
+        ctx.config.get("transactions", {}).get("disabled", [])
+    )
+    if disabled:
+        candidates = [t for t in candidates if t not in disabled]
+
+    if not ctx.mptoken_issuance_ids:
+        mpt_ops = {"MPTokenAuthorize", "MPTokenIssuanceSet", "MPTokenIssuanceDestroy"}
+        candidates = [t for t in candidates if t not in mpt_ops]
+
+    if not ctx.nfts:
+        candidates = [t for t in candidates if t not in {"NFTokenBurn", "NFTokenCreateOffer"}]
+
+    has_nft_offers = ctx.offers and any(v.get("type") == "NFTokenOffer" for v in ctx.offers.values())
+    if not has_nft_offers:
+        candidates = [t for t in candidates if t not in {"NFTokenCancelOffer", "NFTokenAcceptOffer"}]
+
+    if not ctx.amm_pool_registry:
+        candidates = [t for t in candidates if t not in {"AMMDeposit", "AMMWithdraw"}]
+
+    # Per-account: OfferCancel requires wallet to own at least one IOU offer
+    if "OfferCancel" in candidates:
+        has_own_offer = ctx.offers and any(
+            v.get("type") == "IOUOffer" and v.get("owner") == wallet.address
+            for v in ctx.offers.values()
+        )
+        if not has_own_offer:
+            candidates = [t for t in candidates if t != "OfferCancel"]
+
+    # Per-account: AMMWithdraw requires wallet to hold LP tokens in at least one pool
+    if "AMMWithdraw" in candidates:
+        is_lp = any(
+            wallet.address in p.get("lp_holders", [p.get("creator", "")])
+            for p in (ctx.amm_pool_registry or [])
+        )
+        if not is_lp:
+            candidates = [t for t in candidates if t != "AMMWithdraw"]
+
+    # Per-account: AMMDeposit requires at least one pool where wallet can provide both assets
+    if "AMMDeposit" in candidates:
+        account_currencies = {(c.currency, c.issuer) for c in ctx.get_account_currencies(wallet)}
+        has_balance_data = bool(account_currencies)
+        eligible = any(
+            (
+                p["asset1"].get("currency") == "XRP"
+                and (not has_balance_data or (p["asset2"]["currency"], p["asset2"]["issuer"]) in account_currencies)
+            ) or (
+                has_balance_data
+                and (p["asset1"]["currency"], p["asset1"]["issuer"]) in account_currencies
+                and (p["asset2"]["currency"], p["asset2"]["issuer"]) in account_currencies
+            )
+            for p in (ctx.amm_pool_registry or [])
+        )
+        if not eligible:
+            candidates = [t for t in candidates if t != "AMMDeposit"]
+
+    # Batch uses an async builder with multi-seq allocations — not supported in sync pre-build path
+    candidates = [t for t in candidates if t != "Batch"]
+
+    if not candidates:
+        return None
+
+    percentages = ctx.config.get("transactions", {}).get("percentages", {})
+    defined_total = sum(percentages.get(t, 0) for t in candidates)
+    remaining = 1.0 - defined_total
+    undefined_types = [t for t in candidates if t not in percentages]
+    per_undefined = remaining / len(undefined_types) if undefined_types else 0
+    weights = [percentages.get(t, per_undefined) for t in candidates]
+    return choices(candidates, weights=weights, k=1)[0]
+
+
+def build_txn_dict(txn_type: str, ctx: TxnContext) -> dict | None:
+    """Call the synchronous builder for txn_type and return the raw dict (or None if ineligible)."""
+    builder_fn, _ = _BUILDERS[txn_type]
+    return builder_fn(ctx)
+
+
+def txn_model_cls(txn_type: str) -> type[Transaction]:
+    """Return the xrpl-py model class for txn_type."""
+    _, model_cls = _BUILDERS[txn_type]
+    return model_cls
 
 
 async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides: Any) -> Transaction:
@@ -910,6 +1005,10 @@ async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides
         composed = await builder_fn(ctx)
     else:
         composed = builder_fn(ctx)
+
+    if composed is None:
+        log.debug("Builder for %s returned None (account ineligible) — skipping", txn_type)
+        return None
 
     if overrides:
         deep_update(composed, transaction_json_to_binary_codec_form(overrides))

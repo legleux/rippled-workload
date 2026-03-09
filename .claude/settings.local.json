@@ -58,7 +58,9 @@
       "Bash(gen auto:*)",
       "Bash(/tmp/methods.txt:*)",
       "Read(//tmp/**)",
-      "Bash(do:*)"
+      "Bash(do:*)",
+      "Bash(do plantuml:*)",
+      "Bash(python:*)"
     ],
     "deny": [],
     "ask": []

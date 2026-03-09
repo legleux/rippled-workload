@@ -7,5 +7,6 @@ sample = urand.sample
 choice = urand.choice
 choices = urand.choices
 randint = urand.randint
+shuffle = urand.shuffle
 normalvariate = urand.normalvariate
 gauss = urand.gauss

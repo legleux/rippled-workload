@@ -1,0 +1,155 @@
+@startuml api_surface
+title FastAPI Route Map
+
+skinparam componentStyle rectangle
+skinparam ArrowColor #555555
+skinparam BackgroundColor #FAFAFA
+skinparam ComponentBackgroundColor #EEF6FF
+skinparam ComponentBorderColor #2980B9
+skinparam PackageBackgroundColor #F8F8FF
+skinparam PackageBorderColor #8E44AD
+skinparam NoteBackgroundColor #FFF9E6
+skinparam NoteBorderColor #F39C12
+skinparam DatabaseBackgroundColor #FFF0E6
+skinparam DatabaseBorderColor #E67E22
+
+' ─────────────────────────────────────────────
+' Shared dependency
+' ─────────────────────────────────────────────
+database "app.state.workload: Workload" as wl_state
+
+' ─────────────────────────────────────────────
+' Global routes
+' ─────────────────────────────────────────────
+package "Global" {
+    component [GET /health] as health
+    component [POST /debug/fund] as debugfund
+    component [GET /state/dashboard\n(HTML)] as dashboard
+}
+
+' ─────────────────────────────────────────────
+' /accounts
+' ─────────────────────────────────────────────
+package "/accounts" {
+    component [GET  /create] as acc_create_get
+    component [POST /create] as acc_create_post
+    component [GET  /create/random] as acc_create_random
+    component [GET  /{account_id}] as acc_get
+    component [GET  /{account_id}/balances] as acc_balances
+    component [GET  /{account_id}/lines] as acc_lines
+}
+
+' ─────────────────────────────────────────────
+' /payment  (alias: /pay)
+' ─────────────────────────────────────────────
+package "/payment  (alias: /pay)" {
+    component [POST /payment] as pay_post
+}
+
+' ─────────────────────────────────────────────
+' /transaction  (alias: /txn)
+' ─────────────────────────────────────────────
+package "/transaction  (alias: /txn)" {
+    component [GET  /random] as txn_random
+    component [GET  /create/{transaction}] as txn_create
+    component [POST /payment] as txn_payment
+    component [POST /trustset] as txn_trustset
+    component [POST /accountset] as txn_accountset
+    component [POST /ammcreate] as txn_ammcreate
+    component [POST /ammdeposit] as txn_ammdeposit
+    component [POST /ammwithdraw] as txn_ammwithdraw
+    component [POST /nftokenmint] as txn_nftokenmint
+    component [POST /mptokenissuancecreate] as txn_mptokencreate
+    component [POST /mptokenissuanceset] as txn_mptokenset
+    component [POST /mptokenauthorize] as txn_mptokenauth
+    component [POST /mptokenissuancedestroy] as txn_mptokendestroy
+    component [POST /batch] as txn_batch
+}
+
+' ─────────────────────────────────────────────
+' /state
+' ─────────────────────────────────────────────
+package "/state" {
+    component [GET /summary] as st_summary
+    component [GET /dashboard] as st_dashboard
+    component [GET /pending] as st_pending
+    component [GET /failed] as st_failed
+    component [GET /failed/{error_code}] as st_failed_code
+    component [GET /failed/{error_code}/page] as st_failed_page
+    component [GET /expired] as st_expired
+    component [GET /tx/{tx_hash}] as st_tx
+    component [GET /fees] as st_fees
+    component [GET /accounts] as st_accounts
+    component [GET /validations] as st_validations
+    component [GET /wallets] as st_wallets
+    component [GET /users] as st_users
+    component [GET /gateways] as st_gateways
+    component [GET /currencies] as st_currencies
+    component [GET /mptokens] as st_mptokens
+    component [GET /finality] as st_finality
+    component [GET /ws/stats] as st_ws_stats
+}
+
+' ─────────────────────────────────────────────
+' /workload
+' ─────────────────────────────────────────────
+package "/workload" {
+    component [POST /start] as wl_start
+    component [POST /stop] as wl_stop
+    component [GET  /status] as wl_status
+    component [GET  /fill-fraction] as wl_fill_get
+    component [POST /fill-fraction] as wl_fill_post
+    component [GET  /target-txns] as wl_target_get
+    component [POST /target-txns] as wl_target_post
+    component [GET  /disabled-types] as wl_disabled
+    component [POST /toggle-type] as wl_toggle
+}
+
+' ─────────────────────────────────────────────
+' /dex
+' ─────────────────────────────────────────────
+package "/dex" {
+    component [GET  /metrics] as dex_metrics
+    component [GET  /pools] as dex_pools
+    component [GET  /pools/{index}] as dex_pool_idx
+    component [POST /poll] as dex_poll
+}
+
+' ─────────────────────────────────────────────
+' /network
+' ─────────────────────────────────────────────
+package "/network" {
+    component [POST /reset] as net_reset
+}
+
+' ─────────────────────────────────────────────
+' All handlers inject shared Workload state
+' ─────────────────────────────────────────────
+wl_state <.. health : reads
+wl_state <.. acc_get : reads/writes
+wl_state <.. pay_post : writes
+wl_state <.. txn_random : writes
+wl_state <.. st_summary : reads
+wl_state <.. wl_start : writes
+wl_state <.. dex_metrics : reads
+wl_state <.. net_reset : writes
+
+note bottom of wl_state
+  Injected via app.state.workload
+  into all route handlers.
+  Single shared Workload instance.
+end note
+
+note right of "/transaction  (alias: /txn)"
+  All POST endpoints build, sign,
+  and submit a single transaction.
+  Returns PendingTx or error.
+end note
+
+note right of "/workload"
+  Controls the continuous_workload loop:
+  start/stop, throughput tuning,
+  transaction type gating.
+end note
+
+@enduml

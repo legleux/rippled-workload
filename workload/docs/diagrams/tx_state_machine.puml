@@ -1,0 +1,81 @@
+@startuml tx_state_machine
+title Transaction State Machine
+
+skinparam state {
+    BackgroundColor #EEF6FF
+    BorderColor #2980B9
+    ArrowColor #555555
+    StartColor #2ECC71
+    EndColor #E74C3C
+}
+skinparam BackgroundColor #FAFAFA
+skinparam NoteBorderColor #F39C12
+skinparam NoteBackgroundColor #FFF9E6
+
+[*] --> CREATED : build_sign_and_track()\ncreates PendingTx + signs
+
+state CREATED {
+}
+
+state SUBMITTED {
+}
+
+state RETRYABLE {
+    note : Temporary failure\nwill retry next cycle
+}
+
+state VALIDATED {
+    note : Side effects on entry:\n• Payment → balance_tracker.update()\n• Payment (new acct) → wallets dict adopted\n• MPTokenIssuanceCreate → _mptoken_issuance_ids\n• AMMCreate → amm.register()\n• Batch → sync sequence\n• DEX types → dex_metrics update\n• All → InMemoryStore.mark(VALIDATED)
+}
+
+state REJECTED {
+}
+
+state EXPIRED {
+    note : _cascade_expire_account() called\nHigher-seq txns → EXPIRED\nfetch_seq_from_ledger=True on recovery
+}
+
+state FAILED_NET {
+    note : Submission timed out or network error.\nTx may have reached rippled's queue.\nAccount stays locked until LLS expires.
+}
+
+' From CREATED
+CREATED --> SUBMITTED    : submit_pending()\n[tesSUCCESS]
+CREATED --> SUBMITTED    : submit_pending()\n[tel* — re-submit after seq release]
+CREATED --> REJECTED     : submit_pending()\n[tem* / tef* — terminal error]
+CREATED --> REJECTED     : submit_pending()\n[tefPAST_SEQ] + cascade_expire()
+CREATED --> EXPIRED      : submit_pending()\n[terPRE_SEQ] + cascade_expire()
+CREATED --> FAILED_NET   : submit_pending()\n[TimeoutError / network Exception]
+
+' From SUBMITTED
+SUBMITTED --> VALIDATED  : record_validated()\n[WS stream or RPC poll]
+SUBMITTED --> EXPIRED    : record_expired()\n[past LastLedgerSeq + grace period]
+SUBMITTED --> RETRYABLE  : check_finality()\n[pending, within grace — requeue]
+
+' From RETRYABLE
+RETRYABLE --> VALIDATED  : record_validated()
+RETRYABLE --> EXPIRED    : record_expired()
+
+' From FAILED_NET — NOT terminal; tx may still be queued in rippled
+FAILED_NET --> VALIDATED : record_validated()\n[WS stream or RPC poll finds it]
+FAILED_NET --> EXPIRED   : record_expired()\n[past LastLedgerSeq + grace period]
+
+' Terminal states
+VALIDATED  --> [*]
+REJECTED   --> [*]
+EXPIRED    --> [*]
+
+note bottom of VALIDATED
+  Primary path: WebSocket tx_validated event
+  (src=WS, deduped by ValidationRecord deque)
+  Fallback path: periodic_finality_check RPC poll
+  (src=POLL, every 5 seconds)
+end note
+
+note bottom of EXPIRED
+  HORIZON = 15 ledgers (~45-60s)
+  Cascade: all higher-seq txns on same account
+  also transitioned to EXPIRED
+end note
+
+@enduml

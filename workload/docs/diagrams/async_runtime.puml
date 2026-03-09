@@ -1,0 +1,101 @@
+@startuml async_runtime
+title Asyncio Runtime Topology
+
+skinparam componentStyle rectangle
+skinparam ArrowColor #555555
+skinparam BackgroundColor #FAFAFA
+skinparam ComponentBackgroundColor #EEF6FF
+skinparam ComponentBorderColor #2980B9
+skinparam PackageBackgroundColor #F0FFF0
+skinparam PackageBorderColor #27AE60
+skinparam NoteBackgroundColor #FFF9E6
+skinparam NoteBorderColor #F39C12
+skinparam DatabaseBackgroundColor #FFF0F0
+skinparam DatabaseBorderColor #E74C3C
+
+' ─────────────────────────────────────────────
+' App Lifespan TaskGroup (permanent tasks)
+' ─────────────────────────────────────────────
+package "App Lifespan TaskGroup (permanent)" {
+    component [ws_listener] as wslist
+    component [ws_processor] as wsproc
+    component [periodic_finality_check\n(every 5s)] as pfc
+    component [periodic_dex_metrics\n(every N ledgers)] as pdex
+}
+
+' ─────────────────────────────────────────────
+' continuous_workload task (managed separately)
+' ─────────────────────────────────────────────
+package "Managed Task" {
+    component [continuous_workload] as cw
+
+    package "Per-Batch inner TaskGroup\n(short-lived, N concurrent tasks)" {
+        component [_build_and_submit\n(wallet_1)] as t1
+        component [_build_and_submit\n(wallet_2)] as t2
+        component [_build_and_submit\n(wallet_N)] as tN
+    }
+}
+
+cw --> t1 : spawns
+cw --> t2 : spawns
+cw --> tN : spawns
+
+' ─────────────────────────────────────────────
+' Shared mutable state
+' ─────────────────────────────────────────────
+database "Shared Mutable State" {
+    component [InMemoryStore\n(asyncio.Lock)] as memstore
+    component [AccountRecord × N\n(asyncio.Lock per account)] as accrec
+    component [SQLiteStore\n(asyncio.Lock)] as sqlstore
+    component [asyncio.Queue\n(event_queue)] as queue
+}
+
+' Event flow: ws_listener → queue → ws_processor
+wslist --> queue : put(tx_validated\nledger_closed\nserver_status)
+queue --> wsproc : get()
+
+' Both validation paths call record_validated()
+wsproc -[#2980B9]-> memstore : record_validated()\n[src=WS]
+pfc -[#E74C3C]-> memstore : record_validated()\n[src=POLL]
+
+note right of memstore
+  Both paths deduplicate via
+  ValidationRecord deque:
+  (tx_hash, ledger_index) uniqueness check
+end note
+
+' Submission tasks access shared state
+t1 --> accrec : alloc_seq()\nrelease_seq()
+t2 --> accrec : alloc_seq()\nrelease_seq()
+tN --> accrec : alloc_seq()\nrelease_seq()
+
+t1 --> memstore : mark(CREATED)\nmark(SUBMITTED/REJECTED/...)
+t2 --> memstore : mark(...)
+tN --> memstore : mark(...)
+
+' Flush path
+cw --> sqlstore : flush_to_persistent_store()\nbulk_upsert() on shutdown
+
+' pfc also reads pending state
+pfc --> memstore : find_by_state(SUBMITTED, RETRYABLE)
+
+' WS listener needs accounts for subscription
+wslist ..> accrec : accounts_provider() callback\n(get_all_account_addresses)
+
+note bottom of queue
+  asyncio.Queue (unbounded)
+  Producer: ws_listener
+  Consumer: ws_processor
+  (single consumer, ordered delivery)
+end note
+
+note bottom of accrec
+  One asyncio.Lock per account address.
+  alloc_seq() acquires lock, increments
+  next_seq locally (fetches from ledger
+  only on first call or after cascade expire).
+  Invariant: seq N+1 never allocated
+  until seq N is in a terminal state.
+end note
+
+@enduml

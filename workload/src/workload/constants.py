@@ -52,8 +52,11 @@ RPC_TIMEOUT = 2.0
 SUBMIT_TIMEOUT = 20
 LOCK_TIMEOUT = 2.0
 
-TERMINAL_STATE: frozenset[TxState] = frozenset({TxState.VALIDATED, TxState.REJECTED, TxState.EXPIRED, TxState.FAILED_NET})
-PENDING_STATES: frozenset[TxState] = frozenset({TxState.CREATED, TxState.SUBMITTED, TxState.RETRYABLE})
+TERMINAL_STATE: frozenset[TxState] = frozenset({TxState.VALIDATED, TxState.REJECTED, TxState.EXPIRED})
+# FAILED_NET is intentionally excluded from TERMINAL_STATE: a timed-out submission may have
+# reached rippled and could still be queued. The account stays locked until the tx is either
+# seen validated on-chain or its LastLedgerSequence expires.
+PENDING_STATES: frozenset[TxState] = frozenset({TxState.CREATED, TxState.SUBMITTED, TxState.RETRYABLE, TxState.FAILED_NET})
 
 __all__ = [
     "ACCOUNT_ZERO",

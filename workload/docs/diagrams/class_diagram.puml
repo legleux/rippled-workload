@@ -1,0 +1,258 @@
+@startuml class_diagram
+title rippled-workload Class Diagram
+
+skinparam classBackgroundColor #EEF6FF
+skinparam classBorderColor #2980B9
+skinparam classHeaderBackgroundColor #2980B9
+skinparam classHeaderFontColor #FFFFFF
+skinparam ArrowColor #555555
+skinparam BackgroundColor #FAFAFA
+
+' ─────────────────────────────────────────────
+' Enums
+' ─────────────────────────────────────────────
+
+enum TxType <<StrEnum>> {
+    ACCOUNT_SET
+    AMM_CREATE
+    AMM_DEPOSIT
+    AMM_WITHDRAW
+    BATCH
+    MPTOKEN_ISSUANCE_CREATE
+    MPTOKEN_ISSUANCE_SET
+    MPTOKEN_AUTHORIZE
+    MPTOKEN_ISSUANCE_DESTROY
+    NFTOKEN_MINT
+    NFTOKEN_BURN
+    NFTOKEN_CREATE_OFFER
+    NFTOKEN_CANCEL_OFFER
+    NFTOKEN_ACCEPT_OFFER
+    OFFER_CREATE
+    OFFER_CANCEL
+    TICKET_CREATE
+    PAYMENT
+    TRUSTSET
+}
+
+enum TxState <<StrEnum>> {
+    CREATED
+    SUBMITTED
+    RETRYABLE
+    VALIDATED
+    REJECTED
+    EXPIRED
+    FAILED_NET
+}
+
+enum ValidationSrc <<StrEnum>> {
+    POLL
+    WS
+}
+
+' ─────────────────────────────────────────────
+' Dataclasses
+' ─────────────────────────────────────────────
+
+class PendingTx <<dataclass, slots=True>> {
+    + tx_hash: str
+    + signed_blob_hex: str
+    + account: str
+    + tx_json: dict
+    + sequence: int | None
+    + last_ledger_seq: int
+    + transaction_type: TxType | None
+    + created_ledger: int
+    + wallet: Wallet | None
+    + state: TxState
+    + attempts: int
+    + engine_result_first: str | None
+    + validated_ledger: int | None
+    + meta_txn_result: str | None
+    + created_at: float
+    + finalized_at: float | None
+    --
+    + __str__() -> str
+}
+
+class AccountRecord <<dataclass>> {
+    + lock: asyncio.Lock
+    + next_seq: int | None
+}
+
+class ValidationRecord <<dataclass>> {
+    + txn: str
+    + seq: int
+    + src: str
+}
+
+class FeeInfo <<dataclass>> {
+    + expected_ledger_size: int
+    + current_ledger_size: int
+    + current_queue_size: int
+    + max_queue_size: int
+    + base_fee: int
+    + median_fee: int
+    + minimum_fee: int
+    + open_ledger_fee: int
+    + ledger_current_index: int
+    --
+    + {static} from_fee_result(result: dict) -> FeeInfo
+}
+
+class DEXMetrics <<dataclass>> {
+    + pools_created: int
+    + total_deposits: int
+    + total_withdrawals: int
+    + total_offers: int
+    + pool_snapshots: list[dict]
+    + last_poll_ledger: int
+    + total_xrp_locked_drops: int
+    + active_pools: int
+}
+
+class TxnContext <<dataclass, slots=True>> {
+    + funding_wallet: Wallet
+    + wallets: Sequence[Wallet]
+    + currencies: Sequence[IssuedCurrency]
+    + config: dict
+    + base_fee_drops: AwaitInt
+    + next_sequence: AwaitSeq
+    + mptoken_issuance_ids: list[str] | None
+    + amm_pools: set[frozenset[str]] | None
+    + amm_pool_registry: list[dict] | None
+    + nfts: dict[str, str] | None
+    + offers: dict[str, dict] | None
+    + tickets: dict[str, set[int]] | None
+    + balances: dict | None
+    + disabled_types: set[str] | None
+    + forced_account: Wallet | None
+    --
+    + rand_accounts(n: int, omit: list[str] | None) -> list[Wallet]
+    + rand_account(omit: list[str] | None) -> Wallet
+    + get_account_currencies(account: Wallet) -> list[IssuedCurrency]
+    + rand_currency() -> IssuedCurrency
+    + rand_mptoken_id() -> str
+    + amm_pool_exists() -> bool
+    + rand_amm_pool() -> dict
+    + {static} build(...) -> TxnContext
+}
+
+' ─────────────────────────────────────────────
+' Classes
+' ─────────────────────────────────────────────
+
+class InMemoryStore {
+    - _lock: asyncio.Lock
+    - _records: dict[str, dict]
+    + validations: deque[ValidationRecord]
+    + count_by_state: dict[str, int]
+    + count_by_type: dict[str, int]
+    + validated_by_source: dict[str, int]
+    --
+    + get(tx_hash: str) -> dict | None
+    + mark(tx_hash: str, source: str | None, **fields) -> None
+    + rekey(old_hash: str, new_hash: str) -> None
+    + find_by_state(*states) -> list[dict]
+    + all_records() -> list[dict]
+    - _recount() -> None
+    - _update_counts(prev, new, type) -> None
+    + snapshot_stats() -> dict
+}
+
+class SQLiteStore {
+    + db_path: Path
+    - _lock: asyncio.Lock
+    + validations: deque[ValidationRecord]
+    + count_by_state: dict[str, int]
+    + validated_by_source: dict[str, int]
+    --
+    - _init_db() -> None
+    - _load_validations() -> None
+    - _recount() -> None
+    + bulk_upsert(records: list[dict]) -> None
+    + has_state() -> bool
+    + load_wallets() -> list[dict]
+    + load_currencies() -> list[IssuedCurrency]
+    + save_wallet(wallet: Wallet, ...) -> None
+    + save_currency(currency: IssuedCurrency) -> None
+    + snapshot_stats() -> dict
+}
+
+class AMMPoolRegistry {
+    - _pools: list[dict]
+    - _pool_ids: set[frozenset[str]]
+    --
+    + register(asset1: dict, asset2: dict, creator: str) -> None
+    + add_lp_holder(asset1: dict, asset2: dict, account: str) -> None
+    + {property} pools: list[dict]
+    + {property} pool_ids: set[frozenset[str]]
+    + __len__() -> int
+    + __bool__() -> bool
+}
+
+class BalanceTracker {
+    - _balances: dict[str, dict]
+    --
+    + get(account: str, currency: str, issuer: str | None) -> float
+    + set(account: str, currency: str, value: float, issuer: str | None) -> None
+    + update(account: str, currency: str, delta: float, issuer: str | None) -> None
+    + {property} data: dict
+}
+
+class Workload {
+    + config: dict
+    + client: AsyncJsonRpcClient
+    + funding_wallet: Wallet
+    + accounts: dict[str, AccountRecord]
+    + wallets: dict[str, Wallet]
+    + gateways: list[Wallet]
+    + users: list[Wallet]
+    + gateway_names: dict[str, str]
+    + pending: dict[str, PendingTx]
+    + store: InMemoryStore
+    + persistent_store: SQLiteStore | None
+    + amm: AMMPoolRegistry
+    + dex_metrics: DEXMetrics
+    + balance_tracker: BalanceTracker
+    + ctx: TxnContext
+    + target_txns_per_ledger: int
+    + max_pending_per_account: int
+    + workload_started: bool
+    + disabled_txn_types: set[str]
+    + latest_server_status: dict
+    --
+    + configure_txn_context(...) -> TxnContext
+    + update_txn_context() -> None
+    + get_all_account_addresses() -> list[str]
+    + alloc_seq(address: str) -> int
+    + release_seq(address: str) -> None
+    + build_sign_and_track(txn, wallet) -> PendingTx | None
+    + submit_pending(pending_tx: PendingTx) -> None
+    + record_validated(rec: ValidationRecord) -> None
+    + record_created(tx: PendingTx) -> None
+    + record_submitted(tx: PendingTx, result: str) -> None
+    + get_fee_info() -> FeeInfo
+    + flush_to_persistent_store() -> None
+}
+
+' ─────────────────────────────────────────────
+' Relationships
+' ─────────────────────────────────────────────
+
+Workload *-- InMemoryStore : store
+Workload *-- AMMPoolRegistry : amm
+Workload *-- DEXMetrics : dex_metrics
+Workload *-- BalanceTracker : balance_tracker
+Workload o-- SQLiteStore : persistent_store (optional)
+Workload *-- TxnContext : ctx
+Workload "1" *-- "0..*" PendingTx : pending: dict
+Workload "1" *-- "0..*" AccountRecord : accounts: dict
+
+TxnContext ..> Workload : callbacks (base_fee_drops, next_sequence)
+
+PendingTx --> TxState : state
+PendingTx --> TxType : transaction_type
+
+ValidationRecord --> ValidationSrc : src
+
+@enduml

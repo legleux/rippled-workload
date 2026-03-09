@@ -3,11 +3,11 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 
 import httpx
-import xrpl
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -32,11 +32,16 @@ except ImportError:
 import workload.constants as C
 from workload.config import cfg
 from workload.logging_config import setup_logging
-from workload.txn_factory.builder import generate_txn
-from workload.workload_core import Workload, periodic_dex_metrics, periodic_finality_check
+from workload.workload_core import PendingTx, Workload, periodic_dex_metrics, periodic_finality_check
 
 setup_logging()
 log = logging.getLogger("workload.app")
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Done callback: log unhandled exceptions from fire-and-forget tasks."""
+    if not task.cancelled() and (exc := task.exception()):
+        log.error("Task %r crashed: %s: %s", task.get_name(), type(exc).__name__, exc, exc_info=exc)
 
 if Path("/.dockerenv").is_file():
     rippled = cfg["rippled"]["docker"]
@@ -187,7 +192,7 @@ async def lifespan(app: FastAPI):
 
         log.info("Background tasks started: ws_listener, finality_checker, ws_processor, dex_metrics_poller")
 
-        log.info("Loading state from database...")
+        log.debug("Checking for persisted state...")
         state_loaded = app.state.workload.load_state_from_store()
 
         if state_loaded:
@@ -225,7 +230,7 @@ async def lifespan(app: FastAPI):
                     "Loaded from genesis: %s gateways, %s users, %s AMM pools",
                     len(app.state.workload.gateways),
                     len(app.state.workload.users),
-                    len(app.state.workload._amm_pool_registry),
+                    len(app.state.workload.amm.pools),
                 )
             else:
                 gw, u = cfg["gateways"], cfg["users"]
@@ -816,6 +821,7 @@ async def state_dashboard():
                 <button class="btn btn-start" onclick="fetch('/workload/start', {{method:'POST'}})">Start</button>
                 <button class="btn btn-stop" onclick="fetch('/workload/stop', {{method:'POST'}})">Stop</button>
                 <a class="link-btn" href="https://custom.xrpl.org/localhost:6006" target="_blank">XRPL Explorer</a>
+                <a class="link-btn" href="/logs/page" target="_blank">Logs</a>
                 <a class="link-btn" href="/docs" target="_blank">API Docs</a>
             </div>
 
@@ -827,13 +833,6 @@ async def state_dashboard():
             <div class="panel">
                 <h2>Transaction Control</h2>
                 <div style="display:flex;align-items:center;gap:20px;margin-bottom:12px;flex-wrap:wrap">
-                    <div class="fill-control">
-                        <label>Fill</label>
-                        <input type="range" id="fill-slider" min="0" max="100" value="50"
-                               oninput="document.getElementById('fill-val').textContent=this.value+'%'"
-                               onchange="fetch('/workload/fill-fraction',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{fill_fraction:this.value/100}})}})">
-                        <span class="fill-value" id="fill-val">50%</span>
-                    </div>
                     <div class="fill-control">
                         <label>Target txns/ledger</label>
                         <input type="number" id="target-txns-input" min="1" max="500" value="30"
@@ -1162,10 +1161,9 @@ async def state_dashboard():
 
         async function refreshStats() {{
             try {{
-                const [statsRes, feeRes, ffRes, ttRes, failedRes] = await Promise.all([
+                const [statsRes, feeRes, ttRes, failedRes] = await Promise.all([
                     fetch('/state/summary').then(r=>r.json()),
                     fetch('/state/fees').then(r=>r.json()),
-                    fetch('/workload/fill-fraction').then(r=>r.json()),
                     fetch('/workload/target-txns').then(r=>r.json()),
                     fetch('/state/failed').then(r=>r.json()),
                 ]);
@@ -1182,15 +1180,8 @@ async def state_dashboard():
 
                 // Subtitle
                 document.getElementById('subtitle').innerHTML =
-                    'Live monitoring &bull; Ledger ' + f.ledger_current_index +
-                    ' @ {hostname} &bull; <a href="https://custom.xrpl.org/localhost:6006" target="_blank">Explorer</a>';
+                    'Live monitoring &bull; Ledger ' + f.ledger_current_index + ' @ {hostname}';
 
-                // Fill slider (don't overwrite while user is dragging)
-                const slider = document.getElementById('fill-slider');
-                if (document.activeElement !== slider) {{
-                    slider.value = Math.round(ffRes.fill_fraction * 100);
-                    document.getElementById('fill-val').textContent = slider.value + '%';
-                }}
                 // Target txns input (don't overwrite while user is editing)
                 const ttInput = document.getElementById('target-txns-input');
                 if (document.activeElement !== ttInput) {{
@@ -1296,10 +1287,10 @@ async def state_failed_page(error_code: str):
     explorer_base = f"https://custom.xrpl.org/{hostname}:6006"
     rows = ""
     for f in filtered:
-        account = f.get('account', '')
+        account = f.get("account", "")
         account_cell = (
             f'<a href="{explorer_base}/accounts/{account}" target="_blank"><code>{account}</code></a>'
-            if account else ''
+            if account else ""
         )
         rows += (
             f"<tr>"
@@ -1514,93 +1505,158 @@ workload_task = None
 workload_stats = {"submitted": 0, "validated": 0, "failed": 0, "started_at": None}
 
 
+async def _txn_producer(queue: asyncio.Queue, wl: "Workload", stop_event: asyncio.Event) -> None:
+    """Background producer: continuously build and sign transactions into the queue.
+
+    Runs concurrently with the ledger-close consumer. Iterates free accounts, picks an
+    eligible txn type, builds, allocates sequence, signs, and enqueues the PendingTx.
+    record_created() is called inside build_sign_and_track, so the account immediately
+    appears as pending=1 — preventing double-allocation on the next producer iteration.
+    Yields (sleep(0)) when all accounts are occupied to avoid busy-looping.
+    """
+    from workload.txn_factory.builder import build_txn_dict, pick_eligible_txn_type, txn_model_cls
+
+    while not stop_event.is_set():
+        try:
+            fee_info = await wl.get_fee_info()
+        except Exception as e:
+            log.debug("producer: fee_info failed: %s", e)
+            await asyncio.sleep(0.1)
+            continue
+
+        batch_fee = fee_info.minimum_fee
+        batch_ledger = fee_info.ledger_current_index
+        batch_lls = batch_ledger + C.HORIZON
+
+        pending_counts = wl.get_pending_txn_counts_by_account()
+        free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
+
+        built_any = False
+        for addr in free_accounts:
+            if queue.full():
+                break
+
+            wallet = wl.wallets[addr]
+            txn_type = pick_eligible_txn_type(wallet, wl.ctx)
+            if txn_type is None:
+                continue
+
+            ctx = replace(wl.ctx, forced_account=wallet)
+            composed = build_txn_dict(txn_type, ctx)
+            if composed is None:
+                continue
+
+            txn = txn_model_cls(txn_type).from_xrpl(composed)
+
+            try:
+                seq = await wl.alloc_seq(wallet.address)
+            except Exception as e:
+                log.warning("producer alloc_seq %s: %s", addr[:8], e)
+                continue
+
+            try:
+                pending = await wl.build_sign_and_track(
+                    txn, wallet,
+                    fee_drops=batch_fee,
+                    created_ledger=batch_ledger,
+                    last_ledger_seq=batch_lls,
+                    preallocated_seq=seq,
+                )
+                await queue.put(pending)
+                built_any = True
+            except Exception as e:
+                await wl.release_seq(wallet.address, seq)
+                log.warning("producer sign %s/%s: %s", addr[:8], txn_type, e)
+                continue
+
+        if not built_any:
+            await asyncio.sleep(0)  # yield to event loop without busy-spinning
+
+
 async def continuous_workload():
-    """Continuously submit XRP payments, respecting 1 pending txn per account.
+    """Continuously submit transactions, one per account per batch.
 
-    Key constraint: Only ONE transaction per account can be in-flight at a time.
-    This prevents sequence number conflicts entirely - no resyncs needed.
+    Architecture: producer-consumer split.
+    - _txn_producer (background task): picks eligible accounts, builds+signs txns, enqueues them.
+    - consumer loop (this coroutine): fires on each new ledger close, drains the queue,
+      validates generation freshness, then submits all in parallel via TaskGroup.
 
-    We can still submit many transactions in PARALLEL as long as each is from
-    a different account.
-
-    Uses XRP-only payments for simplicity and predictable base fees.
+    Sequence safety invariant: an account is only picked when it has zero in-flight
+    transactions. record_created() is called at build time, so pending_count is 1
+    immediately after building — the producer never double-allocates a sequence.
+    Generation counter on AccountRecord detects stale pre-signed txns (built before a
+    cascade-expire reset the account sequence) and discards them before submission.
     """
     from workload.randoms import random
-
-    from xrpl.models.transactions import Payment
 
     global workload_stats
     wl = app.state.workload
 
-    log.debug("🚀 Continuous workload started (XRP payments only)")
+    log.debug("Continuous workload started")
     workload_stats["started_at"] = perf_counter()
 
+    last_batch_ledger = 0
+    queue_size = wl.target_txns_per_ledger * 2
+    txn_queue: asyncio.Queue[PendingTx] = asyncio.Queue(maxsize=queue_size)
+
+    producer_task = asyncio.create_task(
+        _txn_producer(txn_queue, wl, workload_stop_event),
+        name="txn_producer",
+    )
+    producer_task.add_done_callback(_log_task_exception)
+
     try:
-        from workload.txn_factory.builder import generate_txn
-
         while not workload_stop_event.is_set():
-            # Fetch fee info once per batch — gives us fee, ledger index, and capacity
             fee_info = await wl.get_fee_info()
-            batch_fee = fee_info.minimum_fee
             batch_ledger = fee_info.ledger_current_index
-            batch_lls = batch_ledger + C.HORIZON
 
-            # Occasionally create a new account (grows the account pool)
+            # Ledger-driven: one batch per new ledger close.
+            # Ensures queued txns from the previous ledger are applied before re-sampling sequences.
+            if batch_ledger == last_batch_ledger:
+                await asyncio.sleep(0.1)
+                continue
+            last_batch_ledger = batch_ledger
+
+            # Occasionally grow the account pool via a funding Payment
             if random() < 0.50 and "Payment" not in wl.disabled_txn_types:
                 funding_pending = wl.get_pending_txn_counts_by_account().get(wl.funding_wallet.address, 0)
                 if funding_pending == 0:
                     try:
                         default_balance = wl.config["users"]["default_balance"]
                         large_balance = str(int(default_balance) * 10)
-                        result = await wl.create_account(initial_xrp_drops=large_balance)
+                        await wl.create_account(initial_xrp_drops=large_balance)
                         workload_stats["submitted"] += 1
                     except Exception as e:
                         log.debug("Failed to create new account: %s", e)
                         workload_stats["failed"] += 1
 
-            # Compute available slots
-            pending_counts = wl.get_pending_txn_counts_by_account()
-            available_accounts = [
-                addr for addr in wl.wallets
-                if pending_counts.get(addr, 0) < wl.max_pending_per_account
-            ]
-            total_available_slots = sum(
-                wl.max_pending_per_account - pending_counts.get(addr, 0)
-                for addr in available_accounts
-            )
-            batch_size = min(total_available_slots, wl.target_txns_per_ledger)
+            # Drain queue up to target, discarding stale txns (generation mismatch)
+            target = wl.target_txns_per_ledger
+            pending_batch: list[PendingTx] = []
+            while len(pending_batch) < target and not txn_queue.empty():
+                p = txn_queue.get_nowait()
+                rec = wl._record_for(p.account)
+                async with rec.lock:
+                    if rec.generation != p.account_generation:
+                        await wl.record_expired(p.tx_hash)
+                        log.debug(
+                            "consumer: stale tx %s gen=%d != %d, expired",
+                            p.tx_hash[:8], p.account_generation, rec.generation,
+                        )
+                        continue
+                pending_batch.append(p)
 
-            if batch_size == 0:
-                # All accounts saturated — yield to let validations clear pending slots
-                await asyncio.sleep(0.3)
+            if not pending_batch:
                 continue
 
             log.info(
-                "Building batch: %d txns (%d accounts, %d slots, cap=%d, fee=%d, ledger=%d)",
-                batch_size, len(available_accounts), total_available_slots,
-                wl.target_txns_per_ledger, batch_fee, batch_ledger,
+                "Batch: %d txns, ledger=%d, total_wallets=%d",
+                len(pending_batch), batch_ledger, len(wl.wallets),
             )
-
-            # Pre-filter: only give the builder accounts with available slots
-            wl.ctx.wallets = [wl.wallets[addr] for addr in available_accounts]
-
-            # Build and submit in one parallel pass.
-            # Each task: generate_txn → build_sign_and_track → submit_pending
-            async def _build_and_submit() -> dict | None:
-                try:
-                    txn = await generate_txn(wl.ctx)
-                    pending = await wl.build_sign_and_track(
-                        txn, wl.wallets[txn.account],
-                        fee_drops=batch_fee, created_ledger=batch_ledger, last_ledger_seq=batch_lls,
-                    )
-                    return await wl.submit_pending(pending)
-                except Exception as e:
-                    log.debug("Build/submit failed: %s", e)
-                    return None
 
             try:
                 async with asyncio.TaskGroup() as tg:
-                    tasks = [tg.create_task(_build_and_submit()) for _ in range(batch_size)]
+                    tasks = [tg.create_task(wl.submit_pending(p)) for p in pending_batch]
 
                 submitted = 0
                 failed = 0
@@ -1612,28 +1668,30 @@ async def continuous_workload():
                         errors["build_failed"] = errors.get("build_failed", 0) + 1
                     else:
                         er = result.get("engine_result")
-                        if er and er.startswith(("ter", "tem", "tef", "tel")):
+                        # terQUEUED = accepted into rippled queue (will apply next ledger) — counts as ok
+                        if er and er not in ("terQUEUED",) and er.startswith(("ter", "tem", "tef", "tel")):
                             failed += 1
                             errors[er] = errors.get(er, 0) + 1
                         else:
                             submitted += 1
                 workload_stats["submitted"] += submitted
                 workload_stats["failed"] += failed
-                if errors:
-                    log.warning("Batch results: %d submitted, %d failed — %s", submitted, failed, errors)
+                log.warning("Batch result: %d ok, %d failed — errors=%s", submitted, failed, errors or None)
             except* Exception as eg:
                 for exc in eg.exceptions:
                     log.error("Batch error: %s: %s", type(exc).__name__, exc)
-                workload_stats["failed"] += batch_size
-
-            # No ledger-wait — loop immediately to fill the next batch.
-            # rippled's transaction queue handles pacing; we just keep it fed.
+                workload_stats["failed"] += len(pending_batch)
 
     except asyncio.CancelledError:
         log.debug("Continuous workload cancelled")
         raise
     finally:
-        log.debug(f"🛑 Continuous workload stopped - Stats: {workload_stats}")
+        producer_task.cancel()
+        try:
+            await producer_task
+        except asyncio.CancelledError:
+            pass
+        log.debug("Continuous workload stopped — stats: %s", workload_stats)
 
 
 @r_workload.post("/start")
@@ -1648,7 +1706,8 @@ async def start_workload():
 
     log.info("Starting workload")
     workload_stop_event = asyncio.Event()
-    workload_task = asyncio.create_task(continuous_workload())
+    workload_task = asyncio.create_task(continuous_workload(), name="continuous_workload")
+    workload_task.add_done_callback(_log_task_exception)
     workload_running = True
     app.state.workload.workload_started = True
 
@@ -1684,51 +1743,6 @@ async def workload_status():
         "running": workload_running,
         "stats": workload_stats,
         "uptime_seconds": perf_counter() - workload_stats["started_at"] if workload_stats["started_at"] else 0,
-    }
-
-
-@r_workload.get("/fill-fraction")
-async def get_fill_fraction():
-    """Get current ledger fill fraction for continuous workload.
-
-    Returns the fraction (0.0 to 1.0) of expected_ledger_size used for batch sizing.
-    Lower values = smoother distribution across ledgers, higher = more aggressive filling.
-    """
-    return {
-        "fill_fraction": app.state.workload.ledger_fill_fraction,
-        "description": "Fraction of ledger_size to fill per batch (0.0 to 1.0)",
-        "recommendation": "0.3-0.4 = conservative/smooth, 0.5 = balanced, 0.7-0.8 = aggressive",
-    }
-
-
-class FillFractionReq(BaseModel):
-    fill_fraction: float
-
-
-@r_workload.post("/fill-fraction")
-async def set_fill_fraction(req: FillFractionReq):
-    """Set ledger fill fraction for continuous workload.
-
-    Controls batch size as fraction of expected_ledger_size.
-    - Lower (0.3-0.4): More conservative, smoother distribution, less throughput
-    - Medium (0.5): Balanced approach
-    - Higher (0.7-0.8): More aggressive, higher throughput, risk of gaps
-
-    Takes effect immediately on next batch.
-    """
-    if not 0.0 < req.fill_fraction <= 1.0:
-        raise HTTPException(status_code=400, detail="fill_fraction must be between 0.0 and 1.0")
-
-    old_value = app.state.workload.ledger_fill_fraction
-    app.state.workload.ledger_fill_fraction = req.fill_fraction
-
-    log.info(f"ledger_fill_fraction changed: {old_value} -> {app.state.workload.ledger_fill_fraction}")
-
-    return {
-        "old_value": old_value,
-        "new_value": app.state.workload.ledger_fill_fraction,
-        "status": "updated",
-        "note": "Change takes effect on next workload batch",
     }
 
 
@@ -1926,8 +1940,8 @@ async def dex_pools():
     """List all tracked AMM pools."""
     w: Workload = app.state.workload
     return {
-        "total_pools": len(w._amm_pool_registry),
-        "pools": w._amm_pool_registry,
+        "total_pools": len(w.amm.pools),
+        "pools": w.amm.pools,
     }
 
 
@@ -1938,10 +1952,10 @@ async def dex_pool_detail(index: int):
     from xrpl.models.requests import AMMInfo
 
     w: Workload = app.state.workload
-    if index >= len(w._amm_pool_registry):
+    if index >= len(w.amm.pools):
         raise HTTPException(status_code=404, detail=f"Pool index {index} not found")
 
-    pool = w._amm_pool_registry[index]
+    pool = w.amm.pools[index]
     asset1, asset2 = pool["asset1"], pool["asset2"]
 
     if asset1.get("currency") == "XRP":
@@ -1977,3 +1991,103 @@ app.include_router(r_state)
 app.include_router(r_workload)
 app.include_router(r_dex)
 app.include_router(r_network)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logs
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LOG_FILE = Path("/tmp/workload.log")
+_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+
+@app.get("/logs", tags=["Logs"])
+async def get_logs(n: int = 200, level: str | None = None):
+    """Return the last n log lines, optionally filtered to a minimum level."""
+    if not _LOG_FILE.exists():
+        return {"lines": [], "file": str(_LOG_FILE)}
+
+    level = level.upper() if level else None
+    if level and level not in _LOG_LEVELS:
+        raise HTTPException(status_code=400, detail=f"level must be one of {_LOG_LEVELS}")
+
+    lines = _LOG_FILE.read_text(errors="replace").splitlines()
+
+    if level:
+        priority = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        min_idx = priority.index(level)
+        lines = [l for l in lines if any(f" {lvl} " in l or f" {lvl:<8}" in l for lvl in priority[min_idx:])]
+
+    return {"lines": lines[-n:], "total_matching": len(lines), "file": str(_LOG_FILE)}
+
+
+@app.get("/logs/page", response_class=HTMLResponse, tags=["Logs"])
+async def logs_page(n: int = 300, level: str = "WARNING"):
+    """Live log viewer — auto-refreshes every 3 seconds."""
+    level_opts = "".join(
+        f'<option value="{lv}"{" selected" if lv == level else ""}>{lv}</option>'
+        for lv in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>workload logs</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font: 13px/1.5 "Fira Mono", "Cascadia Code", monospace; background: #0d1117; color: #c9d1d9; }}
+  header {{ display: flex; align-items: center; gap: 1rem; padding: 0.6rem 1rem;
+            background: #161b22; border-bottom: 1px solid #30363d; }}
+  header h1 {{ font-size: 0.95rem; color: #58a6ff; }}
+  select, input {{ background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+                   border-radius: 4px; padding: 0.2rem 0.4rem; font: inherit; }}
+  label {{ font-size: 0.8rem; color: #8b949e; }}
+  #log {{ padding: 0.8rem 1rem; white-space: pre-wrap; word-break: break-all; }}
+  .WARNING {{ color: #d29922; }}
+  .ERROR   {{ color: #f85149; }}
+  .CRITICAL {{ color: #ff7b72; font-weight: bold; }}
+  .DEBUG   {{ color: #6e7681; }}
+  .INFO    {{ color: #c9d1d9; }}
+  #status  {{ margin-left: auto; font-size: 0.75rem; color: #6e7681; }}
+</style>
+</head>
+<body>
+<header>
+  <h1>workload logs</h1>
+  <label>Min level
+    <select id="lvl" onchange="reload()">{level_opts}</select>
+  </label>
+  <label>Lines
+    <input type="number" id="nlines" value="{n}" min="10" max="2000" style="width:5rem" onchange="reload()">
+  </label>
+  <span id="status">loading...</span>
+</header>
+<div id="log"></div>
+<script>
+  function levelClass(line) {{
+    for (const lv of ['CRITICAL','ERROR','WARNING','INFO','DEBUG'])
+      if (line.includes(' ' + lv + ' ') || line.includes(lv.padEnd(8))) return lv;
+    return '';
+  }}
+  async function reload() {{
+    const lv = document.getElementById('lvl').value;
+    const n  = document.getElementById('nlines').value;
+    try {{
+      const r = await fetch(`/logs?n=${{n}}&level=${{lv}}`);
+      const d = await r.json();
+      const html = d.lines.map(l => {{
+        const cls = levelClass(l);
+        const esc = l.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+        return cls ? `<span class="${{cls}}">${{esc}}</span>` : esc;
+      }}).join('\\n');
+      document.getElementById('log').innerHTML = html;
+      document.getElementById('status').textContent =
+        `${{d.lines.length}} lines shown / ${{d.total_matching}} matching — ${{new Date().toLocaleTimeString()}}`;
+      window.scrollTo(0, document.body.scrollHeight);
+    }} catch(e) {{ document.getElementById('status').textContent = 'fetch error: ' + e; }}
+  }}
+  reload();
+  setInterval(reload, 3000);
+</script>
+</body>
+</html>"""

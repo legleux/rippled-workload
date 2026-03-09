@@ -1,0 +1,80 @@
+@startuml module_dependencies
+title rippled-workload Module Dependencies
+
+skinparam componentStyle rectangle
+skinparam ArrowColor #555555
+skinparam BackgroundColor #FAFAFA
+skinparam ComponentBackgroundColor #E8F4FD
+skinparam ComponentBorderColor #2980B9
+skinparam PackageBackgroundColor #F0F8F0
+skinparam PackageBorderColor #27AE60
+
+package "Entry Point" {
+    component [app.py] as app
+}
+
+package "Core Logic" {
+    component [workload_core.py] as core
+    component [ws_processor.py] as wsproc
+}
+
+package "Infrastructure" {
+    component [sqlite_store.py] as sqlite
+    component [ws.py] as ws
+}
+
+package "Transaction Factory" {
+    component [txn_factory/builder.py] as builder
+}
+
+package "Domain / Data" {
+    component [constants.py] as constants
+    component [validation.py] as validation
+    component [amm.py] as amm
+    component [balances.py] as balances
+    component [fee_info.py] as feeinfo
+    component [randoms.py] as randoms
+    component [config.py] as config
+    component [logging_config.py] as logcfg
+}
+
+' app.py dependencies
+app --> core
+app --> ws
+app --> wsproc
+app --> constants
+app --> config
+app --> logcfg
+
+' workload_core.py dependencies
+core --> constants
+core --> validation
+core --> amm
+core --> balances
+core --> sqlite
+core --> builder
+
+' sqlite_store.py dependencies
+sqlite --> constants
+sqlite --> validation
+
+' ws_processor.py dependencies
+wsproc --> validation
+note on link
+  workload_core only via
+  TYPE_CHECKING
+end note
+
+' txn_factory/builder.py dependencies
+builder --> randoms
+
+' Leaf nodes (no intra-package imports)
+note bottom of ws : No intra-package\nimports
+note bottom of constants : Leaf node
+note bottom of validation : Leaf node
+note bottom of amm : Leaf node
+note bottom of balances : Leaf node
+note bottom of feeinfo : Leaf node
+note bottom of randoms : Leaf node
+
+@enduml

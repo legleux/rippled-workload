@@ -51,10 +51,12 @@ BTC = 1_000_000_000
 ########### Transaction context defaults #############
 ######################################################
 [transactions]
-# Maximum pending transactions per account (rippled queue limit)
-# Higher values = more throughput but more risk of sequence errors
-# Default: 10 (matches rippled's per-account queue limit) #TODO: Confirm in docs/source/Slack if this is still accurate
-max_pending_per_account = 10
+# Must be 1. An account's next sequence is only allocated after the previous
+# transaction is terminal. Raising this causes tefPAST_SEQ: if any in-flight
+# txn fails without advancing the ledger sequence (tem*/tel*/FAILED_NET),
+# cascade-expire resets next_seq, conflicting with txns already in rippled's queue.
+# To raise throughput, grow the account pool (see README Throughput Tuning).
+max_pending_per_account = 1
 
 # Disable specific transaction types (all types in _BUILDERS are enabled by default)
 disabled = [
@@ -77,7 +79,7 @@ transfer_fee = 1000
 amount = 10_000_000
 
 [transactions.trustset]
-limit = 100_000_000_000_000000
+limit = 1_000_000_000_000_000  # 1e15 — max representable IOU mantissa, safely within xrpl-py codec range
 
 [timeout]
 overall = 6
