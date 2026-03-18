@@ -387,9 +387,13 @@ class Workload:
 
         log.info("Loading from genesis: %d accounts (%d gateways, %d users)", len(account_data), gateway_count, user_count)
 
-        # Build wallets from seeds
+        # Build wallets from seeds — detect algorithm from seed prefix
         for i, (address, seed) in enumerate(account_data):
-            w = Wallet.from_seed(seed, algorithm=xrpl.CryptoAlgorithm.SECP256K1)
+            algo = xrpl.CryptoAlgorithm.ED25519 if seed.startswith("sEd") else xrpl.CryptoAlgorithm.SECP256K1
+            w = Wallet.from_seed(seed, algorithm=algo)
+            if w.address != address:
+                log.error("Address mismatch for account %d: expected %s, derived %s (algo=%s)", i, address, w.address, algo.value)
+                continue
             self.wallets[w.address] = w
             self._record_for(w.address)
 
@@ -541,7 +545,7 @@ class Workload:
                 ai = await self._rpc(AccountInfo(account=addr, ledger_index="validated", strict=True))
                 acct = ai.result.get("account_data")
                 if acct is None:
-                    raise RuntimeError(f"Account {addr[:12]}... not found on ledger (unfunded?)")
+                    raise RuntimeError(f"Account {addr} not found on ledger (unfunded?)")
                 rec.next_seq = acct["Sequence"]
                 log.info("ALLOC_SEQ_FIRST: %s fetched seq=%d from current ledger", addr[:12], rec.next_seq)
 

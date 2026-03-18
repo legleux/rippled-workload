@@ -346,8 +346,8 @@ wheels = [
 
 [[package]]
 name = "generate-ledger"
-version = "0.0.4a4"
-source = { editable = "../../generate_ledger" }
+version = "0.0.4b1"
+source = { editable = "../../generate_ledger-synthesis" }
 dependencies = [
     { name = "base58" },
     { name = "click" },
@@ -1230,7 +1230,7 @@ requires-dist = [
     { name = "asyncio", specifier = ">=4.0.0" },
     { name = "complexipy", specifier = ">=5.2.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.116.1" },
-    { name = "generate-ledger", editable = "../../generate_ledger" },
+    { name = "generate-ledger", editable = "../../generate_ledger-synthesis" },
     { name = "names", specifier = ">=0.3.0" },
     { name = "pydantic-settings", specifier = ">=2.11.0" },
     { name = "requests", specifier = ">=2.32.4" },

@@ -61,7 +61,8 @@ indent-style = "space"
 docstring-code-format = true
 
 [tool.uv.sources]
-generate-ledger = { path = "../../generate_ledger", editable = true }
+generate-ledger = { path = "../../generate_ledger-synthesis", editable = true }
+#generate-ledger = { path = "../../generate_ledger", editable = true }
 
 [dependency-groups]
 dev = [

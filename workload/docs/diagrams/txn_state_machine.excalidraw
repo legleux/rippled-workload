@@ -38,7 +38,6 @@
       "originalText": "XRPL Transaction State Machine",
       "lineHeight": 1.25
     },
-
     {
       "id": "state-created",
       "type": "rectangle",
@@ -56,14 +55,22 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 101,
       "version": 1,
       "versionNonce": 101,
       "isDeleted": false,
       "boundElements": [
-        { "type": "text", "id": "state-created-text" },
-        { "type": "arrow", "id": "arrow-created-submitted" }
+        {
+          "type": "text",
+          "id": "state-created-text"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-created-submitted"
+        }
       ],
       "updated": 1,
       "link": null,
@@ -104,7 +111,6 @@
       "originalText": "CREATED",
       "lineHeight": 1.25
     },
-
     {
       "id": "state-submitted",
       "type": "rectangle",
@@ -122,20 +128,46 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 103,
       "version": 1,
       "versionNonce": 103,
       "isDeleted": false,
       "boundElements": [
-        { "type": "text", "id": "state-submitted-text" },
-        { "type": "arrow", "id": "arrow-created-submitted" },
-        { "type": "arrow", "id": "arrow-submitted-retryable" },
-        { "type": "arrow", "id": "arrow-retryable-submitted" },
-        { "type": "arrow", "id": "arrow-submitted-validated" },
-        { "type": "arrow", "id": "arrow-submitted-rejected" },
-        { "type": "arrow", "id": "arrow-submitted-expired" },
-        { "type": "arrow", "id": "arrow-submitted-failednet" }
+        {
+          "type": "text",
+          "id": "state-submitted-text"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-created-submitted"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-submitted-retryable"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-retryable-submitted"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-submitted-validated"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-submitted-rejected"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-submitted-expired"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-submitted-failednet"
+        }
       ],
       "updated": 1,
       "link": null,
@@ -176,7 +208,6 @@
       "originalText": "SUBMITTED",
       "lineHeight": 1.25
     },
-
     {
       "id": "state-retryable",
       "type": "rectangle",
@@ -194,16 +225,30 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 105,
       "version": 1,
       "versionNonce": 105,
       "isDeleted": false,
       "boundElements": [
-        { "type": "text", "id": "state-retryable-text" },
-        { "type": "arrow", "id": "arrow-submitted-retryable" },
-        { "type": "arrow", "id": "arrow-retryable-submitted" },
-        { "type": "arrow", "id": "arrow-retryable-expired" }
+        {
+          "type": "text",
+          "id": "state-retryable-text"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-submitted-retryable"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-retryable-submitted"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-retryable-expired"
+        }
       ],
       "updated": 1,
       "link": null,
@@ -244,7 +289,6 @@
       "originalText": "RETRYABLE",
       "lineHeight": 1.25
     },
-
     {
       "id": "state-validated",
       "type": "rectangle",
@@ -262,16 +306,34 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 107,
       "version": 1,
       "versionNonce": 107,
       "isDeleted": false,
       "boundElements": [
-        { "type": "text", "id": "state-validated-text" },
-        { "type": "arrow", "id": "arrow-submitted-validated" },
-        { "type": "arrow", "id": "arrow-ws-processor-validated" },
-        { "type": "arrow", "id": "arrow-poll-validated" }
+        {
+          "type": "text",
+          "id": "state-validated-text"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-submitted-validated"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-ws-processor-validated"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-poll-validated"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-failednet-validated"
+        }
       ],
       "updated": 1,
       "link": null,
@@ -312,7 +374,6 @@
       "originalText": "VALIDATED\n(terminal)",
       "lineHeight": 1.25
     },
-
     {
       "id": "state-rejected",
       "type": "rectangle",
@@ -330,14 +391,22 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 109,
       "version": 1,
       "versionNonce": 109,
       "isDeleted": false,
       "boundElements": [
-        { "type": "text", "id": "state-rejected-text" },
-        { "type": "arrow", "id": "arrow-submitted-rejected" }
+        {
+          "type": "text",
+          "id": "state-rejected-text"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-submitted-rejected"
+        }
       ],
       "updated": 1,
       "link": null,
@@ -378,7 +447,6 @@
       "originalText": "REJECTED\n(terminal)",
       "lineHeight": 1.25
     },
-
     {
       "id": "state-expired",
       "type": "rectangle",
@@ -396,15 +464,30 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 111,
       "version": 1,
       "versionNonce": 111,
       "isDeleted": false,
       "boundElements": [
-        { "type": "text", "id": "state-expired-text" },
-        { "type": "arrow", "id": "arrow-submitted-expired" },
-        { "type": "arrow", "id": "arrow-retryable-expired" }
+        {
+          "type": "text",
+          "id": "state-expired-text"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-submitted-expired"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-retryable-expired"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-failednet-expired"
+        }
       ],
       "updated": 1,
       "link": null,
@@ -445,7 +528,6 @@
       "originalText": "EXPIRED\n(terminal)",
       "lineHeight": 1.25
     },
-
     {
       "id": "state-failednet",
       "type": "rectangle",
@@ -454,23 +536,39 @@
       "width": 200,
       "height": 70,
       "angle": 0,
-      "strokeColor": "#862e9c",
-      "backgroundColor": "#e599f7",
+      "strokeColor": "#e8590c",
+      "backgroundColor": "#ffd8a8",
       "fillStyle": "solid",
-      "strokeWidth": 3,
+      "strokeWidth": 2,
       "strokeStyle": "solid",
       "roughness": 1,
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 113,
       "version": 1,
       "versionNonce": 113,
       "isDeleted": false,
       "boundElements": [
-        { "type": "text", "id": "state-failednet-text" },
-        { "type": "arrow", "id": "arrow-submitted-failednet" }
+        {
+          "type": "text",
+          "id": "state-failednet-text"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-submitted-failednet"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-failednet-validated"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-failednet-expired"
+        }
       ],
       "updated": 1,
       "link": null,
@@ -480,9 +578,9 @@
       "id": "state-failednet-text",
       "type": "text",
       "x": 965,
-      "y": 455,
+      "y": 465,
       "width": 190,
-      "height": 40,
+      "height": 20,
       "angle": 0,
       "strokeColor": "#1e1e1e",
       "backgroundColor": "transparent",
@@ -502,16 +600,15 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "text": "FAILED_NET\n(terminal)",
+      "text": "FAILED_NET",
       "fontSize": 16,
       "fontFamily": 1,
       "textAlign": "center",
       "verticalAlign": "middle",
       "containerId": "state-failednet",
-      "originalText": "FAILED_NET\n(terminal)",
+      "originalText": "FAILED_NET",
       "lineHeight": 1.25
     },
-
     {
       "id": "src-ws-listener",
       "type": "rectangle",
@@ -529,14 +626,22 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 115,
       "version": 1,
       "versionNonce": 115,
       "isDeleted": false,
       "boundElements": [
-        { "type": "text", "id": "src-ws-listener-text" },
-        { "type": "arrow", "id": "arrow-ws-listener-queue" }
+        {
+          "type": "text",
+          "id": "src-ws-listener-text"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-ws-listener-queue"
+        }
       ],
       "updated": 1,
       "link": null,
@@ -577,7 +682,6 @@
       "originalText": "ws_listener",
       "lineHeight": 1.25
     },
-
     {
       "id": "src-event-queue",
       "type": "rectangle",
@@ -595,15 +699,26 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 117,
       "version": 1,
       "versionNonce": 117,
       "isDeleted": false,
       "boundElements": [
-        { "type": "text", "id": "src-event-queue-text" },
-        { "type": "arrow", "id": "arrow-ws-listener-queue" },
-        { "type": "arrow", "id": "arrow-queue-processor" }
+        {
+          "type": "text",
+          "id": "src-event-queue-text"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-ws-listener-queue"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-queue-processor"
+        }
       ],
       "updated": 1,
       "link": null,
@@ -644,7 +759,6 @@
       "originalText": "event queue",
       "lineHeight": 1.25
     },
-
     {
       "id": "src-ws-processor",
       "type": "rectangle",
@@ -662,15 +776,26 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 119,
       "version": 1,
       "versionNonce": 119,
       "isDeleted": false,
       "boundElements": [
-        { "type": "text", "id": "src-ws-processor-text" },
-        { "type": "arrow", "id": "arrow-queue-processor" },
-        { "type": "arrow", "id": "arrow-ws-processor-validated" }
+        {
+          "type": "text",
+          "id": "src-ws-processor-text"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-queue-processor"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-ws-processor-validated"
+        }
       ],
       "updated": 1,
       "link": null,
@@ -711,7 +836,6 @@
       "originalText": "ws_processor",
       "lineHeight": 1.25
     },
-
     {
       "id": "src-poll",
       "type": "rectangle",
@@ -729,14 +853,22 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 121,
       "version": 1,
       "versionNonce": 121,
       "isDeleted": false,
       "boundElements": [
-        { "type": "text", "id": "src-poll-text" },
-        { "type": "arrow", "id": "arrow-poll-validated" }
+        {
+          "type": "text",
+          "id": "src-poll-text"
+        },
+        {
+          "type": "arrow",
+          "id": "arrow-poll-validated"
+        }
       ],
       "updated": 1,
       "link": null,
@@ -777,7 +909,6 @@
       "originalText": "periodic_finality_check\n(every 5s)",
       "lineHeight": 1.25
     },
-
     {
       "id": "label-ws-path",
       "type": "text",
@@ -848,7 +979,6 @@
       "originalText": "RPC Poll Path (fallback)",
       "lineHeight": 1.25
     },
-
     {
       "id": "arrow-created-submitted",
       "type": "arrow",
@@ -875,19 +1005,34 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [0, 90]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          90
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "state-created",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 1]
+        "fixedPoint": [
+          0.5,
+          1
+        ]
       },
       "endBinding": {
         "elementId": "state-submitted",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 0]
+        "fixedPoint": [
+          0.5,
+          0
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
@@ -928,7 +1073,6 @@
       "originalText": "submit_pending",
       "lineHeight": 1.25
     },
-
     {
       "id": "arrow-submitted-retryable",
       "type": "arrow",
@@ -955,19 +1099,34 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [-100, 0]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -100,
+          0
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "state-submitted",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0, 0.5]
+        "fixedPoint": [
+          0,
+          0.5
+        ]
       },
       "endBinding": {
         "elementId": "state-retryable",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [1, 0.5]
+        "fixedPoint": [
+          1,
+          0.5
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
@@ -1008,7 +1167,6 @@
       "originalText": "ter* codes",
       "lineHeight": 1.25
     },
-
     {
       "id": "arrow-retryable-submitted",
       "type": "arrow",
@@ -1035,19 +1193,34 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [100, 0]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          100,
+          0
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "state-retryable",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [1, 0.5]
+        "fixedPoint": [
+          1,
+          0.5
+        ]
       },
       "endBinding": {
         "elementId": "state-submitted",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0, 0.5]
+        "fixedPoint": [
+          0,
+          0.5
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
@@ -1088,7 +1261,6 @@
       "originalText": "retry",
       "lineHeight": 1.25
     },
-
     {
       "id": "arrow-submitted-validated",
       "type": "arrow",
@@ -1115,19 +1287,38 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [60, 0], [60, 150]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          60,
+          0
+        ],
+        [
+          60,
+          150
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "state-submitted",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.2, 1]
+        "fixedPoint": [
+          0.2,
+          1
+        ]
       },
       "endBinding": {
         "elementId": "state-validated",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 0]
+        "fixedPoint": [
+          0.5,
+          0
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
@@ -1168,7 +1359,6 @@
       "originalText": "WS or POLL\nconfirmed",
       "lineHeight": 1.25
     },
-
     {
       "id": "arrow-submitted-rejected",
       "type": "arrow",
@@ -1195,19 +1385,38 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [280, 0], [280, 150]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          280,
+          0
+        ],
+        [
+          280,
+          150
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "state-submitted",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.4, 1]
+        "fixedPoint": [
+          0.4,
+          1
+        ]
       },
       "endBinding": {
         "elementId": "state-rejected",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 0]
+        "fixedPoint": [
+          0.5,
+          0
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
@@ -1248,7 +1457,6 @@
       "originalText": "tem/tef codes",
       "lineHeight": 1.25
     },
-
     {
       "id": "arrow-submitted-expired",
       "type": "arrow",
@@ -1275,19 +1483,38 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [-300, 0], [-300, 150]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -300,
+          0
+        ],
+        [
+          -300,
+          150
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "state-submitted",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.6, 1]
+        "fixedPoint": [
+          0.6,
+          1
+        ]
       },
       "endBinding": {
         "elementId": "state-expired",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 0]
+        "fixedPoint": [
+          0.5,
+          0
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
@@ -1328,7 +1555,6 @@
       "originalText": "past LastLedgerSeq",
       "lineHeight": 1.25
     },
-
     {
       "id": "arrow-submitted-failednet",
       "type": "arrow",
@@ -1355,19 +1581,38 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [440, 0], [440, 150]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          440,
+          0
+        ],
+        [
+          440,
+          150
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "state-submitted",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.8, 1]
+        "fixedPoint": [
+          0.8,
+          1
+        ]
       },
       "endBinding": {
         "elementId": "state-failednet",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 0]
+        "fixedPoint": [
+          0.5,
+          0
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
@@ -1408,7 +1653,6 @@
       "originalText": "network/timeout",
       "lineHeight": 1.25
     },
-
     {
       "id": "arrow-retryable-expired",
       "type": "arrow",
@@ -1435,19 +1679,38 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [20, 0], [20, 150]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          20,
+          0
+        ],
+        [
+          20,
+          150
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "state-retryable",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 1]
+        "fixedPoint": [
+          0.5,
+          1
+        ]
       },
       "endBinding": {
         "elementId": "state-expired",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 0]
+        "fixedPoint": [
+          0.5,
+          0
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
@@ -1488,7 +1751,6 @@
       "originalText": "cascade-expire\n(_cascade_expire_account)",
       "lineHeight": 1.25
     },
-
     {
       "id": "arrow-ws-listener-queue",
       "type": "arrow",
@@ -1515,25 +1777,39 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [0, 50]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "src-ws-listener",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 1]
+        "fixedPoint": [
+          0.5,
+          1
+        ]
       },
       "endBinding": {
         "elementId": "src-event-queue",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 0]
+        "fixedPoint": [
+          0.5,
+          0
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
       "elbowed": true
     },
-
     {
       "id": "arrow-queue-processor",
       "type": "arrow",
@@ -1560,25 +1836,39 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [0, 50]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "src-event-queue",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 1]
+        "fixedPoint": [
+          0.5,
+          1
+        ]
       },
       "endBinding": {
         "elementId": "src-ws-processor",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 0]
+        "fixedPoint": [
+          0.5,
+          0
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
       "elbowed": true
     },
-
     {
       "id": "arrow-ws-processor-validated",
       "type": "arrow",
@@ -1605,19 +1895,38 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [-295, 0], [-295, 100]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -295,
+          0
+        ],
+        [
+          -295,
+          100
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "src-ws-processor",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 1]
+        "fixedPoint": [
+          0.5,
+          1
+        ]
       },
       "endBinding": {
         "elementId": "state-validated",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 0]
+        "fixedPoint": [
+          0.5,
+          0
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
@@ -1658,7 +1967,6 @@
       "originalText": "record_validated(src=WS)",
       "lineHeight": 1.25
     },
-
     {
       "id": "arrow-poll-validated",
       "type": "arrow",
@@ -1685,19 +1993,38 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [0, 245], [-445, 245]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          245
+        ],
+        [
+          -445,
+          245
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": {
         "elementId": "src-poll",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [0.5, 1]
+        "fixedPoint": [
+          0.5,
+          1
+        ]
       },
       "endBinding": {
         "elementId": "state-validated",
         "focus": 0,
         "gap": 1,
-        "fixedPoint": [1, 0.5]
+        "fixedPoint": [
+          1,
+          0.5
+        ]
       },
       "startArrowhead": null,
       "endArrowhead": "arrow",
@@ -1736,6 +2063,233 @@
       "verticalAlign": "top",
       "containerId": null,
       "originalText": "record_validated(src=POLL)",
+      "lineHeight": 1.25
+    },
+    {
+      "id": "arrow-failednet-validated",
+      "type": "arrow",
+      "x": 960,
+      "y": 475,
+      "width": 300,
+      "height": 0,
+      "angle": 0,
+      "strokeColor": "#2f9e44",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": null,
+      "seed": 301,
+      "version": 1,
+      "versionNonce": 301,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1,
+      "link": null,
+      "locked": false,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -300,
+          0
+        ]
+      ],
+      "lastCommittedPoint": null,
+      "startBinding": {
+        "elementId": "state-failednet",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": [
+          0,
+          0.5
+        ]
+      },
+      "endBinding": {
+        "elementId": "state-validated",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": [
+          1,
+          0.5
+        ]
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "elbowed": false
+    },
+    {
+      "id": "label-failednet-validated",
+      "type": "text",
+      "x": 780,
+      "y": 478,
+      "width": 160,
+      "height": 30,
+      "angle": 0,
+      "strokeColor": "#2f9e44",
+      "backgroundColor": "#ffffff",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": null,
+      "seed": 302,
+      "version": 1,
+      "versionNonce": 302,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1,
+      "link": null,
+      "locked": false,
+      "text": "record_validated()\n[WS or poll]",
+      "fontSize": 11,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "top",
+      "containerId": null,
+      "originalText": "record_validated()\n[WS or poll]",
+      "lineHeight": 1.25
+    },
+    {
+      "id": "arrow-failednet-expired",
+      "type": "arrow",
+      "x": 960,
+      "y": 510,
+      "width": 500,
+      "height": 60,
+      "angle": 0,
+      "strokeColor": "#e8590c",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "roughness": 0,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": null,
+      "seed": 303,
+      "version": 1,
+      "versionNonce": 303,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1,
+      "link": null,
+      "locked": false,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -500,
+          0
+        ],
+        [
+          -500,
+          -60
+        ]
+      ],
+      "lastCommittedPoint": null,
+      "startBinding": {
+        "elementId": "state-failednet",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": [
+          0,
+          1
+        ]
+      },
+      "endBinding": {
+        "elementId": "state-expired",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": [
+          0.5,
+          1
+        ]
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "elbowed": true
+    },
+    {
+      "id": "label-failednet-expired",
+      "type": "text",
+      "x": 530,
+      "y": 515,
+      "width": 160,
+      "height": 30,
+      "angle": 0,
+      "strokeColor": "#e8590c",
+      "backgroundColor": "#ffffff",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": null,
+      "seed": 304,
+      "version": 1,
+      "versionNonce": 304,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1,
+      "link": null,
+      "locked": false,
+      "text": "record_expired()\n[past LLS]",
+      "fontSize": 11,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "top",
+      "containerId": null,
+      "originalText": "record_expired()\n[past LLS]",
+      "lineHeight": 1.25
+    },
+    {
+      "id": "note-failednet",
+      "type": "text",
+      "x": 950,
+      "y": 525,
+      "width": 220,
+      "height": 30,
+      "angle": 0,
+      "strokeColor": "#666666",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": null,
+      "seed": 305,
+      "version": 1,
+      "versionNonce": 305,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1,
+      "link": null,
+      "locked": false,
+      "text": "tx may still be in rippled queue\naccount locked until LLS",
+      "fontSize": 10,
+      "fontFamily": 1,
+      "textAlign": "left",
+      "verticalAlign": "top",
+      "containerId": null,
+      "originalText": "tx may still be in rippled queue\naccount locked until LLS",
       "lineHeight": 1.25
     }
   ],
