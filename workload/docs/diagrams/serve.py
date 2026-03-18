@@ -587,8 +587,7 @@ graph LR
 # ─────────────────────────────────────────────────────────────────────────────
 
 _TAB_BUTTONS = "\n".join(
-    f'<button class="tab-btn" onclick="showTab({i})" id="btn-{i}">{name}</button>'
-    for i, name in enumerate(DIAGRAMS)
+    f'<button class="tab-btn" onclick="showTab({i})" id="btn-{i}">{name}</button>' for i, name in enumerate(DIAGRAMS)
 )
 
 _TAB_PANES = "\n".join(

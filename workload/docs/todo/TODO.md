@@ -1,5 +1,35 @@
 # TODO
 
+## Completed: Branch Integration (2026-03-18)
+- [x] **Assertions framework** (`assertions.py`) — centralised Antithesis SDK delegation with standalone fallback
+- [x] **AntithesisRandom** in `randoms.py` — try AntithesisRandom, fallback SystemRandom
+- [x] **12 new transaction types** ported from upstream branch (DelegateSet, Credentials x3, PermissionedDomains x2, Vaults x6)
+- [x] **Assertion calls** wired into `record_submitted`, `record_validated`, `submit_pending` rejection paths
+- [x] **Import migration** `generate_ledger.*` → `gl.*`
+- [x] **SQLite persistence opt-in** via `WORKLOAD_PERSIST=1` (default: off)
+- [x] **`/network/reset`** uses library API instead of shelling out to `gen auto`
+- [x] **Shutdown fixes** — 3s timeout on workload_task, skip flush when no store, 30s timeout on WS wait
+- [x] **Genesis user count** derived from accounts.json, not config.toml
+- [x] **Fee handling** — VaultCreate/PermissionedDomainSet added to owner_reserve path
+- [x] **12 POST endpoints** for new transaction types
+- [x] **12 test_composer scripts** + `exercise_all_types.sh` (all 31 types)
+- [x] **Deps updated** — xrpl-py 4.5.0, antithesis 0.2.0, pynacl 1.6.2
+- [x] **Port parameter deviations** documented in `workload/docs/port-parameter-deviations.md`
+- [x] **Consumer dedup** — one submission per account per batch (prevents parallel seq submission)
+- [x] **Producer crash protection** — top-level try/except with `PRODUCER CRASH (recovering)` log
+- [x] **Producer build protection** — `build_txn_dict` + `from_xrpl` wrapped in try/except
+- [x] **File logging** — `workload.log` at DEBUG, console at INFO, rotating 50MB × 5
+- [x] **Invariants doc** — `workload/docs/invariants.md` with 12 invariants
+
+## Open Bug: tefPAST_SEQ Large Deltas
+Accounts show ledger sequences 3-9 ahead of what we allocated on first batches, even with
+`max_pending_per_account=1` and consumer dedup. Self-heals after cascade recovery.
+See `memory/tefpastseq-open-bug.md` for full analysis and hypotheses.
+- [ ] Add per-account DEBUG log in alloc_seq on every alloc (not just first)
+- [ ] Add "expired duplicate" counter to batch result log to verify dedup is working
+- [ ] Inspect genesis AccountRoot Sequence values vs what alloc_seq fetches
+- [ ] Consider updating `next_seq` in `record_validated` to `max(next_seq, validated_seq + 1)`
+
 ## P00: Absolutely do this first thing next session
 Flesh out test framework
 - [ ] Test that auto-generated txns can survive fee escalation. Initially it'll be ok to mark as `xfail` until the feature is actually implemented.
@@ -56,6 +86,13 @@ Top priority. The codebase works but has accumulated dead code, debug artifacts,
 - [ ] Move `workload_running`, `workload_stop_event`, `workload_task`, `workload_stats` from module-level globals onto `app.state`
 - [ ] Extract constants: queue maxsize (1000), hardcoded WS port (6006)
 - [ ] `sqlite_store.by_type` always returns `{}` — implement or remove
+
+### New Transaction Type Follow-ups
+- [ ] Enable Vault/DelegateSet amendments when rippled develop marks them as `supported` (currently `SingleAssetVault`, `PermissionDelegationV1_1` are unsupported)
+- [ ] `alloc_seq` log message says "from current ledger" but actually uses `"validated"` — fix stale log string
+- [ ] Consider baking MPToken issuances into genesis via `gl.ledger.LedgerConfig.mpt_issuances` for faster cold start
+- [ ] Memecoin drop test scenario (Task 3 from plan) — deferred, ready to design
+- [ ] gen auto metadata sidecar file — write gateway count alongside accounts.json so workload doesn't need config.toml for genesis loading
 
 ### Python 3.13+ Modernization
 - [ ] Audit for opportunities: type parameter syntax, match statements, StrEnum patterns

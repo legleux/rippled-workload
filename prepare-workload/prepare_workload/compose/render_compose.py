@@ -17,7 +17,7 @@ def render_peer(idx, data):
         "container_name": data["name"],
         "hostname": data["name"],
         "image": data["compose_config"].image,
-        "ports":  [
+        "ports": [
             f"{data['ports']['rpc_admin_local'] + idx}:{data['ports']['rpc_admin_local']}",
             f"{data['ports']['ws_admin_local'] + idx}:{data['ports']['ws_admin_local']}",
         ],
@@ -106,14 +106,14 @@ def render_compose_data(node_config, settings):
     validator_data = []
     # Start enumerating validators ports from the last one of the peers. Just want the first peer node to have the defaults.
     start_index = len(node_config["peers"])
-    vl = sorted(node_config["validators"], key=itemgetter('name'))
+    vl = sorted(node_config["validators"], key=itemgetter("name"))
     for idx, v_data in enumerate(vl, start=start_index):
         data = {**v_data, **s_data}
         # The index is for setting the node's ports
         validator_data.append(template.render(**render_validator(idx, data)))
 
     peer_data = []
-    pl = sorted(node_config["peers"], key=itemgetter('name'))
+    pl = sorted(node_config["peers"], key=itemgetter("name"))
     for idx, p_data in enumerate(pl):
         data = {**p_data, **s_data}
         peer_data.append(template.render(**render_peer(idx, data)))

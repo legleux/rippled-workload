@@ -127,7 +127,7 @@ async def test_submit_and_validate():
         stats_before = await get_ws_stats()
         ws_before = stats_before.get("validations_by_source", {}).get("WS", 0)
 
-        print(f"      Submitting random transaction...")
+        print("      Submitting random transaction...")
         tx_result = await submit_random_transaction()
         tx_hash = None
 
@@ -146,7 +146,7 @@ async def test_submit_and_validate():
         print_status("Transaction submitted", True, f"hash: {tx_hash[:16]}...")
 
         # Wait for validation (max 15 seconds)
-        print(f"      Waiting for validation...")
+        print("      Waiting for validation...")
         for i in range(15):
             await asyncio.sleep(1)
 

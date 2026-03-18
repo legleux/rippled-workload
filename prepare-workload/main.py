@@ -55,23 +55,30 @@ def write_compose(node_config, settings):
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="PROG")
-    parser.add_argument("-t", "--testnet-dir",
-                        type=Path,
-                        help="Output dir for network config.",
-                        )
-    parser.add_argument("-n", "--network",
-                        type=Path,
-                        help="Path to network spec file.",
-                        )
-    parser.add_argument("-v", "--num-validators",
-                        type=int,
-                        help="Number of validators to create.",
-                        )
-    parser.add_argument("--need-features", # TODO: Fix this hack
-                        default=True,
-                        action="store_true",
-                        help="Put the [features] block in all configs. This is just a hack if ledger.json not provied",
-                        )
+    parser.add_argument(
+        "-t",
+        "--testnet-dir",
+        type=Path,
+        help="Output dir for network config.",
+    )
+    parser.add_argument(
+        "-n",
+        "--network",
+        type=Path,
+        help="Path to network spec file.",
+    )
+    parser.add_argument(
+        "-v",
+        "--num-validators",
+        type=int,
+        help="Number of validators to create.",
+    )
+    parser.add_argument(
+        "--need-features",  # TODO: Fix this hack
+        default=True,
+        action="store_true",
+        help="Put the [features] block in all configs. This is just a hack if ledger.json not provied",
+    )
     return parser.parse_args()
 
 

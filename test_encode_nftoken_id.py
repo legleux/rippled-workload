@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-from unittest import TestCase
-
-from xrpl import XRPLException
-from xrpl.utils import parse_nftoken_id
-
 
 def scramble_taxon(taxon: int, sequence: int, taxon_length: int) -> bytes:
     # These values are defined in rippled/include/xrpl/protocol/nft.h in cipheredTaxon
@@ -16,7 +11,8 @@ def scramble_taxon(taxon: int, sequence: int, taxon_length: int) -> bytes:
     taxon ^= scramble
     taxon &= 0xFFFFFFFF  # I think using "to_bytes()",  is clearer but we cannot overflow taxon_length
     return taxon.to_bytes(
-        taxon_length, byteorder="big"
+        taxon_length,
+        byteorder="big",
     )  # TODO: Can remove byteorder="big" at Python 3.11
 
 
@@ -29,7 +25,7 @@ def encode_nft_id(
 ) -> str:
     """Create a unique 256-bit NFTokenID.
 
-        Example:
+    Example:
             flags: 11,
             transfer_fee: 1337,
             issuer: "rJoxBSzpXhPtAuqFmqxQtGKjA13jUJWthE",
@@ -51,9 +47,7 @@ def encode_nft_id(
     sequence_length = 4
 
     issuer_bytes = base58.b58decode_check(issuer, alphabet=base58.XRP_ALPHABET)
-    issuer_bytes = (
-        issuer_bytes[1:] if len(issuer_bytes) > issuer_length else issuer_bytes
-    )
+    issuer_bytes = issuer_bytes[1:] if len(issuer_bytes) > issuer_length else issuer_bytes
     if len(issuer_bytes) != issuer_length:
         msg = f"issuer must be {issuer_length} bytes"
         raise ValueError(msg)
@@ -70,5 +64,5 @@ def encode_nft_id(
         msg = f"NFT ID is not {nft_id_length} bytes!"
         raise ValueError(msg)
     nftoken_id = nftoken_id_bytes.hex().upper()
-    log.info(f"Encoded {nftoken_id=}")
+    log.info("Encoded %s", nftoken_id)
     return nftoken_id

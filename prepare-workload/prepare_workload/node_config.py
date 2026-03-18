@@ -69,11 +69,11 @@ def get_node_configs(settings):
     for n in peers:
         is_validator = n.startswith(settings.network.validator_name)
         cfg = {
-                "name": n,
-                "peers": peers[n],
-                "peer_private": str(n in private_peers).lower(),
-                "is_validator": is_validator,
-            }
+            "name": n,
+            "peers": peers[n],
+            "peer_private": str(n in private_peers).lower(),
+            "is_validator": is_validator,
+        }
         if is_validator:
             node_configs["validators"].append(cfg)
         else:

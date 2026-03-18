@@ -60,7 +60,13 @@
       "Read(//tmp/**)",
       "Bash(do:*)",
       "Bash(do plantuml:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(uv pip:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv lock:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:xrpl-py.readthedocs.io)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "deny": [],
     "ask": []

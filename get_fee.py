@@ -1,14 +1,14 @@
 import json
+import os
 import ssl
+import sys
+import time
+from pathlib import Path
 from urllib import request
 from urllib.error import HTTPError, URLError
-from threading import Thread
-from pathlib import Path
-import time
-import os
-import sys
 
 stop_at_ledger_size = 200
+
 
 def healthy():
     url = "https://rippled:2459/health"
@@ -35,6 +35,7 @@ def healthy():
     except Exception:
         return False
 
+
 def get_fee():
     url = "http://rippled:5005"
     try:
@@ -45,6 +46,7 @@ def get_fee():
     except URLError:
         print("rippled not running")
         exit(1)
+
 
 def server_info():
     url = "http://rippled:5005"
@@ -57,9 +59,11 @@ def server_info():
         print("rippled not running")
         exit(1)
 
+
 def get_uptime():
     info = server_info()
     return info["info"].get("uptime")
+
 
 def msg(uptime, lci, cls_, olf, els, cqs, msg, bar):
     print(bar)
@@ -71,6 +75,7 @@ def msg(uptime, lci, cls_, olf, els, cqs, msg, bar):
     print("{:<25} = {:>6}".format("Current queue size:", cqs))
     for i in msg:
         print(i)
+
 
 def main(fee_log_data):
     m = []
@@ -94,7 +99,7 @@ def main(fee_log_data):
                 fee_log_data.append(fld)
             if lci not in m:
                 m.append(lci)
-        if len(dots):
+        if dots:
             if lci == llci:
                 dots.append(".")
             else:
@@ -112,6 +117,7 @@ def main(fee_log_data):
             print(f"Ledger breached {stop_at_ledger_size} with {cls_} at ledger {lci} after {uptime}s!")
             sys.exit(0)
 
+
 def write_fee_log(fee_log_data):
     print("writing fee log")
     print(fee_log_data)
@@ -124,8 +130,10 @@ def write_fee_log(fee_log_data):
             fl.write(f"open ledger fee: {olf}\n")
             fl.write(f"current_queue_size: {cqs}\n")
 
+
 from time import perf_counter
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     fee_log = []
     timeout = 20
     start = perf_counter()
@@ -140,7 +148,7 @@ if __name__ == '__main__':
         main(fee_log)
     except KeyboardInterrupt:
         write_fee_log(fee_log)
-        print('Quitting')
+        print("Quitting")
         try:
             sys.exit(130)
         except SystemExit:

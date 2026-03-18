@@ -8,9 +8,9 @@ export TEST_NETWORK_DIR="testnet"
 export REPO="https://github.com/XRPLF/rippled.git"
 export COMMIT="develop"
 export NETWORK_NAME="antithesis_net"
-export NUM_VALIDATORS=5 
-export RIPPLED_NAME=rippled 
-export VALIDATOR_NAME=val 
+export NUM_VALIDATORS=5
+export RIPPLED_NAME=rippled
+export VALIDATOR_NAME=val
 
 1. Checkout rippled-antithesis
 2. Checkout rippled-workload _in_ rippled-antithesis
@@ -23,7 +23,7 @@ export VALIDATOR_NAME=val
     cd workload
     docker build sidecar \
             --file sidecar/Dockerfile \
-            --tag ${SIDECAR_IMAGE} 
+            --tag ${SIDECAR_IMAGE}
 5. Build workload image (still in workload dir)
     docker build $PWD \
         --file Dockerfile.workload \
@@ -50,12 +50,12 @@ docker export \
         --build-arg RIPPLED_COMMIT=${COMMIT}
 
 8. Fire it all up!
-    
+
     cd testnet && docker compose up -d
-    open https://custom.xrpl.org/localhost:6006/ in your browser or 
+    open https://custom.xrpl.org/localhost:6006/ in your browser or
     docker exec -it rippled rippled --silent server_info | tail -n+4 | jq .result.info.complete_ledgers
 
     workload=$(docker inspect workload | jq -r '.[0].NetworkSettings.Networks[].IPAddress')
     # if using a ledgerfile you can
-    curl -s "${workload}:8000/accounts" | jq 
+    curl -s "${workload}:8000/accounts" | jq
     otherwise

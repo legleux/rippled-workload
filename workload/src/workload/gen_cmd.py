@@ -1,12 +1,12 @@
-"""Bridge between workload config.toml and generate_ledger API."""
+"""Bridge between workload config.toml and gl (generate_ledger) library API."""
 
 from pathlib import Path
 
 import tomllib
 
-from generate_ledger.compose import ComposeConfig, write_compose_file
-from generate_ledger.ledger import LedgerConfig, write_ledger_file
-from generate_ledger.rippled_cfg import RippledConfigSpec
+from gl.compose import ComposeConfig, write_compose_file
+from gl.ledger import LedgerConfig, write_ledger_file
+from gl.rippled_cfg import RippledConfigSpec
 
 CONFIG_PATH = Path(__file__).parent / "config.toml"
 

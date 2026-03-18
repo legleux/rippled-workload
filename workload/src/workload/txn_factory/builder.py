@@ -16,6 +16,10 @@ from xrpl.models.transactions import (
     AMMWithdrawFlag,
     Batch,
     BatchFlag,
+    CredentialAccept,
+    CredentialCreate,
+    CredentialDelete,
+    DelegateSet,
     Memo,
     MPTokenAuthorize,
     MPTokenIssuanceCreate,
@@ -29,10 +33,20 @@ from xrpl.models.transactions import (
     OfferCancel,
     OfferCreate,
     Payment,
+    PermissionedDomainDelete,
+    PermissionedDomainSet,
     TicketCreate,
     Transaction,
     TrustSet,
+    VaultClawback,
+    VaultCreate,
+    VaultDelete,
+    VaultDeposit,
+    VaultSet,
+    VaultWithdraw,
 )
+from xrpl.models.transactions.delegate_set import GranularPermission
+from xrpl.models.transactions.deposit_preauth import Credential as XRPLCredential
 from xrpl.transaction import transaction_json_to_binary_codec_form
 from xrpl.wallet import Wallet
 
@@ -71,6 +85,9 @@ class TxnContext:
     balances: dict[str, dict[str | tuple[str, str], float]] | None = None  # In-memory balance tracking
     disabled_types: set[str] | None = None  # Runtime-overridable disabled types
     forced_account: "Wallet | None" = None  # When set, rand_account() always returns this wallet as source
+    credentials: list[dict] | None = None  # [{issuer, subject, credential_type, accepted}]
+    vaults: list[dict] | None = None  # [{vault_id, owner, asset}]
+    domains: list[dict] | None = None  # [{domain_id, owner}]
 
     def rand_accounts(self, n: int, omit: list[str] | None = None) -> list["Wallet"]:
         """Pick n unique random accounts, optionally excluding addresses.
@@ -691,7 +708,7 @@ def _build_amm_deposit(ctx: TxnContext) -> dict | None:
     has_balance_data = bool(account_currencies)
 
     eligible_pools = []
-    for p in (ctx.amm_pool_registry or []):
+    for p in ctx.amm_pool_registry or []:
         a1, a2 = p["asset1"], p["asset2"]
         if a1.get("currency") == "XRP":
             # XRP/IOU pool: account always has XRP; if we have balance data, verify IOU too
@@ -699,8 +716,11 @@ def _build_amm_deposit(ctx: TxnContext) -> dict | None:
                 eligible_pools.append(p)
         else:
             # IOU/IOU pool: only proceed if we can confirm both assets
-            if has_balance_data and (a1["currency"], a1["issuer"]) in account_currencies \
-                    and (a2["currency"], a2["issuer"]) in account_currencies:
+            if (
+                has_balance_data
+                and (a1["currency"], a1["issuer"]) in account_currencies
+                and (a2["currency"], a2["issuer"]) in account_currencies
+            ):
                 eligible_pools.append(p)
 
     if not eligible_pools:
@@ -755,8 +775,7 @@ def _build_amm_withdraw(ctx: TxnContext) -> dict | None:
     """
     src = ctx.rand_account()
     eligible_pools = [
-        p for p in (ctx.amm_pool_registry or [])
-        if src.address in p.get("lp_holders", [p.get("creator", "")])
+        p for p in (ctx.amm_pool_registry or []) if src.address in p.get("lp_holders", [p.get("creator", "")])
     ]
     if not eligible_pools:
         return None
@@ -803,6 +822,320 @@ def _build_amm_withdraw(ctx: TxnContext) -> dict | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# Helpers for new transaction families
+# ---------------------------------------------------------------------------
+
+
+def _random_hex(n: int) -> str:
+    """Generate a random hex string of *n* bytes."""
+    return bytes(randrange(256) for _ in range(n)).hex()
+
+
+def _random_credential_type(cfg: dict) -> str:
+    """Random hex-encoded credential type, length from config."""
+    max_bytes = cfg.get("transactions", {}).get("credential_create", {}).get("credential_type_max_bytes", 64)
+    return _random_hex(randrange(1, max_bytes + 1))
+
+
+def _random_credential_uri(cfg: dict) -> str:
+    """Random hex-encoded URI for credentials, length from config."""
+    max_bytes = cfg.get("transactions", {}).get("credential_create", {}).get("uri_max_bytes", 256)
+    return _random_hex(randrange(10, max_bytes + 1))
+
+
+def _random_vault_asset(ctx: TxnContext) -> dict:
+    """Pick a random asset suitable for vault creation: IOU, MPT, or XRP."""
+    roll = random()
+    if ctx.currencies and roll < 0.5:
+        cur = ctx.rand_currency()
+        return {"currency": cur.currency, "issuer": cur.issuer}
+    if ctx.mptoken_issuance_ids and roll < 0.8:
+        return {"mpt_issuance_id": ctx.rand_mptoken_id()}
+    if ctx.currencies:
+        cur = ctx.rand_currency()
+        return {"currency": cur.currency, "issuer": cur.issuer}
+    return {"currency": "XRP"}
+
+
+def _vault_amount_for_asset(asset: dict, cfg: dict) -> str | dict:
+    """Create an Amount matching a vault's asset type, ranges from config."""
+    vcfg = cfg.get("transactions", {}).get("vault_deposit", {})
+    if "mpt_issuance_id" in asset:
+        lo = vcfg.get("mpt_amount_min", 1)
+        hi = vcfg.get("mpt_amount_max", 10_000)
+        return {"mpt_issuance_id": asset["mpt_issuance_id"], "value": str(randrange(lo, hi + 1))}
+    if asset.get("currency") and asset.get("issuer"):
+        lo = vcfg.get("iou_amount_min", 1)
+        hi = vcfg.get("iou_amount_max", 10_000)
+        return {"currency": asset["currency"], "issuer": asset["issuer"], "value": str(randrange(lo, hi + 1))}
+    # XRP — drops
+    lo = vcfg.get("xrp_drops_min", 1_000_000)
+    hi = vcfg.get("xrp_drops_max", 100_000_000)
+    return str(randrange(lo, hi + 1))
+
+
+# ---------------------------------------------------------------------------
+# Delegation
+# ---------------------------------------------------------------------------
+def _build_delegate_set(ctx: TxnContext) -> dict:
+    """Build a DelegateSet transaction to delegate permissions to another account.
+
+    Uses GranularPermission enum values from xrpl-py, matching upstream branch.
+    Picks 1-3 random permissions from the 12 available granular permissions.
+    """
+    src, delegate = ctx.rand_accounts(2)
+    all_perms = list(GranularPermission)
+    max_p = ctx.config.get("transactions", {}).get("delegate_set", {}).get("max_permissions", 3)
+    num_perms = min(len(all_perms), randrange(1, max_p + 1))
+    selected = sample(all_perms, num_perms)
+    permissions = [{"Permission": {"PermissionValue": p.value}} for p in selected]
+    return {
+        "TransactionType": "DelegateSet",
+        "Account": src.address,
+        "Authorize": delegate.address,
+        "Permissions": permissions,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
+def _build_credential_create(ctx: TxnContext) -> dict:
+    """Build a CredentialCreate — issuer attests about a subject.
+
+    Includes Expiration (1 hour – 30 days from now) and URI, matching upstream params.py ranges.
+    """
+    import time
+
+    issuer = ctx.rand_account()
+    subject = ctx.rand_account(omit=[issuer.address])
+    ccfg = ctx.config.get("transactions", {}).get("credential_create", {})
+    # Expiration: Ripple epoch = Unix epoch - 946684800
+    ripple_epoch_offset = 946684800
+    exp_min = ccfg.get("expiration_min_offset", 3600)
+    exp_max = ccfg.get("expiration_max_offset", 2592000)
+    expiration = int(time.time()) - ripple_epoch_offset + randrange(exp_min, exp_max + 1)
+    return {
+        "TransactionType": "CredentialCreate",
+        "Account": issuer.address,
+        "Subject": subject.address,
+        "CredentialType": _random_credential_type(ctx.config),
+        "Expiration": expiration,
+        "URI": _random_credential_uri(ctx.config),
+    }
+
+
+def _build_credential_accept(ctx: TxnContext) -> dict | None:
+    """Build a CredentialAccept — subject accepts an issued credential."""
+    if not ctx.credentials:
+        return None
+    src = ctx.rand_account()
+    eligible = [c for c in ctx.credentials if c["subject"] == src.address and not c.get("accepted")]
+    if not eligible:
+        return None
+    cred = choice(eligible)
+    return {
+        "TransactionType": "CredentialAccept",
+        "Account": src.address,
+        "Issuer": cred["issuer"],
+        "CredentialType": cred["credential_type"],
+    }
+
+
+def _build_credential_delete(ctx: TxnContext) -> dict | None:
+    """Build a CredentialDelete — issuer or subject removes a credential."""
+    if not ctx.credentials:
+        return None
+    src = ctx.rand_account()
+    eligible = [c for c in ctx.credentials if c["issuer"] == src.address or c["subject"] == src.address]
+    if not eligible:
+        return None
+    cred = choice(eligible)
+    return {
+        "TransactionType": "CredentialDelete",
+        "Account": src.address,
+        "Subject": cred["subject"],
+        "Issuer": cred["issuer"],
+        "CredentialType": cred["credential_type"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Permissioned Domains
+# ---------------------------------------------------------------------------
+def _build_permissioned_domain_set(ctx: TxnContext) -> dict:
+    """Build a PermissionedDomainSet — create or update a permissioned domain.
+
+    Accepts 1-10 credential definitions (matching upstream params.domain_credential_count).
+    Each credential references a random account as issuer with a random credential type.
+    """
+    src = ctx.rand_account()
+    dcfg = ctx.config.get("transactions", {}).get("permissioned_domain_set", {})
+    max_creds = dcfg.get("max_credentials", 10)
+    num_creds = randrange(1, max_creds + 1)
+    accepted = [
+        {
+            "Credential": {
+                "Issuer": ctx.rand_account().address,
+                "CredentialType": _random_credential_type(ctx.config),
+            }
+        }
+        for _ in range(num_creds)
+    ]
+    result = {
+        "TransactionType": "PermissionedDomainSet",
+        "Account": src.address,
+        "AcceptedCredentials": accepted,
+    }
+    # Optionally update an existing domain owned by src
+    if ctx.domains and random() < 0.3:
+        owned = [d for d in ctx.domains if d["owner"] == src.address]
+        if owned:
+            result["DomainID"] = choice(owned)["domain_id"]
+    return result
+
+
+def _build_permissioned_domain_delete(ctx: TxnContext) -> dict | None:
+    """Build a PermissionedDomainDelete — owner removes a domain."""
+    if not ctx.domains:
+        return None
+    src = ctx.rand_account()
+    owned = [d for d in ctx.domains if d["owner"] == src.address]
+    if not owned:
+        return None
+    domain = choice(owned)
+    return {
+        "TransactionType": "PermissionedDomainDelete",
+        "Account": src.address,
+        "DomainID": domain["domain_id"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Vaults
+# ---------------------------------------------------------------------------
+def _build_vault_create(ctx: TxnContext) -> dict:
+    """Build a VaultCreate — open a new vault for an asset.
+
+    Includes AssetsMaximum (100M-10B drops) and Data (1-256 bytes hex),
+    matching upstream params.py ranges.
+    """
+    src = ctx.rand_account()
+    asset = _random_vault_asset(ctx)
+    vcfg = ctx.config.get("transactions", {}).get("vault_create", {})
+    am_min = vcfg.get("assets_maximum_min", 100_000_000)
+    am_max = vcfg.get("assets_maximum_max", 10_000_000_000)
+    data_max = vcfg.get("data_max_bytes", 256)
+    return {
+        "TransactionType": "VaultCreate",
+        "Account": src.address,
+        "Asset": asset,
+        "AssetsMaximum": str(randrange(am_min, am_max + 1)),
+        "Data": _random_hex(randrange(1, data_max + 1)),
+    }
+
+
+def _build_vault_set(ctx: TxnContext) -> dict | None:
+    """Build a VaultSet — owner updates vault settings.
+
+    Includes AssetsMaximum and Data, matching upstream params.py ranges.
+    """
+    if not ctx.vaults:
+        return None
+    src = ctx.rand_account()
+    owned = [v for v in ctx.vaults if v["owner"] == src.address]
+    if not owned:
+        return None
+    vault = choice(owned)
+    vcfg = ctx.config.get("transactions", {}).get("vault_create", {})
+    am_min = vcfg.get("assets_maximum_min", 100_000_000)
+    am_max = vcfg.get("assets_maximum_max", 10_000_000_000)
+    data_max = vcfg.get("data_max_bytes", 256)
+    return {
+        "TransactionType": "VaultSet",
+        "Account": src.address,
+        "VaultID": vault["vault_id"],
+        "AssetsMaximum": str(randrange(am_min, am_max + 1)),
+        "Data": _random_hex(randrange(1, data_max + 1)),
+    }
+
+
+def _build_vault_delete(ctx: TxnContext) -> dict | None:
+    """Build a VaultDelete — owner removes a vault."""
+    if not ctx.vaults:
+        return None
+    src = ctx.rand_account()
+    owned = [v for v in ctx.vaults if v["owner"] == src.address]
+    if not owned:
+        return None
+    vault = choice(owned)
+    return {
+        "TransactionType": "VaultDelete",
+        "Account": src.address,
+        "VaultID": vault["vault_id"],
+    }
+
+
+def _build_vault_deposit(ctx: TxnContext) -> dict | None:
+    """Build a VaultDeposit — deposit assets into an existing vault.
+
+    Amount matches vault's asset type (IOU 1-10k, MPT 1-10k, XRP 1M-100M drops).
+    """
+    if not ctx.vaults:
+        return None
+    src = ctx.rand_account()
+    vault = choice(ctx.vaults)
+    return {
+        "TransactionType": "VaultDeposit",
+        "Account": src.address,
+        "VaultID": vault["vault_id"],
+        "Amount": _vault_amount_for_asset(vault.get("asset", {}), ctx.config),
+    }
+
+
+def _build_vault_withdraw(ctx: TxnContext) -> dict | None:
+    """Build a VaultWithdraw — owner withdraws from a vault.
+
+    Amount matches vault's asset type, same ranges as deposit.
+    """
+    if not ctx.vaults:
+        return None
+    src = ctx.rand_account()
+    owned = [v for v in ctx.vaults if v["owner"] == src.address]
+    if not owned:
+        return None
+    vault = choice(owned)
+    return {
+        "TransactionType": "VaultWithdraw",
+        "Account": src.address,
+        "VaultID": vault["vault_id"],
+        "Amount": _vault_amount_for_asset(vault.get("asset", {}), ctx.config),
+    }
+
+
+def _build_vault_clawback(ctx: TxnContext) -> dict | None:
+    """Build a VaultClawback — vault owner claws back from a holder.
+
+    Matches upstream branch: Account = vault owner, Holder = random other account.
+    No Amount field (claws back all).
+    """
+    if not ctx.vaults:
+        return None
+    src = ctx.rand_account()
+    owned = [v for v in ctx.vaults if v["owner"] == src.address]
+    if not owned:
+        return None
+    vault = choice(owned)
+    holder = ctx.rand_account(omit=[src.address])
+    return {
+        "TransactionType": "VaultClawback",
+        "Account": src.address,
+        "VaultID": vault["vault_id"],
+        "Holder": holder.address,
+    }
+
+
 _BUILDERS: dict[str, tuple[Callable[[TxnContext], dict], type[Transaction]]] = {
     "Payment": (_build_payment, Payment),
     "TrustSet": (_build_trustset, TrustSet),
@@ -823,6 +1156,22 @@ _BUILDERS: dict[str, tuple[Callable[[TxnContext], dict], type[Transaction]]] = {
     "AMMDeposit": (_build_amm_deposit, AMMDeposit),
     "AMMWithdraw": (_build_amm_withdraw, AMMWithdraw),
     "Batch": (_build_batch, Batch),
+    # Delegation
+    "DelegateSet": (_build_delegate_set, DelegateSet),
+    # Credentials
+    "CredentialCreate": (_build_credential_create, CredentialCreate),
+    "CredentialAccept": (_build_credential_accept, CredentialAccept),
+    "CredentialDelete": (_build_credential_delete, CredentialDelete),
+    # Permissioned Domains
+    "PermissionedDomainSet": (_build_permissioned_domain_set, PermissionedDomainSet),
+    "PermissionedDomainDelete": (_build_permissioned_domain_delete, PermissionedDomainDelete),
+    # Vaults
+    "VaultCreate": (_build_vault_create, VaultCreate),
+    "VaultSet": (_build_vault_set, VaultSet),
+    "VaultDelete": (_build_vault_delete, VaultDelete),
+    "VaultDeposit": (_build_vault_deposit, VaultDeposit),
+    "VaultWithdraw": (_build_vault_withdraw, VaultWithdraw),
+    "VaultClawback": (_build_vault_clawback, VaultClawback),
 }
 
 
@@ -835,8 +1184,10 @@ def pick_eligible_txn_type(wallet: "Wallet", ctx: TxnContext) -> str | None:
     """
     candidates = list(_BUILDERS.keys())
 
-    disabled = ctx.disabled_types if ctx.disabled_types is not None else set(
-        ctx.config.get("transactions", {}).get("disabled", [])
+    disabled = (
+        ctx.disabled_types
+        if ctx.disabled_types is not None
+        else set(ctx.config.get("transactions", {}).get("disabled", []))
     )
     if disabled:
         candidates = [t for t in candidates if t not in disabled]
@@ -855,11 +1206,23 @@ def pick_eligible_txn_type(wallet: "Wallet", ctx: TxnContext) -> str | None:
     if not ctx.amm_pool_registry:
         candidates = [t for t in candidates if t not in {"AMMDeposit", "AMMWithdraw"}]
 
+    # Global: Credentials — Accept/Delete need existing credentials
+    if not ctx.credentials:
+        candidates = [t for t in candidates if t not in {"CredentialAccept", "CredentialDelete"}]
+
+    # Global: Domains — Delete needs existing domains
+    if not ctx.domains:
+        candidates = [t for t in candidates if t != "PermissionedDomainDelete"]
+
+    # Global: Vaults — operations on existing vaults need at least one
+    if not ctx.vaults:
+        vault_ops = {"VaultSet", "VaultDelete", "VaultDeposit", "VaultWithdraw", "VaultClawback"}
+        candidates = [t for t in candidates if t not in vault_ops]
+
     # Per-account: OfferCancel requires wallet to own at least one IOU offer
     if "OfferCancel" in candidates:
         has_own_offer = ctx.offers and any(
-            v.get("type") == "IOUOffer" and v.get("owner") == wallet.address
-            for v in ctx.offers.values()
+            v.get("type") == "IOUOffer" and v.get("owner") == wallet.address for v in ctx.offers.values()
         )
         if not has_own_offer:
             candidates = [t for t in candidates if t != "OfferCancel"]
@@ -867,8 +1230,7 @@ def pick_eligible_txn_type(wallet: "Wallet", ctx: TxnContext) -> str | None:
     # Per-account: AMMWithdraw requires wallet to hold LP tokens in at least one pool
     if "AMMWithdraw" in candidates:
         is_lp = any(
-            wallet.address in p.get("lp_holders", [p.get("creator", "")])
-            for p in (ctx.amm_pool_registry or [])
+            wallet.address in p.get("lp_holders", [p.get("creator", "")]) for p in (ctx.amm_pool_registry or [])
         )
         if not is_lp:
             candidates = [t for t in candidates if t != "AMMWithdraw"]
@@ -880,9 +1242,11 @@ def pick_eligible_txn_type(wallet: "Wallet", ctx: TxnContext) -> str | None:
         eligible = any(
             (
                 p["asset1"].get("currency") == "XRP"
-                and (not has_balance_data or (p["asset2"]["currency"], p["asset2"]["issuer"]) in account_currencies)
-            ) or (
+                and (not has_balance_data or (p["asset2"].get("currency"), p["asset2"].get("issuer")) in account_currencies)
+            )
+            or (
                 has_balance_data
+                and "issuer" in p["asset1"] and "issuer" in p["asset2"]
                 and (p["asset1"]["currency"], p["asset1"]["issuer"]) in account_currencies
                 and (p["asset2"]["currency"], p["asset2"]["issuer"]) in account_currencies
             )
@@ -890,6 +1254,34 @@ def pick_eligible_txn_type(wallet: "Wallet", ctx: TxnContext) -> str | None:
         )
         if not eligible:
             candidates = [t for t in candidates if t != "AMMDeposit"]
+
+    # Per-account: CredentialAccept needs an unaccepted credential where wallet is subject
+    if "CredentialAccept" in candidates:
+        has_unaccepted = ctx.credentials and any(
+            c["subject"] == wallet.address and not c.get("accepted") for c in ctx.credentials
+        )
+        if not has_unaccepted:
+            candidates = [t for t in candidates if t != "CredentialAccept"]
+
+    # Per-account: CredentialDelete needs a credential where wallet is issuer or subject
+    if "CredentialDelete" in candidates:
+        involved = ctx.credentials and any(
+            c["issuer"] == wallet.address or c["subject"] == wallet.address for c in ctx.credentials
+        )
+        if not involved:
+            candidates = [t for t in candidates if t != "CredentialDelete"]
+
+    # Per-account: PermissionedDomainDelete needs wallet to own a domain
+    if "PermissionedDomainDelete" in candidates:
+        owns_domain = ctx.domains and any(d["owner"] == wallet.address for d in ctx.domains)
+        if not owns_domain:
+            candidates = [t for t in candidates if t != "PermissionedDomainDelete"]
+
+    # Per-account: VaultSet/Delete/Withdraw/Clawback need wallet to own a vault
+    if any(t in candidates for t in ("VaultSet", "VaultDelete", "VaultWithdraw", "VaultClawback")):
+        owns_vault = ctx.vaults and any(v["owner"] == wallet.address for v in ctx.vaults)
+        if not owns_vault:
+            candidates = [t for t in candidates if t not in {"VaultSet", "VaultDelete", "VaultWithdraw", "VaultClawback"}]
 
     # Batch uses an async builder with multi-seq allocations — not supported in sync pre-build path
     candidates = [t for t in candidates if t != "Batch"]
@@ -938,7 +1330,11 @@ async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides
     if txn_type is None:
         configured_types = list(_BUILDERS.keys())
 
-        disabled_types = ctx.disabled_types if ctx.disabled_types is not None else set(ctx.config.get("transactions", {}).get("disabled", []))
+        disabled_types = (
+            ctx.disabled_types
+            if ctx.disabled_types is not None
+            else set(ctx.config.get("transactions", {}).get("disabled", []))
+        )
         if disabled_types:
             configured_types = [t for t in configured_types if t not in disabled_types]
             log.debug("Disabled transaction types: %s", disabled_types)
@@ -972,6 +1368,16 @@ async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides
         if not ctx.amm_pool_registry:
             configured_types = [t for t in configured_types if t not in requires_amm_pools]
             log.debug("No AMM pools available, excluding: %s", requires_amm_pools)
+
+        if not ctx.credentials:
+            configured_types = [t for t in configured_types if t not in {"CredentialAccept", "CredentialDelete"}]
+
+        if not ctx.domains:
+            configured_types = [t for t in configured_types if t != "PermissionedDomainDelete"]
+
+        if not ctx.vaults:
+            vault_ops = {"VaultSet", "VaultDelete", "VaultDeposit", "VaultWithdraw", "VaultClawback"}
+            configured_types = [t for t in configured_types if t not in vault_ops]
 
         if not configured_types:
             raise RuntimeError("No transaction types available to generate")

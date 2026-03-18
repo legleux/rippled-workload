@@ -172,17 +172,19 @@ class SQLiteStore:
             if finalized_at is not None:
                 data["finalized_at"] = finalized_at
 
-            rows.append((
-                tx_hash,
-                state,
-                fields.get("source"),
-                fields.get("account"),
-                fields.get("validated_ledger"),
-                finalized_at,
-                now,  # created_at (ignored on conflict)
-                now,  # updated_at
-                json.dumps(data),
-            ))
+            rows.append(
+                (
+                    tx_hash,
+                    state,
+                    fields.get("source"),
+                    fields.get("account"),
+                    fields.get("validated_ledger"),
+                    finalized_at,
+                    now,  # created_at (ignored on conflict)
+                    now,  # updated_at
+                    json.dumps(data),
+                )
+            )
 
         async with self._lock:
             conn = sqlite3.connect(self.db_path)

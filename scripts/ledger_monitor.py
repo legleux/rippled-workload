@@ -30,13 +30,14 @@ import json
 import sys
 import time
 from collections import deque
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import AsyncIterator
 
 
 @dataclass(slots=True)
 class LedgerClose:
     """Data from a single ledger close event."""
+
     index: int
     txn_count: int
     ledger_hash: str
@@ -50,16 +51,21 @@ async def listen_ledgers(ws_url: str, *, reconnect: bool = True) -> AsyncIterato
     Args:
         ws_url: WebSocket endpoint (e.g. "ws://localhost:6006")
         reconnect: If True, reconnect on disconnect. If False, return on first disconnect.
+
     """
     import websockets
 
     while True:
         try:
             async with websockets.connect(ws_url) as ws:
-                await ws.send(json.dumps({
-                    "command": "subscribe",
-                    "streams": ["ledger"],
-                }))
+                await ws.send(
+                    json.dumps(
+                        {
+                            "command": "subscribe",
+                            "streams": ["ledger"],
+                        }
+                    )
+                )
                 resp = json.loads(await ws.recv())
                 if "error" in resp:
                     raise ConnectionError(f"Subscription error: {resp}")
@@ -85,6 +91,7 @@ async def listen_ledgers(ws_url: str, *, reconnect: bool = True) -> AsyncIterato
 @dataclass
 class CadenceStats:
     """Rolling statistics for ledger cadence monitoring."""
+
     window: deque[int] = field(default_factory=lambda: deque(maxlen=50))
     total_txns: int = 0
     total_ledgers: int = 0

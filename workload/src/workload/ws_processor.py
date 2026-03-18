@@ -14,18 +14,7 @@ if TYPE_CHECKING:
 
 from workload.validation import ValidationRecord, ValidationSrc
 
-try:
-    from antithesis.assertions import always, sometimes
-
-    ANTITHESIS_AVAILABLE = True
-except ImportError:
-    ANTITHESIS_AVAILABLE = False
-
-    def sometimes(condition, message, details=None):
-        pass
-
-    def always(condition, message, details=None):
-        pass
+from workload.assertions import always, sometimes
 
 
 log = logging.getLogger("workload.ws_processor")

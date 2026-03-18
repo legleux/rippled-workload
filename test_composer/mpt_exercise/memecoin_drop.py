@@ -24,8 +24,6 @@ import asyncio
 import json
 import logging
 import os
-import sys
-import time
 
 import httpx
 
@@ -132,6 +130,7 @@ async def fund_account(rpc: RippleRPC, destination: str, drops: str = "100000000
 def generate_wallet() -> dict:
     """Generate a wallet using xrpl-py."""
     from xrpl.wallet import Wallet
+
     w = Wallet.create()
     return {"address": w.address, "seed": w.seed, "public_key": w.public_key}
 
@@ -187,6 +186,7 @@ async def run_scenario(rpc_url: str, num_holders: int, total_supply: int):
                     acct = validated.get("Account") or validated.get("tx_json", {}).get("Account")
                     if seq is not None and acct:
                         from xrpl.core.addresscodec import decode_classic_address
+
                         account_id = decode_classic_address(acct).hex().upper()
                         mpt_issuance_id = f"{seq:08X}" + account_id
                 break
@@ -245,8 +245,10 @@ async def run_scenario(rpc_url: str, num_holders: int, total_supply: int):
             },
         }
         await sign_submit_wait(
-            rpc, trade_tx, sender["seed"],
-            f"trade {trade_amount}: holder {i} -> holder {i+1}"
+            rpc,
+            trade_tx,
+            sender["seed"],
+            f"trade {trade_amount}: holder {i} -> holder {i + 1}",
         )
 
     # ─── Step 7: Issuer locks the token ───

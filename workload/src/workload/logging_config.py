@@ -9,29 +9,36 @@ LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
-        "default": {
+        "console": {
             "format": "%(asctime)s %(levelname)-6s %(name)8s:%(lineno)d %(message)s",
             "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+        "file": {
+            "format": "%(asctime)s %(levelname)-6s %(name)s:%(lineno)d %(message)s",
+            "datefmt": "%Y-%m-%dT%H:%M:%S%z",
         },
     },
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
-            "formatter": "default",
+            "formatter": "console",
+            "level": LOG_LEVEL,
             "stream": sys.stdout,
         },
         "file": {
-            "class": "logging.FileHandler",
-            "formatter": "default",
-            "filename": "/tmp/workload.log",
-            "mode": "a",
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "file",
+            "level": "DEBUG",
+            "filename": "workload.log",
+            "maxBytes": 50_000_000,  # 50 MB
+            "backupCount": 5,
         },
     },
     "loggers": {
         "workload": {
-            "level": LOG_LEVEL,
+            "level": "DEBUG",
             "handlers": ["console", "file"],
-            "propagate": False,  # Don't pass 'workload' logs up to the root logger
+            "propagate": False,
         },
         "fastapi": {
             "level": "INFO",
@@ -39,12 +46,12 @@ LOGGING_CONFIG = {
             "propagate": False,
         },
         "uvicorn.access": {
-            "level": "WARNING",  # Quiets the noisy access logs
+            "level": "WARNING",
             "handlers": ["console", "file"],
             "propagate": False,
         },
         "xrpl": {
-            "level": "WARNING",  # Only show warnings/errors from xrpl-py
+            "level": "WARNING",
             "handlers": ["console", "file"],
             "propagate": False,
         },

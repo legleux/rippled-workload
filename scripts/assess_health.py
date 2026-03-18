@@ -39,7 +39,7 @@ def bar(count: int, max_count: int, width: int = 30) -> str:
     return f"{CYAN}{'█' * filled}{RESET}"
 
 
-def fmt_num(n: int | float) -> str:
+def fmt_num(n: float) -> str:
     return f"{n:,.0f}" if isinstance(n, float) else f"{n:,}"
 
 
@@ -93,7 +93,7 @@ def assess(base_url: str) -> int:
         print(
             f"  STATUS:     {state_label}"
             f" (submitted: {fmt_num(submitted)} | failed: {fmt_num(failed)}"
-            f" | {color_pct(fail_rate)} failure rate)"
+            f" | {color_pct(fail_rate)} failure rate)",
         )
     else:
         print(f"  STATUS:     {DIM}unavailable{RESET}")
@@ -138,8 +138,7 @@ def assess(base_url: str) -> int:
         total_val = ws_count + poll_count
         if total_val:
             print(
-                f"  VALIDATED:  {fmt_num(total_val)}"
-                f" (WS: {fmt_num(ws_count)} | POLL: {fmt_num(poll_count)})"
+                f"  VALIDATED:  {fmt_num(total_val)} (WS: {fmt_num(ws_count)} | POLL: {fmt_num(poll_count)})",
             )
 
     # ── 7. Top failures ──────────────────────────────────────────────────

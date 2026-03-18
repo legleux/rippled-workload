@@ -18,15 +18,7 @@ from xrpl.models.transactions import Payment
 from workload.ws import ws_listener
 from workload.ws_processor import process_ws_events
 
-try:
-    from antithesis.lifecycle import setup_complete
-
-    ANTITHESIS_AVAILABLE = True
-except ImportError:
-    ANTITHESIS_AVAILABLE = False
-
-    def setup_complete(details=None):
-        pass
+from workload.assertions import setup_complete
 
 
 import workload.constants as C
@@ -42,6 +34,7 @@ def _log_task_exception(task: asyncio.Task) -> None:
     """Done callback: log unhandled exceptions from fire-and-forget tasks."""
     if not task.cancelled() and (exc := task.exception()):
         log.error("Task %r crashed: %s: %s", task.get_name(), type(exc).__name__, exc, exc_info=exc)
+
 
 if Path("/.dockerenv").is_file():
     rippled = cfg["rippled"]["docker"]
@@ -103,22 +96,23 @@ async def _probe_rippled(url: str, max_retries: int = 30, retry_delay: float = 2
                 raise SystemExit(1)
 
 
-async def wait_for_ledgers(url: str, count: int) -> None:
+async def wait_for_ledgers(url: str, count: int, timeout: float = 30.0) -> None:
     """
     Connects to the rippled WebSocket and waits for 'count' ledgers to close.
     """
     log.info(f"Connecting to WebSocket {url} to wait for {count} ledgers...")
     try:
-        async with AsyncWebsocketClient(url) as client:
-            await client.send(Subscribe(streams=[StreamParameter.LEDGER]))
-            ledger_count = 0
-            async for msg in client:
-                if msg.get("type") == "ledgerClosed":
-                    ledger_count += 1
-                    log.info("Ledger %s closed. (%s/%s)", msg.get("ledger_index"), ledger_count, count)
-                    if ledger_count >= count:
-                        log.info("Observed %s ledgers closed. Convinced network is progessing.", ledger_count)
-                        break
+        async with asyncio.timeout(timeout):
+            async with AsyncWebsocketClient(url) as client:
+                await client.send(Subscribe(streams=[StreamParameter.LEDGER]))
+                ledger_count = 0
+                async for msg in client:
+                    if msg.get("type") == "ledgerClosed":
+                        ledger_count += 1
+                        log.info("Ledger %s closed. (%s/%s)", msg.get("ledger_index"), ledger_count, count)
+                        if ledger_count >= count:
+                            log.info("Observed %s ledgers closed. Convinced network is progessing.", ledger_count)
+                            break
     except Exception as e:
         log.error(
             "\n"
@@ -131,7 +125,6 @@ async def wait_for_ledgers(url: str, count: int) -> None:
             "========================================================"
         )
         raise SystemExit(1)
-
 
 
 @asynccontextmanager
@@ -161,7 +154,13 @@ async def lifespan(app: FastAPI):
     from workload.sqlite_store import SQLiteStore
 
     client = AsyncJsonRpcClient(RPC)
-    sqlite_store = SQLiteStore(db_path="state.db")
+    use_sqlite = os.getenv("WORKLOAD_PERSIST", "0") == "1"
+    if use_sqlite:
+        sqlite_store = SQLiteStore(db_path="state.db")
+        log.info("SQLite persistence enabled (WORKLOAD_PERSIST=1)")
+    else:
+        sqlite_store = None
+        log.info("SQLite persistence disabled (set WORKLOAD_PERSIST=1 to enable)")
     app.state.workload = Workload(cfg, client, store=sqlite_store)
     app.state.stop = stop
 
@@ -218,7 +217,9 @@ async def lifespan(app: FastAPI):
                     accounts_path = Path(__file__).parent / accounts_json
                 if not accounts_path.exists():
                     # Try absolute from repo root
-                    accounts_path = Path(__file__).parent.parent.parent.parent / "prepare-workload" / "testnet" / "accounts.json"
+                    accounts_path = (
+                        Path(__file__).parent.parent.parent.parent / "prepare-workload" / "testnet" / "accounts.json"
+                    )
                 log.info("Genesis accounts path: %s (exists=%s)", accounts_path, accounts_path.exists())
 
                 genesis_loaded = await app.state.workload.load_from_genesis(str(accounts_path))
@@ -267,24 +268,25 @@ async def lifespan(app: FastAPI):
 
             # Stop workload first to prevent new submissions during flush
             if workload_running and workload_stop_event:
-                log.info("Stopping workload before flush...")
+                log.info("Stopping workload...")
                 workload_stop_event.set()
                 if workload_task:
                     try:
-                        await workload_task
-                    except Exception:
-                        pass
+                        await asyncio.wait_for(workload_task, timeout=3.0)
+                    except (TimeoutError, asyncio.CancelledError, Exception):
+                        log.info("Workload task didn't stop cleanly, continuing shutdown")
 
             stop.set()
 
-            # Flush in-memory state to SQLite before exit
-            log.info("Flushing state to persistent store... (Ctrl-C again to skip)")
-            try:
-                await app.state.workload.flush_to_persistent_store()
-            except (asyncio.CancelledError, KeyboardInterrupt):
-                log.warning("Flush interrupted, skipping")
+            # Flush in-memory state to SQLite before exit (skip if no persistent store)
+            if app.state.workload.persistent_store is not None:
+                log.info("Flushing state to persistent store... (Ctrl-C again to skip)")
+                try:
+                    await app.state.workload.flush_to_persistent_store()
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    log.warning("Flush interrupted, skipping")
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
             log.info("Exiting TaskGroup (will cancel any remaining tasks)...")
 
     log.info("Shutdown complete")
@@ -565,7 +567,8 @@ async def state_dashboard():
     # Build node list from compose config for the WS terminal dropdown
     nodes = []
     try:
-        from generate_ledger.config import ComposeConfig
+        from gl.config import ComposeConfig
+
         cc = ComposeConfig()
         for i in range(cc.num_validators):
             name = f"{cc.validator_name}{i}"
@@ -576,7 +579,7 @@ async def state_dashboard():
             ws = cc.ws_port + i
             nodes.append({"name": name, "ws": ws})
     except ImportError:
-        log.debug("generate_ledger not installed, WS terminal node list will be empty")
+        log.debug("gl (generate_ledger) not installed, WS terminal node list will be empty")
     nodes_json = json.dumps(nodes)
 
     html_content = f"""
@@ -1240,6 +1243,17 @@ async def state_dashboard():
                     }});
                     tablesHtml += '</tbody></table></div>';
                 }}
+                // Transaction type breakdown
+                const byType = s.by_type || {{}};
+                const sortedTypes = Object.entries(byType).sort((a,b) => b[1]-a[1]);
+                if (sortedTypes.length) {{
+                    tablesHtml += '<div class="failures-table"><h2>Transaction Types</h2><table><thead><tr><th>Type</th><th>Count</th></tr></thead><tbody>';
+                    sortedTypes.forEach(([t,c]) => {{
+                        tablesHtml += '<tr><td>'+t+'</td><td>'+fmt(c)+'</td></tr>';
+                    }});
+                    tablesHtml += '</tbody></table></div>';
+                }}
+
                 document.getElementById('tables-container').innerHTML = tablesHtml;
 
             }} catch(e) {{
@@ -1273,7 +1287,11 @@ async def state_failed():
 async def state_failed_by_code(error_code: str):
     """Get failed transactions filtered by engine result code."""
     all_failed = app.state.workload.snapshot_failed()
-    filtered = [f for f in all_failed if f.get("engine_result_final") == error_code or f.get("engine_result_first") == error_code]
+    filtered = [
+        f
+        for f in all_failed
+        if f.get("engine_result_final") == error_code or f.get("engine_result_first") == error_code
+    ]
     return {"error_code": error_code, "count": len(filtered), "transactions": filtered}
 
 
@@ -1281,7 +1299,11 @@ async def state_failed_by_code(error_code: str):
 async def state_failed_page(error_code: str):
     """HTML page showing failed transactions for a specific error code."""
     all_failed = app.state.workload.snapshot_failed()
-    filtered = [f for f in all_failed if f.get("engine_result_final") == error_code or f.get("engine_result_first") == error_code]
+    filtered = [
+        f
+        for f in all_failed
+        if f.get("engine_result_final") == error_code or f.get("engine_result_first") == error_code
+    ]
 
     hostname = RPC.split("//")[1].split(":")[0] if "//" in RPC else RPC.split(":")[0]
     explorer_base = f"https://custom.xrpl.org/{hostname}:6006"
@@ -1290,7 +1312,8 @@ async def state_failed_page(error_code: str):
         account = f.get("account", "")
         account_cell = (
             f'<a href="{explorer_base}/accounts/{account}" target="_blank"><code>{account}</code></a>'
-            if account else ""
+            if account
+            else ""
         )
         rows += (
             f"<tr>"
@@ -1389,7 +1412,6 @@ async def state_validations(limit: int = 100):
     """
     vals = list(app.state.workload.store.validations)[-limit:]
     return [{"txn": v.txn, "ledger": v.seq, "source": v.src} for v in reversed(vals)]
-
 
 
 @r_state.get("/wallets")
@@ -1518,59 +1540,75 @@ async def _txn_producer(queue: asyncio.Queue, wl: "Workload", stop_event: asynci
 
     while not stop_event.is_set():
         try:
-            fee_info = await wl.get_fee_info()
+            try:
+                fee_info = await asyncio.wait_for(wl.get_fee_info(), timeout=5.0)
+            except Exception as e:
+                log.debug("producer: fee_info failed: %s", e)
+                await asyncio.sleep(0.5)
+                continue
+
+            batch_fee = fee_info.minimum_fee
+            batch_ledger = fee_info.ledger_current_index
+            batch_lls = batch_ledger + C.HORIZON
+
+            pending_counts = wl.get_pending_txn_counts_by_account()
+            free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
+
+            built_any = False
+            target = wl.target_txns_per_ledger
+            for addr in free_accounts[:target]:
+
+                wallet = wl.wallets[addr]
+                txn_type = pick_eligible_txn_type(wallet, wl.ctx)
+                if txn_type is None:
+                    continue
+
+                try:
+                    ctx = replace(wl.ctx, forced_account=wallet)
+                    composed = build_txn_dict(txn_type, ctx)
+                    if composed is None:
+                        continue
+                    txn = txn_model_cls(txn_type).from_xrpl(composed)
+                except Exception as e:
+                    log.warning("producer build %s/%s: %s", addr[:8], txn_type, e)
+                    continue
+
+                try:
+                    seq = await wl.alloc_seq(wallet.address)
+                except Exception as e:
+                    log.warning("producer alloc_seq %s: %s", addr[:8], e)
+                    continue
+
+                try:
+                    pending = await wl.build_sign_and_track(
+                        txn,
+                        wallet,
+                        fee_drops=batch_fee,
+                        created_ledger=batch_ledger,
+                        last_ledger_seq=batch_lls,
+                        preallocated_seq=seq,
+                    )
+                    try:
+                        queue.put_nowait(pending)
+                        built_any = True
+                    except asyncio.QueueFull:
+                        await wl.record_expired(pending.tx_hash)
+                        break
+                except Exception as e:
+                    await wl.release_seq(wallet.address, seq)
+                    log.warning("producer sign %s/%s: %s", addr[:8], txn_type, e)
+                    continue
+
+            if not built_any:
+                await asyncio.sleep(0)  # yield to event loop without busy-spinning
+            else:
+                await asyncio.sleep(0)  # yield after each pass so consumer/WS can run
+
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            log.debug("producer: fee_info failed: %s", e)
-            await asyncio.sleep(0.1)
-            continue
-
-        batch_fee = fee_info.minimum_fee
-        batch_ledger = fee_info.ledger_current_index
-        batch_lls = batch_ledger + C.HORIZON
-
-        pending_counts = wl.get_pending_txn_counts_by_account()
-        free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
-
-        built_any = False
-        for addr in free_accounts:
-            if queue.full():
-                break
-
-            wallet = wl.wallets[addr]
-            txn_type = pick_eligible_txn_type(wallet, wl.ctx)
-            if txn_type is None:
-                continue
-
-            ctx = replace(wl.ctx, forced_account=wallet)
-            composed = build_txn_dict(txn_type, ctx)
-            if composed is None:
-                continue
-
-            txn = txn_model_cls(txn_type).from_xrpl(composed)
-
-            try:
-                seq = await wl.alloc_seq(wallet.address)
-            except Exception as e:
-                log.warning("producer alloc_seq %s: %s", addr[:8], e)
-                continue
-
-            try:
-                pending = await wl.build_sign_and_track(
-                    txn, wallet,
-                    fee_drops=batch_fee,
-                    created_ledger=batch_ledger,
-                    last_ledger_seq=batch_lls,
-                    preallocated_seq=seq,
-                )
-                await queue.put(pending)
-                built_any = True
-            except Exception as e:
-                await wl.release_seq(wallet.address, seq)
-                log.warning("producer sign %s/%s: %s", addr[:8], txn_type, e)
-                continue
-
-        if not built_any:
-            await asyncio.sleep(0)  # yield to event loop without busy-spinning
+            log.error("PRODUCER CRASH (recovering): %s: %s", type(e).__name__, e, exc_info=True)
+            await asyncio.sleep(1)
 
 
 async def continuous_workload():
@@ -1607,7 +1645,12 @@ async def continuous_workload():
 
     try:
         while not workload_stop_event.is_set():
-            fee_info = await wl.get_fee_info()
+            try:
+                fee_info = await asyncio.wait_for(wl.get_fee_info(), timeout=5.0)
+            except Exception as e:
+                log.debug("consumer: fee_info failed: %s", e)
+                await asyncio.sleep(0.5)
+                continue
             batch_ledger = fee_info.ledger_current_index
 
             # Ledger-driven: one batch per new ledger close.
@@ -1630,10 +1673,13 @@ async def continuous_workload():
                         log.debug("Failed to create new account: %s", e)
                         workload_stats["failed"] += 1
 
-            # Drain queue up to target, discarding stale txns (generation mismatch)
+            # Drain queue up to target, discarding stale txns and deduplicating per account.
+            # The producer runs continuously and can enqueue multiple sequential txns for the
+            # same account between ledger closes (each valid at build time). Submitting them
+            # all in parallel causes tefPAST_SEQ. Keep only the latest per account.
             target = wl.target_txns_per_ledger
-            pending_batch: list[PendingTx] = []
-            while len(pending_batch) < target and not txn_queue.empty():
+            by_account: dict[str, PendingTx] = {}
+            while len(by_account) < target and not txn_queue.empty():
                 p = txn_queue.get_nowait()
                 rec = wl._record_for(p.account)
                 async with rec.lock:
@@ -1641,17 +1687,26 @@ async def continuous_workload():
                         await wl.record_expired(p.tx_hash)
                         log.debug(
                             "consumer: stale tx %s gen=%d != %d, expired",
-                            p.tx_hash[:8], p.account_generation, rec.generation,
+                            p.tx_hash[:8],
+                            p.account_generation,
+                            rec.generation,
                         )
                         continue
-                pending_batch.append(p)
+                # Keep latest per account (higher sequence); expire the older one
+                prev = by_account.get(p.account)
+                if prev is not None:
+                    await wl.record_expired(prev.tx_hash)
+                by_account[p.account] = p
+            pending_batch = list(by_account.values())
 
             if not pending_batch:
                 continue
 
             log.info(
                 "Batch: %d txns, ledger=%d, total_wallets=%d",
-                len(pending_batch), batch_ledger, len(wl.wallets),
+                len(pending_batch),
+                batch_ledger,
+                len(wl.wallets),
             )
 
             try:
@@ -1819,10 +1874,15 @@ async def toggle_txn_type(req: ToggleTypeReq):
     from workload.txn_factory.builder import _BUILDERS
 
     if req.txn_type not in _BUILDERS:
-        raise HTTPException(status_code=400, detail=f"Unknown transaction type: {req.txn_type}. Valid: {list(_BUILDERS.keys())}")
+        raise HTTPException(
+            status_code=400, detail=f"Unknown transaction type: {req.txn_type}. Valid: {list(_BUILDERS.keys())}"
+        )
 
     if req.txn_type in app.state.workload._config_disabled_types:
-        raise HTTPException(status_code=400, detail=f"{req.txn_type} is disabled in config.toml (amendment not available). Cannot toggle at runtime.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"{req.txn_type} is disabled in config.toml (amendment not available). Cannot toggle at runtime.",
+        )
 
     if req.enabled:
         app.state.workload.disabled_txn_types.discard(req.txn_type)
@@ -1869,7 +1929,10 @@ async def network_reset():
     try:
         r = subprocess.run(
             ["docker", "compose", "down"],
-            cwd=testnet_dir, capture_output=True, text=True, timeout=30,
+            cwd=testnet_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         steps.append({"step": "docker compose down", "returncode": r.returncode, "stderr": r.stderr.strip()})
     except Exception as e:
@@ -1888,24 +1951,24 @@ async def network_reset():
             db_path.unlink()
     steps.append({"step": "clean artifacts", "status": "ok"})
 
-    # 4. Regenerate with gen auto
+    # 4. Regenerate with library API
     try:
-        r = subprocess.run(
-            [gen_bin, "auto", "-o", testnet_dir, "-v", "5", "-n", "40",
-             "-t", "0:1:USD:1000000000", "--amendment-majority-time", "15 minutes"],
-            capture_output=True, text=True, timeout=60,
-        )
-        steps.append({"step": "gen auto", "returncode": r.returncode, "stdout": r.stdout.strip()[-200:]})
-        if r.returncode != 0:
-            steps.append({"step": "gen auto stderr", "stderr": r.stderr.strip()[-500:]})
+        from workload.gen_cmd import run_gen
+
+        num_validators = int(os.getenv("TESTNET_VALIDATORS", "5"))
+        run_gen(output_dir=testnet_dir, num_validators=num_validators)
+        steps.append({"step": "gen (library)", "status": "ok"})
     except Exception as e:
-        steps.append({"step": "gen auto", "error": str(e)})
+        steps.append({"step": "gen (library)", "error": str(e)})
 
     # 5. Docker compose up
     try:
         r = subprocess.run(
             ["docker", "compose", "up", "-d"],
-            cwd=testnet_dir, capture_output=True, text=True, timeout=60,
+            cwd=testnet_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         steps.append({"step": "docker compose up", "returncode": r.returncode, "stderr": r.stderr.strip()[-200:]})
     except Exception as e:
@@ -1927,6 +1990,78 @@ async def create_ammdeposit():
 async def create_ammwithdraw():
     """Create and submit an AMMWithdraw transaction."""
     return await create("AMMWithdraw")
+
+
+@r_transaction.post("/delegateset")
+async def create_delegateset():
+    """Create and submit a DelegateSet transaction."""
+    return await create("DelegateSet")
+
+
+@r_transaction.post("/credentialcreate")
+async def create_credentialcreate():
+    """Create and submit a CredentialCreate transaction."""
+    return await create("CredentialCreate")
+
+
+@r_transaction.post("/credentialaccept")
+async def create_credentialaccept():
+    """Create and submit a CredentialAccept transaction."""
+    return await create("CredentialAccept")
+
+
+@r_transaction.post("/credentialdelete")
+async def create_credentialdelete():
+    """Create and submit a CredentialDelete transaction."""
+    return await create("CredentialDelete")
+
+
+@r_transaction.post("/permissioneddomainset")
+async def create_permissioneddomainset():
+    """Create and submit a PermissionedDomainSet transaction."""
+    return await create("PermissionedDomainSet")
+
+
+@r_transaction.post("/permissioneddomaindelete")
+async def create_permissioneddomaindelete():
+    """Create and submit a PermissionedDomainDelete transaction."""
+    return await create("PermissionedDomainDelete")
+
+
+@r_transaction.post("/vaultcreate")
+async def create_vaultcreate():
+    """Create and submit a VaultCreate transaction."""
+    return await create("VaultCreate")
+
+
+@r_transaction.post("/vaultset")
+async def create_vaultset():
+    """Create and submit a VaultSet transaction."""
+    return await create("VaultSet")
+
+
+@r_transaction.post("/vaultdelete")
+async def create_vaultdelete():
+    """Create and submit a VaultDelete transaction."""
+    return await create("VaultDelete")
+
+
+@r_transaction.post("/vaultdeposit")
+async def create_vaultdeposit():
+    """Create and submit a VaultDeposit transaction."""
+    return await create("VaultDeposit")
+
+
+@r_transaction.post("/vaultwithdraw")
+async def create_vaultwithdraw():
+    """Create and submit a VaultWithdraw transaction."""
+    return await create("VaultWithdraw")
+
+
+@r_transaction.post("/vaultclawback")
+async def create_vaultclawback():
+    """Create and submit a VaultClawback transaction."""
+    return await create("VaultClawback")
 
 
 @r_dex.get("/metrics")

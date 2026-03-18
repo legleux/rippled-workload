@@ -1,6 +1,11 @@
-from random import SystemRandom
+try:
+    from antithesis.random import AntithesisRandom
 
-urand = SystemRandom()
+    urand = AntithesisRandom()
+except ImportError:
+    from random import SystemRandom
+
+    urand = SystemRandom()
 randrange = urand.randrange
 random = urand.random
 sample = urand.sample

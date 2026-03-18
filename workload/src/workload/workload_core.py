@@ -29,6 +29,7 @@ from xrpl.wallet import Wallet
 
 import workload.constants as C
 from workload.amm import AMMPoolRegistry, DEXMetrics
+from workload.assertions import tx_rejected, tx_submitted, tx_validated
 from workload.balances import BalanceTracker
 from workload.sqlite_store import SQLiteStore
 from workload.txn_factory.builder import TxnContext, generate_txn
@@ -211,9 +212,7 @@ class Workload:
 
         self.target_txns_per_ledger: int = 100
 
-        self._config_disabled_types: frozenset[str] = frozenset(
-            self.config.get("transactions", {}).get("disabled", [])
-        )
+        self._config_disabled_types: frozenset[str] = frozenset(self.config.get("transactions", {}).get("disabled", []))
         self.disabled_txn_types: set[str] = set(self._config_disabled_types)
 
         self.user_token_status: dict[str, set[tuple[str, str]]] = {}
@@ -221,6 +220,9 @@ class Workload:
         self._currencies: list[IssuedCurrency] = []
 
         self._mptoken_issuance_ids: list[str] = []
+        self._credentials: list[dict] = []  # [{issuer, subject, credential_type, accepted}]
+        self._vaults: list[dict] = []  # [{vault_id, owner, asset}]
+        self._domains: list[dict] = []  # [{domain_id, owner}]
 
         self.amm = AMMPoolRegistry()
         self.dex_metrics = DEXMetrics()
@@ -264,6 +266,9 @@ class Workload:
         ctx.amm_pools = self.amm.pool_ids
         ctx.amm_pool_registry = self.amm.pools
         ctx.disabled_types = self.disabled_txn_types
+        ctx.credentials = self._credentials
+        ctx.vaults = self._vaults
+        ctx.domains = self._domains
         return ctx
 
     def update_txn_context(self):
@@ -380,19 +385,23 @@ class Workload:
             account_data = _json.load(f)
 
         gateway_count = self.config["gateways"]["number"]
-        user_count = self.config["users"]["number"]
         genesis_cfg = self.config.get("genesis", {})
         currency_codes = genesis_cfg.get("currencies", ["USD", "CNY", "BTC", "ETH"])
         gateway_names = self.config.get("gateways", {}).get("names", [])
+        # user_count derived from accounts.json — not config.toml
+        user_count = len(account_data) - gateway_count
 
-        log.info("Loading from genesis: %d accounts (%d gateways, %d users)", len(account_data), gateway_count, user_count)
+        log.info(
+            "Loading from genesis: %d accounts (%d gateways, %d users)", len(account_data), gateway_count, user_count
+        )
 
-        # Build wallets from seeds — detect algorithm from seed prefix
+        # Build wallets from seeds — try ed25519 first, fall back to secp256k1
         for i, (address, seed) in enumerate(account_data):
-            algo = xrpl.CryptoAlgorithm.ED25519 if seed.startswith("sEd") else xrpl.CryptoAlgorithm.SECP256K1
-            w = Wallet.from_seed(seed, algorithm=algo)
+            w = Wallet.from_seed(seed, algorithm=xrpl.CryptoAlgorithm.ED25519)
             if w.address != address:
-                log.error("Address mismatch for account %d: expected %s, derived %s (algo=%s)", i, address, w.address, algo.value)
+                w = Wallet.from_seed(seed, algorithm=xrpl.CryptoAlgorithm.SECP256K1)
+            if w.address != address:
+                log.error("Address mismatch for account %d: expected %s, got %s", i, address, w.address)
                 continue
             self.wallets[w.address] = w
             self._record_for(w.address)
@@ -402,11 +411,8 @@ class Workload:
                 if i < len(gateway_names):
                     self.gateway_names[w.address] = gateway_names[i]
                 self.save_wallet_to_store(w, is_gateway=True)
-            elif i < gateway_count + user_count:
-                self.users.append(w)
-                self.save_wallet_to_store(w, is_user=True)
             else:
-                # AMM creator or extra accounts
+                self.users.append(w)
                 self.save_wallet_to_store(w, is_user=True)
 
         # Build currencies (4 per gateway)
@@ -417,7 +423,12 @@ class Workload:
         self.save_currencies_to_store()
         self.update_txn_context()
 
-        log.info("Genesis loaded: %d gateways, %d users, %d currencies", len(self.gateways), len(self.users), len(self._currencies))
+        log.info(
+            "Genesis loaded: %d gateways, %d users, %d currencies",
+            len(self.gateways),
+            len(self.users),
+            len(self._currencies),
+        )
 
         # Discover AMM pools from the ledger
         await self._discover_amm_pools()
@@ -508,6 +519,7 @@ class Workload:
     async def fetch_ledger_tx_count(self, ledger_index: int) -> int | None:
         """Fetch the number of transactions in a validated ledger. Returns None on failure."""
         from xrpl.models.requests import Ledger as LedgerReq
+
         resp = await self._rpc(LedgerReq(ledger_index=ledger_index, transactions=True, expand=False))
         if resp.is_successful():
             return len(resp.result.get("ledger", {}).get("transactions", []))
@@ -517,6 +529,7 @@ class Workload:
     def update_server_status(self, msg: dict) -> None:
         """Update server status state from a serverStatus WS message."""
         import time
+
         self.latest_server_status = msg
         self.latest_server_status_time = time.time()
 
@@ -675,6 +688,8 @@ class Workload:
         p.state = C.TxState.SUBMITTED
         p.engine_result_first = p.engine_result_first or engine_result
         self.pending[new_hash] = p
+        if p.transaction_type:
+            tx_submitted(p.transaction_type)
         await self.store.mark(
             new_hash,
             state=C.TxState.SUBMITTED,
@@ -686,12 +701,21 @@ class Workload:
 
     async def record_validated(self, rec: ValidationRecord, meta_result: str | None = None) -> dict:
         p_live = await self._apply_validation_state(rec, meta_result)
+        if p_live and p_live.transaction_type:
+            tx_validated(p_live.transaction_type, meta_result or "unknown")
         self._on_account_adopted(p_live, rec)
         self._on_payment_validated(p_live, meta_result)
         await self._on_mptoken_created(p_live, rec)
         await self._on_batch_validated(p_live)
         self._on_amm_created(p_live, meta_result)
         self._on_dex_activity(p_live, meta_result)
+        self._on_credential_created(p_live)
+        self._on_credential_accepted(p_live)
+        self._on_credential_deleted(p_live)
+        await self._on_vault_created(p_live, rec)
+        self._on_vault_deleted(p_live)
+        await self._on_domain_created(p_live, rec)
+        self._on_domain_deleted(p_live)
         log.debug("txn %s validated at ledger %s via %s", rec.txn, rec.seq, rec.src)
         return {"tx_hash": rec.txn, "ledger_index": rec.seq, "source": rec.src, "meta_result": meta_result}
 
@@ -735,7 +759,8 @@ class Workload:
             log.warning(
                 "Skipped adopting %s — funded amount %d drops insufficient for any configured payment "
                 "(need > %d drops for XRP payment + reserve + fees)",
-                w.address, funded_drops,
+                w.address,
+                funded_drops,
                 int(self.config.get("transactions", {}).get("payment", {}).get("amount", 0)) + 2_010_000,
             )
 
@@ -809,8 +834,16 @@ class Workload:
             amount2 = tx_json.get("Amount2")
             if not (amount1 and amount2):
                 return
-            asset1 = {"currency": "XRP"} if isinstance(amount1, str) else {"currency": amount1["currency"], "issuer": amount1["issuer"]}
-            asset2 = {"currency": "XRP"} if isinstance(amount2, str) else {"currency": amount2["currency"], "issuer": amount2["issuer"]}
+            asset1 = (
+                {"currency": "XRP"}
+                if isinstance(amount1, str)
+                else {"currency": amount1["currency"], "issuer": amount1["issuer"]}
+            )
+            asset2 = (
+                {"currency": "XRP"}
+                if isinstance(amount2, str)
+                else {"currency": amount2["currency"], "issuer": amount2["issuer"]}
+            )
             self._register_amm_pool(asset1, asset2, p_live.account)
         except Exception as e:
             log.warning("Failed to register AMM pool from %s: %s", p_live.tx_hash, e)
@@ -830,6 +863,120 @@ class Workload:
             self.dex_metrics.total_withdrawals += 1
         elif p_live.transaction_type == C.TxType.OFFER_CREATE:
             self.dex_metrics.total_offers += 1
+
+    # ------------------------------------------------------------------
+    # Credential hooks
+    # ------------------------------------------------------------------
+    def _on_credential_created(self, p_live: PendingTx | None) -> None:
+        if not (p_live and p_live.transaction_type == C.TxType.CREDENTIAL_CREATE):
+            return
+        tx_json = p_live.tx_json or {}
+        cred = {
+            "issuer": tx_json.get("Account"),
+            "subject": tx_json.get("Subject"),
+            "credential_type": tx_json.get("CredentialType"),
+            "accepted": False,
+        }
+        if cred["issuer"] and cred["subject"] and cred["credential_type"]:
+            self._credentials.append(cred)
+            self.update_txn_context()
+            log.debug("Tracked credential: issuer=%s subject=%s", cred["issuer"][:8], cred["subject"][:8])
+
+    def _on_credential_accepted(self, p_live: PendingTx | None) -> None:
+        if not (p_live and p_live.transaction_type == C.TxType.CREDENTIAL_ACCEPT):
+            return
+        tx_json = p_live.tx_json or {}
+        issuer = tx_json.get("Issuer")
+        subject = tx_json.get("Account")  # The acceptor is the subject
+        cred_type = tx_json.get("CredentialType")
+        for c in self._credentials:
+            if c["issuer"] == issuer and c["subject"] == subject and c["credential_type"] == cred_type:
+                c["accepted"] = True
+                break
+
+    def _on_credential_deleted(self, p_live: PendingTx | None) -> None:
+        if not (p_live and p_live.transaction_type == C.TxType.CREDENTIAL_DELETE):
+            return
+        tx_json = p_live.tx_json or {}
+        issuer = tx_json.get("Issuer")
+        subject = tx_json.get("Subject")
+        cred_type = tx_json.get("CredentialType")
+        self._credentials = [
+            c
+            for c in self._credentials
+            if not (c["issuer"] == issuer and c["subject"] == subject and c["credential_type"] == cred_type)
+        ]
+        self.update_txn_context()
+
+    # ------------------------------------------------------------------
+    # Vault hooks
+    # ------------------------------------------------------------------
+    async def _on_vault_created(self, p_live: PendingTx | None, rec: ValidationRecord) -> None:
+        if not (p_live and p_live.transaction_type == C.TxType.VAULT_CREATE):
+            return
+        try:
+            tx_result = await self._rpc(Tx(transaction=rec.txn))
+            meta = tx_result.result.get("meta", {})
+            for node in meta.get("AffectedNodes", []):
+                created = node.get("CreatedNode", {})
+                if created.get("LedgerEntryType") == "Vault":
+                    vault_id = created.get("LedgerIndex")
+                    if vault_id:
+                        tx_json = p_live.tx_json or {}
+                        vault = {
+                            "vault_id": vault_id,
+                            "owner": p_live.account,
+                            "asset": tx_json.get("Asset"),
+                        }
+                        self._vaults.append(vault)
+                        self.update_txn_context()
+                        log.debug("Tracked vault: %s owner=%s", vault_id[:12], p_live.account[:8])
+                        return
+        except Exception as e:
+            log.warning("Failed to extract vault ID from %s: %s", rec.txn, e)
+
+    def _on_vault_deleted(self, p_live: PendingTx | None) -> None:
+        if not (p_live and p_live.transaction_type == C.TxType.VAULT_DELETE):
+            return
+        tx_json = p_live.tx_json or {}
+        vault_id = tx_json.get("VaultID")
+        if vault_id:
+            self._vaults = [v for v in self._vaults if v["vault_id"] != vault_id]
+            self.update_txn_context()
+
+    # ------------------------------------------------------------------
+    # Permissioned Domain hooks
+    # ------------------------------------------------------------------
+    async def _on_domain_created(self, p_live: PendingTx | None, rec: ValidationRecord) -> None:
+        if not (p_live and p_live.transaction_type == C.TxType.PERMISSIONED_DOMAIN_SET):
+            return
+        # If DomainID is present, this is an update — not a new domain
+        if (p_live.tx_json or {}).get("DomainID"):
+            return
+        try:
+            tx_result = await self._rpc(Tx(transaction=rec.txn))
+            meta = tx_result.result.get("meta", {})
+            for node in meta.get("AffectedNodes", []):
+                created = node.get("CreatedNode", {})
+                if created.get("LedgerEntryType") == "PermissionedDomain":
+                    domain_id = created.get("LedgerIndex")
+                    if domain_id:
+                        domain = {"domain_id": domain_id, "owner": p_live.account}
+                        self._domains.append(domain)
+                        self.update_txn_context()
+                        log.debug("Tracked domain: %s owner=%s", domain_id[:12], p_live.account[:8])
+                        return
+        except Exception as e:
+            log.warning("Failed to extract domain ID from %s: %s", rec.txn, e)
+
+    def _on_domain_deleted(self, p_live: PendingTx | None) -> None:
+        if not (p_live and p_live.transaction_type == C.TxType.PERMISSIONED_DOMAIN_DELETE):
+            return
+        tx_json = p_live.tx_json or {}
+        domain_id = tx_json.get("DomainID")
+        if domain_id:
+            self._domains = [d for d in self._domains if d["domain_id"] != domain_id]
+            self.update_txn_context()
 
     async def _cascade_expire_account(
         self, account: str, failed_seq: int, exclude_hash: str | None = None, fetch_seq_from_ledger: bool = False
@@ -943,8 +1090,8 @@ class Workload:
         Returns:
             True if the account can afford at least one configured transaction type.
         """
-        BASE_RESERVE_DROPS = 2_000_000   # 2 XRP minimum account reserve
-        FEE_BUFFER_DROPS   = 10_000      # headroom for fees on a few txns
+        BASE_RESERVE_DROPS = 2_000_000  # 2 XRP minimum account reserve
+        FEE_BUFFER_DROPS = 10_000  # headroom for fees on a few txns
 
         # XRP check: must cover reserve + fee buffer + at least one payment
         xrp_balance = balances.get("XRP", 0.0)
@@ -1017,7 +1164,11 @@ class Workload:
             seq = tx.get("Sequence")
             acct_gen = 0  # Ticket-based tx; generation not applicable
 
-        base_fee = fee_drops if (fee_drops is not None and need_fee) else (await self._open_ledger_fee() if need_fee else int(tx["Fee"]))
+        base_fee = (
+            fee_drops
+            if (fee_drops is not None and need_fee)
+            else (await self._open_ledger_fee() if need_fee else int(tx["Fee"]))
+        )
 
         txn_type = tx.get("TransactionType")
         if txn_type == "Batch":
@@ -1025,10 +1176,10 @@ class Workload:
             inner_txns = tx.get("RawTransactions", [])
             fee = (2 * OWNER_RESERVE_DROPS) + (base_fee * len(inner_txns))
             log.debug(f"Batch fee: 2*{OWNER_RESERVE_DROPS} + {base_fee}*{len(inner_txns)} = {fee} drops")
-        elif txn_type == "AMMCreate":
+        elif txn_type in ("AMMCreate", "VaultCreate", "PermissionedDomainSet"):
             OWNER_RESERVE_DROPS = 2_000_000
             fee = OWNER_RESERVE_DROPS
-            log.debug(f"AMMCreate fee: {fee} drops (owner_reserve)")
+            log.debug(f"{txn_type} fee: {fee} drops (owner_reserve)")
         else:
             fee = base_fee
 
@@ -1097,6 +1248,8 @@ class Workload:
 
             if er == "tefPAST_SEQ":
                 p.state = C.TxState.REJECTED
+                if p.transaction_type:
+                    tx_rejected(p.transaction_type, er)
                 self.pending[p.tx_hash] = p
                 await self.store.mark(
                     p.tx_hash,
@@ -1116,7 +1269,12 @@ class Workload:
                     _actual = _ai.result["account_data"]["Sequence"]
                     log.error(
                         "TEF_PAST_SEQ_DETAIL: %s %s submitted_seq=%d current_ledger_seq=%d delta=%d next_seq_before=%s",
-                        p.transaction_type, p.account[:12], p.sequence, _actual, _actual - p.sequence, rec.next_seq,
+                        p.transaction_type,
+                        p.account[:12],
+                        p.sequence,
+                        _actual,
+                        _actual - p.sequence,
+                        rec.next_seq,
                     )
                 except Exception as _e:
                     log.error("TEF_PAST_SEQ_DETAIL: fetch failed: %s", _e)
@@ -1139,6 +1297,8 @@ class Workload:
 
             if isinstance(er, str) and er.startswith(("tem", "tef")):
                 p.state = C.TxState.REJECTED
+                if p.transaction_type:
+                    tx_rejected(p.transaction_type, er)
                 self.pending[p.tx_hash] = p
                 await self.store.mark(
                     p.tx_hash,
@@ -2080,9 +2240,7 @@ class Workload:
                 amm_txn_pairs.append((amm_create_tx, gw))
                 pool_count += 1
 
-        phase7_validated, phase7_total, phase7_pending = await self._init_batch(
-            amm_txn_pairs, "Phase 7: Gateway AMMs"
-        )
+        phase7_validated, phase7_total, phase7_pending = await self._init_batch(amm_txn_pairs, "Phase 7: Gateway AMMs")
 
         for p in phase7_pending:
             if p.state == C.TxState.VALIDATED and p.meta_txn_result == "tesSUCCESS":
@@ -2126,9 +2284,7 @@ class Workload:
 
         all_iou_pairs = list(combinations(self._currencies, 2))
         all_iou_pairs = [
-            (c1, c2)
-            for c1, c2 in all_iou_pairs
-            if not (c1.currency == c2.currency and c1.issuer == c2.issuer)
+            (c1, c2) for c1, c2 in all_iou_pairs if not (c1.currency == c2.currency and c1.issuer == c2.issuer)
         ]
         shuffle(all_iou_pairs)
 
@@ -2289,6 +2445,8 @@ class Workload:
             if key in store_stats:
                 result[key] = store_stats[key]
 
+        result["by_type"] = dict(self.store.count_by_type)
+
         result["dex"] = self.snapshot_dex_metrics()
 
         return result
@@ -2320,16 +2478,19 @@ class Workload:
             return 0
 
         records = [
-            (tx_hash, {
-                "state": p.state,
-                "account": p.account,
-                "sequence": p.sequence,
-                "transaction_type": p.transaction_type,
-                "engine_result_first": p.engine_result_first,
-                "validated_ledger": p.validated_ledger,
-                "meta_txn_result": p.meta_txn_result,
-                "finalized_at": p.finalized_at,
-            })
+            (
+                tx_hash,
+                {
+                    "state": p.state,
+                    "account": p.account,
+                    "sequence": p.sequence,
+                    "transaction_type": p.transaction_type,
+                    "engine_result_first": p.engine_result_first,
+                    "validated_ledger": p.validated_ledger,
+                    "meta_txn_result": p.meta_txn_result,
+                    "finalized_at": p.finalized_at,
+                },
+            )
             for tx_hash, p in self.pending.items()
         ]
 
@@ -2418,13 +2579,9 @@ class Workload:
             "link": f"https://custom.xrpl.org/localhost:{ws_port}/transactions/{tx_hash}",
         }
 
-
     def _cleanup_terminal(self, keep_recent: int = 200) -> int:
         """Remove old terminal txns from self.pending (already persisted in store)."""
-        terminal = [
-            (txh, p) for txh, p in self.pending.items()
-            if p.state in C.TERMINAL_STATE
-        ]
+        terminal = [(txh, p) for txh, p in self.pending.items() if p.state in C.TERMINAL_STATE]
         if len(terminal) <= keep_recent:
             return 0
         terminal.sort(key=lambda x: x[1].finalized_at or x[1].created_at)

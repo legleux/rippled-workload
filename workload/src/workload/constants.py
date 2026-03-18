@@ -33,6 +33,22 @@ class TxType(StrEnum):
     TICKET_CREATE = "TicketCreate"
     PAYMENT = "Payment"
     TRUSTSET = "TrustSet"
+    # Credentials
+    CREDENTIAL_CREATE = "CredentialCreate"
+    CREDENTIAL_ACCEPT = "CredentialAccept"
+    CREDENTIAL_DELETE = "CredentialDelete"
+    # Permissioned Domains
+    PERMISSIONED_DOMAIN_SET = "PermissionedDomainSet"
+    PERMISSIONED_DOMAIN_DELETE = "PermissionedDomainDelete"
+    # Delegation
+    DELEGATE_SET = "DelegateSet"
+    # Vaults
+    VAULT_CREATE = "VaultCreate"
+    VAULT_SET = "VaultSet"
+    VAULT_DELETE = "VaultDelete"
+    VAULT_DEPOSIT = "VaultDeposit"
+    VAULT_WITHDRAW = "VaultWithdraw"
+    VAULT_CLAWBACK = "VaultClawback"
 
 
 class TxState(StrEnum):
@@ -56,7 +72,9 @@ TERMINAL_STATE: frozenset[TxState] = frozenset({TxState.VALIDATED, TxState.REJEC
 # FAILED_NET is intentionally excluded from TERMINAL_STATE: a timed-out submission may have
 # reached rippled and could still be queued. The account stays locked until the tx is either
 # seen validated on-chain or its LastLedgerSequence expires.
-PENDING_STATES: frozenset[TxState] = frozenset({TxState.CREATED, TxState.SUBMITTED, TxState.RETRYABLE, TxState.FAILED_NET})
+PENDING_STATES: frozenset[TxState] = frozenset(
+    {TxState.CREATED, TxState.SUBMITTED, TxState.RETRYABLE, TxState.FAILED_NET}
+)
 
 __all__ = [
     "ACCOUNT_ZERO",

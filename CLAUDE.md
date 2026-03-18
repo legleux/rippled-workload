@@ -74,13 +74,14 @@ Transactions move through these states (constants.py):
 
 The `txn_factory` uses a registry pattern (builder.py):
 
-- `@register_txn(Payment)` decorators register builder functions
-- `TxnContext` provides wallets, currencies, AMM pools, and defaults
+- `_BUILDERS` dict maps type name → (builder_fn, model_class) pairs
+- `TxnContext` provides wallets, currencies, AMM pools, credentials, vaults, domains, and defaults
 - `generate_txn()` selects a random or specified transaction type, weighted by config percentages
-- Builders return dicts that are converted to xrpl-py Transaction models
-- Capability-aware: skips types requiring MPT IDs, NFTs, or AMM pools when those don't exist
+- `pick_eligible_txn_type(wallet, ctx)` applies global + per-account capability filters before weighted sampling
+- Builders return dicts (or None if ineligible) that are converted to xrpl-py Transaction models
+- Capability-aware: skips types requiring MPT IDs, NFTs, AMM pools, credentials, vaults, or domains when those don't exist
 
-Supported transaction types: Payment, OfferCreate, OfferCancel, TrustSet, AccountSet, AMMCreate, AMMDeposit, AMMWithdraw, NFTokenMint, NFTokenBurn, NFTokenCreateOffer/CancelOffer/AcceptOffer, MPTokenIssuanceCreate/Set/Authorize/Destroy, TicketCreate, Batch
+Supported transaction types (31): Payment, OfferCreate, OfferCancel, TrustSet, AccountSet, AMMCreate, AMMDeposit, AMMWithdraw, NFTokenMint, NFTokenBurn, NFTokenCreateOffer/CancelOffer/AcceptOffer, MPTokenIssuanceCreate/Set/Authorize/Destroy, TicketCreate, Batch, DelegateSet, CredentialCreate/Accept/Delete, PermissionedDomainSet/Delete, VaultCreate/Set/Delete/Deposit/Withdraw/Clawback
 
 ### Validation Tracking
 
@@ -91,17 +92,24 @@ Two concurrent paths to validation (see workload/ws-architecture.md):
 
 Both paths deduplicate by `(tx_hash, ledger_index)`. See `workload/ws-architecture.md` and `workload/ws-architecture.excalidraw` for the full architecture diagram.
 
+### Assertions Framework
+
+`assertions.py` centralises all Antithesis SDK interaction:
+- SDK available → delegates to `antithesis.assertions.always/sometimes` and `antithesis.lifecycle`
+- SDK unavailable → logs + tracks stats locally via `get_stats()`
+- Transaction helpers: `tx_submitted(type)`, `tx_validated(type, result)`, `tx_rejected(type, code)`
+- Replaces inline try/except SDK detection in `ws_processor.py` and `app.py`
+
 ### Store Architecture
 
-- **SQLiteStore** (primary): Persistent storage for accounts, transactions, validations, balances. Survives restarts.
+- **SQLiteStore** (opt-in via `WORKLOAD_PERSIST=1`): Persistent storage for accounts, transactions, validations, balances. Survives restarts.
 - **InMemoryStore**: In-process metrics, recent validations deque, validation-by-source counters.
-- **Store Protocol**: Clean interface both stores implement.
 
 ### Startup Modes
 
-Three-tier initialization cascade in `app.py:lifespan()`:
+Two-tier initialization cascade in `app.py:lifespan()` (SQLite only when `WORKLOAD_PERSIST=1`):
 
-1. **SQLite hot-reload**: If `state.db` exists with state, load accounts/balances from it (fastest)
+1. **SQLite hot-reload** (opt-in): If `WORKLOAD_PERSIST=1` and `state.db` exists with state, load accounts/balances from it (fastest)
 2. **Genesis load**: If `accounts.json` exists from `generate_ledger`, import pre-provisioned accounts and discover AMM pools from ledger
 3. **Full init**: Fund gateways, set flags, fund users, establish trust lines, create AMM pools from scratch (slowest)
 
@@ -235,16 +243,14 @@ AMM pools are tracked in `_amm_pool_registry` (list of pool dicts) with deduplic
 ### Adding a New Transaction Type
 
 1. Add to `TxType` enum in constants.py
-2. Add model import and builder in txn_factory/builder.py:
-```python
-@register_txn(MyNewTxn)
-def build_mynew_txn(ctx: TxnContext) -> dict:
-    src = ctx.rand_account()
-    return {"TransactionType": "MyNewTxn", "Account": src.address, ...}
-```
-3. Optionally add to `disabled` list in config.toml to exclude from random selection
-4. Optionally add percentage weight in `[transactions.percentages]`
-5. Add defaults if needed to config.toml `[transactions.mynew_txn]`
+2. Add xrpl-py model import and `_build_*` function in txn_factory/builder.py (sync, returns dict or None)
+3. Add entry to `_BUILDERS` dict: `"MyNewTxn": (_build_mynew_txn, MyNewTxn)`
+4. Add capability filters in `pick_eligible_txn_type()` (global and per-account) and `generate_txn()`
+5. If stateful: add tracking list in workload_core.py (`self._things`), wire into `configure_txn_context()`, add `TxnContext` field, add validation hook(s) in `record_validated()`
+6. Add tunable params in config.toml under `[transactions.mynew_txn]`, read via `ctx.config`
+7. Optionally add percentage weight in `[transactions.percentages]`
+8. Add POST endpoint in app.py and test_composer script
+9. If creates a ledger object: add to owner_reserve fee path in `build_sign_and_track()`
 
 ### Working with Accounts
 
@@ -266,11 +272,13 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 ## Important Notes
 
 - The workload uses Python 3.14 (requires 3.13+) and the `uv` package manager
-- `generate-ledger` is currently a local editable dependency (`../../generate_ledger` in pyproject.toml `[tool.uv.sources]`) — may change to a published package later
+- `generate-ledger` is a local editable dependency (`../../generate_ledger`). Importable as both `generate_ledger` and `gl` (alias package).
+- SQLite persistence is **opt-in** via `WORKLOAD_PERSIST=1`. Default: fresh genesis load every restart.
 - All timestamps are in seconds since epoch (time.time())
 - Account initialization happens at startup in `lifespan()` (app.py)
 - WebSocket listener, WS processor, finality checker, and DEX metrics poller run as concurrent tasks in an asyncio.TaskGroup
 - `prepare-workload/` is legacy — superseded by the `generate_ledger` package (`gen auto` CLI). Do not add new code there.
+- New transaction types (Vaults, DelegateSet, etc.) require amendments not yet enabled in rippled develop. They get `temDISABLED` gracefully on networks without the amendments.
 
 ## Current Priorities
 
@@ -281,7 +289,9 @@ See `workload/docs/todo/TODO.md` for the full list. The three P0 items are:
 3. **XRP accounting / fund recovery**: On shutdown or Ctrl-C, sweep all XRP back to the funding source. The only permanently consumed XRP should be transaction fees (burned) and account reserves. Stretch: AccountDelete to reclaim reserves.
 
 ## Active Technologies
-- Python 3.14 (3.13+ required) + FastAPI, xrpl-py (minimal usage), uvicorn, asyncio.TaskGroup
-- SQLite3 (via sqlite_store.py) for persistence, InMemoryStore for metrics
+- Python 3.14 (3.13+ required) + FastAPI, xrpl-py 4.5.0, uvicorn, asyncio.TaskGroup
+- SQLite3 (via sqlite_store.py, opt-in) for persistence, InMemoryStore for metrics
 - WebSocket (ws.py + ws_processor.py) for real-time validation tracking
-- generate_ledger package (external) for network setup
+- Antithesis SDK 0.2.0 (assertions.py) for coverage-guided assertions
+- generate_ledger / gl package (external, importable as library or CLI) for network setup
+- pynacl for fast ed25519 key generation

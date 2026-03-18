@@ -8,7 +8,6 @@ port = 80
 
 
 class Server(BaseHTTPRequestHandler):
-
     def do_GET(self):
         json_to_pass = json.dumps(unl_json)
         self.send_response(code=200)
