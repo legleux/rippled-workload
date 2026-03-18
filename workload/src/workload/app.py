@@ -1555,8 +1555,12 @@ async def _txn_producer(queue: asyncio.Queue, wl: "Workload", stop_event: asynci
             free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
 
             built_any = False
+            queue_full = False
             target = wl.target_txns_per_ledger
             for addr in free_accounts[:target]:
+                if queue.full():
+                    queue_full = True
+                    break
 
                 wallet = wl.wallets[addr]
                 txn_type = pick_eligible_txn_type(wallet, wl.ctx)
@@ -1588,21 +1592,23 @@ async def _txn_producer(queue: asyncio.Queue, wl: "Workload", stop_event: asynci
                         last_ledger_seq=batch_lls,
                         preallocated_seq=seq,
                     )
-                    try:
-                        queue.put_nowait(pending)
-                        built_any = True
-                    except asyncio.QueueFull:
-                        await wl.record_expired(pending.tx_hash)
-                        break
+                    queue.put_nowait(pending)
+                    built_any = True
+                except asyncio.QueueFull:
+                    await wl.record_expired(pending.tx_hash)
+                    queue_full = True
+                    break
                 except Exception as e:
                     await wl.release_seq(wallet.address, seq)
                     log.warning("producer sign %s/%s: %s", addr[:8], txn_type, e)
                     continue
 
-            if not built_any:
-                await asyncio.sleep(0)  # yield to event loop without busy-spinning
+            if queue_full:
+                await asyncio.sleep(1)  # back off — let consumer drain
+            elif not built_any:
+                await asyncio.sleep(0)
             else:
-                await asyncio.sleep(0)  # yield after each pass so consumer/WS can run
+                await asyncio.sleep(0)
 
         except asyncio.CancelledError:
             raise
