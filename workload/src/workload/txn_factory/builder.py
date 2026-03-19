@@ -113,6 +113,17 @@ class TxnContext:
         """
         return self.rand_accounts(1, omit)[0]
 
+    def rand_owner(self, owner_addresses: set[str]) -> "Wallet | None":
+        """Pick a random account that is in the owner set.
+
+        When forced_account is set, returns it only if it's an owner (else None).
+        When not forced, picks randomly from the intersection of wallets and owners.
+        """
+        if self.forced_account is not None:
+            return self.forced_account if self.forced_account.address in owner_addresses else None
+        candidates = [w for w in self.wallets if w.address in owner_addresses]
+        return choice(candidates) if candidates else None
+
     def get_account_currencies(self, account: "Wallet") -> list[IssuedCurrency]:
         """Get list of IOU currencies this account has a non-zero balance of.
 
@@ -773,7 +784,15 @@ def _build_amm_withdraw(ctx: TxnContext) -> dict | None:
     Withdraws 10% of deposit amounts to keep pools healthy.
     Only picks pools where src holds LP tokens — returns None if no eligible pool found.
     """
-    src = ctx.rand_account()
+    lp_holders: set[str] = set()
+    for p in (ctx.amm_pool_registry or []):
+        for addr in p.get("lp_holders", [p.get("creator", "")]):
+            lp_holders.add(addr)
+    if not lp_holders:
+        return None
+    src = ctx.rand_owner(lp_holders)
+    if src is None:
+        return None
     eligible_pools = [
         p for p in (ctx.amm_pool_registry or []) if src.address in p.get("lp_holders", [p.get("creator", "")])
     ]
@@ -930,8 +949,14 @@ def _build_credential_accept(ctx: TxnContext) -> dict | None:
     """Build a CredentialAccept — subject accepts an issued credential."""
     if not ctx.credentials:
         return None
-    src = ctx.rand_account()
-    eligible = [c for c in ctx.credentials if c["subject"] == src.address and not c.get("accepted")]
+    unaccepted = [c for c in ctx.credentials if not c.get("accepted")]
+    if not unaccepted:
+        return None
+    subjects = {c["subject"] for c in unaccepted}
+    src = ctx.rand_owner(subjects)
+    if src is None:
+        return None
+    eligible = [c for c in unaccepted if c["subject"] == src.address]
     if not eligible:
         return None
     cred = choice(eligible)
@@ -947,7 +972,10 @@ def _build_credential_delete(ctx: TxnContext) -> dict | None:
     """Build a CredentialDelete — issuer or subject removes a credential."""
     if not ctx.credentials:
         return None
-    src = ctx.rand_account()
+    participants = {c["issuer"] for c in ctx.credentials} | {c["subject"] for c in ctx.credentials}
+    src = ctx.rand_owner(participants)
+    if src is None:
+        return None
     eligible = [c for c in ctx.credentials if c["issuer"] == src.address or c["subject"] == src.address]
     if not eligible:
         return None
@@ -1000,7 +1028,10 @@ def _build_permissioned_domain_delete(ctx: TxnContext) -> dict | None:
     """Build a PermissionedDomainDelete — owner removes a domain."""
     if not ctx.domains:
         return None
-    src = ctx.rand_account()
+    owners = {d["owner"] for d in ctx.domains}
+    src = ctx.rand_owner(owners)
+    if src is None:
+        return None
     owned = [d for d in ctx.domains if d["owner"] == src.address]
     if not owned:
         return None
@@ -1043,7 +1074,10 @@ def _build_vault_set(ctx: TxnContext) -> dict | None:
     """
     if not ctx.vaults:
         return None
-    src = ctx.rand_account()
+    vault_owners = {v["owner"] for v in ctx.vaults}
+    src = ctx.rand_owner(vault_owners)
+    if src is None:
+        return None
     owned = [v for v in ctx.vaults if v["owner"] == src.address]
     if not owned:
         return None
@@ -1065,7 +1099,10 @@ def _build_vault_delete(ctx: TxnContext) -> dict | None:
     """Build a VaultDelete — owner removes a vault."""
     if not ctx.vaults:
         return None
-    src = ctx.rand_account()
+    vault_owners = {v["owner"] for v in ctx.vaults}
+    src = ctx.rand_owner(vault_owners)
+    if src is None:
+        return None
     owned = [v for v in ctx.vaults if v["owner"] == src.address]
     if not owned:
         return None
@@ -1101,7 +1138,10 @@ def _build_vault_withdraw(ctx: TxnContext) -> dict | None:
     """
     if not ctx.vaults:
         return None
-    src = ctx.rand_account()
+    vault_owners = {v["owner"] for v in ctx.vaults}
+    src = ctx.rand_owner(vault_owners)
+    if src is None:
+        return None
     owned = [v for v in ctx.vaults if v["owner"] == src.address]
     if not owned:
         return None
@@ -1122,7 +1162,10 @@ def _build_vault_clawback(ctx: TxnContext) -> dict | None:
     """
     if not ctx.vaults:
         return None
-    src = ctx.rand_account()
+    vault_owners = {v["owner"] for v in ctx.vaults}
+    src = ctx.rand_owner(vault_owners)
+    if src is None:
+        return None
     owned = [v for v in ctx.vaults if v["owner"] == src.address]
     if not owned:
         return None

@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 
-curl http://workload:8000/txn/create/payment
+curl http://localhost:8000/txn/create/payment

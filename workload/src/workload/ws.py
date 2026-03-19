@@ -20,7 +20,7 @@ RECV_TIMEOUT = 90.0
 RECONNECT_BASE = 1.0
 RECONNECT_MAX = 10.0
 
-EventType = Literal["tx_validated", "tx_response", "ledger_closed", "server_status", "raw"]
+EventType = Literal["tx_validated", "tx_proposed", "tx_response", "ledger_closed", "server_status", "raw"]
 
 
 async def ws_listener(
@@ -63,15 +63,19 @@ async def ws_listener(
                         log.warning(f"Failed to get accounts from provider: {e}, falling back to transaction stream")
 
                 if accounts:
-                    streams = ["ledger", "server"]  # TODO: Abstract out subscriptions
-                    subscribe_msg = {"id": 1, "command": "subscribe", "streams": streams, "accounts": accounts}
-                    if len(streams) > 2:
-                        streams_string = ", ".join(streams[:-1]) + f"and {streams[-1]}"
-                    elif len(streams) == 2:
-                        streams_string = " and ".join(streams)
-                    else:
-                        streams_string = streams[0]
-                    log.info("Subscribing to %s + %s specific accounts", streams_string, len(accounts))
+                    # accounts_proposed gives us early feedback (engine_result before validation)
+                    # transactions stream catches txns for accounts added after subscribe
+                    streams = ["transactions", "ledger", "server"]
+                    subscribe_msg = {
+                        "id": 1,
+                        "command": "subscribe",
+                        "streams": streams,
+                        "accounts_proposed": accounts,
+                    }
+                    log.info(
+                        "Subscribing to transactions + ledger + server streams + %d accounts_proposed",
+                        len(accounts),
+                    )
                 else:
                     subscribe_msg = {"id": 1, "command": "subscribe", "streams": ["transactions", "ledger", "server"]}
                     log.info(
@@ -158,9 +162,22 @@ async def _process_message(raw_msg: str, queue: asyncio.Queue) -> None:
 
     msg_type = obj.get("type")
 
-    if msg_type == "transaction" and obj.get("validated"):
-        log.debug("WS tx_validated: hash=%s ledger=%s", obj.get("transaction", {}).get("hash"), obj.get("ledger_index"))
-        await queue.put(("tx_validated", obj))
+    if msg_type == "transaction":
+        if obj.get("validated"):
+            log.debug(
+                "WS tx_validated: hash=%s ledger=%s",
+                obj.get("hash") or obj.get("transaction", {}).get("hash"),
+                obj.get("ledger_index"),
+            )
+            await queue.put(("tx_validated", obj))
+        elif obj.get("engine_result"):
+            # Proposed transaction from accounts_proposed — immediate submission feedback
+            log.debug(
+                "WS tx_proposed: hash=%s result=%s",
+                obj.get("hash") or obj.get("transaction", {}).get("hash"),
+                obj.get("engine_result"),
+            )
+            await queue.put(("tx_proposed", obj))
         return
 
     if msg_type == "ledgerClosed":

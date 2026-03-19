@@ -14,7 +14,12 @@ log = logging.getLogger("workload.assertions")
 # SDK detection
 # ---------------------------------------------------------------------------
 try:
-    from antithesis.assertions import always as _sdk_always, sometimes as _sdk_sometimes
+    from antithesis.assertions import (
+        always as _sdk_always,
+        always_or_unreachable as _sdk_always_or_unreachable,
+        sometimes as _sdk_sometimes,
+        unreachable as _sdk_unreachable,
+    )
     from antithesis.lifecycle import setup_complete as _sdk_setup_complete, send_event as _sdk_send_event
 
     SDK_AVAILABLE = True
@@ -57,9 +62,22 @@ def sometimes(condition: bool, message: str, details: dict[str, Any] | None = No
         log.debug("COVERAGE: %s | %s", message, details or {})
 
 
+def always_or_unreachable(condition: bool, message: str, details: dict[str, Any] | None = None) -> None:
+    """Invariant that passes if never reached. Use for conditional code paths."""
+    _track(message, condition)
+    if SDK_AVAILABLE:
+        _sdk_always_or_unreachable(condition, message, details or {})
+    elif not condition:
+        log.warning("ASSERTION VIOLATED (or_unreachable): %s | %s", message, details or {})
+
+
 def unreachable(message: str, details: dict[str, Any] | None = None) -> None:
     """This code path should never execute."""
-    always(False, message, details)
+    _track(message, False)
+    if SDK_AVAILABLE:
+        _sdk_unreachable(message, details or {})
+    else:
+        log.error("UNREACHABLE REACHED: %s | %s", message, details or {})
 
 
 def reachable(message: str, details: dict[str, Any] | None = None) -> None:
@@ -89,16 +107,27 @@ def send_event(name: str, details: dict[str, Any] | None = None) -> None:
 # ---------------------------------------------------------------------------
 # Transaction helpers (standardised message format for dashboard)
 # ---------------------------------------------------------------------------
-def tx_submitted(tx_type: str) -> None:
+def tx_submitted(tx_type: str, *, details: dict[str, Any] | None = None) -> None:
+    send_event(f"workload::submitted:{tx_type}", details)
     sometimes(True, f"workload::submitted:{tx_type}")
 
 
-def tx_validated(tx_type: str, result: str) -> None:
+def tx_validated(tx_type: str, result: str, *, details: dict[str, Any] | None = None) -> None:
+    send_event(f"workload::validated:{tx_type}", {"result": result, **(details or {})})
     sometimes(result == "tesSUCCESS", f"workload::validated:{tx_type}", {"result": result})
 
+    # tecINTERNAL is a bug
+    if result == "tecINTERNAL": # TODO: enum
+        unreachable(f"workload::tecINTERNAL:{tx_type}", {"result": result, **(details or {})})
 
-def tx_rejected(tx_type: str, code: str) -> None:
+
+def tx_rejected(tx_type: str, code: str, *, details: dict[str, Any] | None = None) -> None:
+    send_event(f"workload::rejected:{tx_type}", {"code": code, **(details or {})})
     sometimes(True, f"workload::rejected:{tx_type}", {"code": code})
+
+    # tefINTERNAL is a bug — should never happen
+    if code == "tefINTERNAL": # TODO: enum
+        unreachable(f"workload::tefINTERNAL:{tx_type}", {"code": code, **(details or {})})
 
 
 # ---------------------------------------------------------------------------

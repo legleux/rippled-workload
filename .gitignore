@@ -8,6 +8,8 @@
 *~
 ~$*.doc
 rippled.log
+workload.log
+workload.log.*
 __pycache__/
 *.py[cod]
 .venv/

@@ -64,6 +64,19 @@ LOGGING_CONFIG = {
 
 
 def setup_logging():
-    """Apply the logging configuration."""
+    """Apply the logging configuration, rotating the old log file first."""
+    # Rotate existing log so each run starts fresh
+    log_path = LOGGING_CONFIG["handlers"]["file"]["filename"]
+    if os.path.exists(log_path):
+        from logging.handlers import RotatingFileHandler
+
+        rotator = RotatingFileHandler(
+            log_path,
+            maxBytes=0,  # force rotation regardless of size
+            backupCount=LOGGING_CONFIG["handlers"]["file"]["backupCount"],
+        )
+        rotator.doRollover()
+        rotator.close()
+
     logging.config.dictConfig(LOGGING_CONFIG)
     os.environ.setdefault("PYTHONUNBUFFERED", "1")

@@ -1,5 +1,20 @@
 # TODO
 
+## Completed: Producer Stall Fix + Dashboard + WS Improvements (2026-03-18 evening)
+- [x] **Producer stall bug resolved** — root cause: consumer queue drain called `record_expired()` with cascade RPC for every stale txn. Fix: `cascade=False` for queue drain expiry.
+- [x] **Unified build-submit loop** — eliminated producer-consumer split. Single loop: build → sign → submit → repeat. No queue, no ledger-close gating.
+- [x] **Self-healing** — `expire_past_lls()` force-expires stale pending txns when all accounts blocked.
+- [x] **WS improvements** — `accounts_proposed` for early feedback, `transactions` stream for new accounts, `fee_base`/`txn_count`/`reserve` from WS ledgerClosed (eliminated 2+ RPC/ledger).
+- [x] **`send_event()` for Antithesis** — structured tx lifecycle events (submitted/validated/rejected) with details.
+- [x] **`unreachable()` assertions** — tefINTERNAL and tecINTERNAL trigger unreachable assertions.
+- [x] **`rand_owner()`** — builders for ownership-dependent types (Vault*, Credential*, Domain*, AMMWithdraw) pick from known owners instead of random-then-filter.
+- [x] **`record_expired(cascade=False)`** — skip cascade RPC for stale-gen and dedup expiry in consumer.
+- [x] **Cumulative counters** — `_total_created/validated/rejected/expired` and `_type_submitted/validated` survive `_cleanup_terminal()`.
+- [x] **Log rotation on startup** — `workload.log` rotated before each run.
+- [x] **Log level audit** — per-txn noise to DEBUG, temDISABLED to DEBUG, full addresses everywhere.
+- [x] **Dashboard** — target slider 0-1000, success rate table sorted by %, side-by-side layout, sortable error/type pages, diagnostics endpoint, ledger utilization from WS.
+- [x] **test_composer scripts** — fixed endpoints, deleted broken scripts, `create_transaction` handles None gracefully.
+
 ## Completed: Branch Integration (2026-03-18)
 - [x] **Assertions framework** (`assertions.py`) — centralised Antithesis SDK delegation with standalone fallback
 - [x] **AntithesisRandom** in `randoms.py` — try AntithesisRandom, fallback SystemRandom
@@ -21,19 +36,12 @@
 - [x] **File logging** — `workload.log` at DEBUG, console at INFO, rotating 50MB × 5
 - [x] **Invariants doc** — `workload/docs/invariants.md` with 12 invariants
 
-## Open Bug: tefPAST_SEQ Large Deltas
-Accounts show ledger sequences 3-9 ahead of what we allocated on first batches, even with
-`max_pending_per_account=1` and consumer dedup. Self-heals after cascade recovery.
-See `memory/tefpastseq-open-bug.md` for full analysis and hypotheses.
-- [ ] Add per-account DEBUG log in alloc_seq on every alloc (not just first)
-- [ ] Add "expired duplicate" counter to batch result log to verify dedup is working
-- [ ] Inspect genesis AccountRoot Sequence values vs what alloc_seq fetches
+## Mostly Resolved: tefPAST_SEQ Large Deltas
+Still occurs on first 2-3 batches (~10% rate), then self-heals via cascade. Not blocking.
+Root causes found and fixed: consumer cascade RPC flood, AMMDeposit KeyError, consumer dedup.
 - [ ] Consider updating `next_seq` in `record_validated` to `max(next_seq, validated_seq + 1)`
 
-## P00: Absolutely do this first thing next session
-Flesh out test framework
-- [ ] Test that auto-generated txns can survive fee escalation. Initially it'll be ok to mark as `xfail` until the feature is actually implemented.
-- [ ] Test the txn lifecycle. How to actually do that?
+
 
 ## P0: Code Health — Dead Code Cleanup, Modularization, Python 3.13+
 
@@ -41,67 +49,51 @@ Top priority. The codebase works but has accumulated dead code, debug artifacts,
 
 **Target**: Modern Python 3.13+ only. No backwards compatibility. Use StrEnum, match statements, type parameter syntax (`type Foo = ...`), `asyncio.TaskGroup`, etc. wherever appropriate.
 
-## Features
-- [ ] Dashboard page links to "DEX" data. Start off with just a list of open offers on IOUs from/to/price. very basic
-- [ ] Text box/field/separate page that allows us to just submit arbitrary txn JSON data.
-- [ ] Ability to send a txn to a _specific_ host — for when we have more than one p2p node defined or just to submit txns directly to the validators. Should be able to translate that payload in such a way that it can put the txn on the wire via JSON-RPC or WS with the user only needing to specify which API to use.
-- [ ] Standalone mode functionality
-- [ ] Dev/testnet connection
+**Flesh out test framework**
+- [ ] Test that auto-generated txns can survive fee escalation. Initially it'll be ok to mark as `xfail` until the feature is actually implemented.
+- [ ] Test the txn lifecycle. How to actually do that?
 
+
+## Features
+- [ ] Text box/field/separate page that allows us to just submit arbitrary txn JSON data.
+- [ ] Ability to send a txn to a _specific_ host — for when we have more than one p2p node defined or just to submit txns directly to the validators.
+- [ ] Standalone mode functionality
+- [ ] Implement assertions for our project that can *optionally* be overidden as assertions from the
+   Antithesis SDK if this project optionally uses it.
 ### Dead Code Removal
-- [x] `workload_core.py`: Remove dead `_post()` method — DONE
-- [x] `workload_core.py`: Remove dead `validator_state()` method — DONE
-- [x] `workload_core.py`: Remove 11 dead methods: `debug_last_tx`, `_update_account_balances`, `log_validation`, `submit_signed_tx_blobs`, `_is_account_active`, `_ensure_funded`, `_acctset_flags`, `wait_for_validation`, `bootstrap_gateway`, `_apply_gateway_flags`, `_establish_trust_lines`, `_distribute_initial_tokens` — DONE
-- [x] `workload_core.py`: Remove additional dead methods: `_get_balance`, `get_accounts_with_pending_txns`, `wait_until_validated`, `snapshot_finalized` + constant `PER_TX_TIMEOUT` — DONE
-- [x] `workload_core.py`: Remove duplicate `logging.basicConfig()` at module level — DONE
-- [x] `workload_core.py`: Remove `import multiprocessing` / `num_cpus` dead import — DONE
-- [x] `workload_core.py`: Remove `_fee_cache` and `_fee_lock` (abandoned caching infrastructure) — DONE
-- [x] `workload_core.py`: Remove `Store(Protocol)` — dead and broken, never used as an interface — DONE
-- [x] `workload_core.py`: Remove `InMemoryStore.update_record` dead method — DONE
-- [x] `app.py`: Remove duplicated import block — DONE
-- [x] `app.py`: Remove `print("Submit result:", res)` debug artifact in `debug_fund()` — DONE
-- [x] `app.py`: Remove `debug=True` on FastAPI app — DONE
-- [x] `app.py`: Remove `_dump_tasks`, `app.state.tg`, `app.state.ws_stop_event` — DONE
-- [x] `app.py`: Remove dead `PaymentReq` model (created wallet at import time) — DONE
-- [x] `sqlite_store.py`: Remove 6 dead methods mirroring InMemoryStore (`mark`, `rekey`, `find_by_state`, `get`, `update_record`, `all_records`) — DONE
-- [x] `utils.py`: Deleted — sync-era leftover, nothing imported it — DONE
 - [ ] Redefine the way we aggregate groups of txns to be submitted to not use the term "batch" in the source (or docs) to avoid confusion with the new Batch txn type and the rippled batch submission feature.
+- [x] ~~16 dead methods removed from workload_core.py, app.py, sqlite_store.py, utils.py~~
 
 ### Bug Fixes
-- [x] `_workload_started` / `workload_started` is checked in `ws_processor.py` but never set → Antithesis assertion silently dead — DONE (now set in `start_workload`/`stop_workload`)
-- [x] `ws.py`: `callable` → `Callable` (capital C) type hint — DONE
-- [x] `ws.py`: `steams_string` typo → `streams_string` — DONE
-- [x] `state_dashboard`: `generate_ledger` import crashes if package not installed — DONE (guarded with try/except)
-- [ ] `config.toml`: `[logging.handlers.file]` has no `filename` key → would crash if activated
 - [ ] `config.toml`: `funding_seed = false` is never read (dead config key)
-
-### Type / Import Hygiene
-- [x] `TERMINAL_STATE` moved from `workload_core.py` to `constants.py` — DONE
-- [x] `PENDING_STATES` / `OPEN_STATES` deduplicated into `C.PENDING_STATES` in `constants.py` — DONE
-- [x] `ValidationSrc` and `ValidationRecord` extracted into `validation.py` — breaks circular `sqlite_store` → `workload_core` import — DONE
-- [x] `SQLiteStore` import in `workload_core.py` promoted to top-level (was deferred in 3 places) — DONE
-- [x] `persistent_store` retyped from `Store | None` to `SQLiteStore | None` — DONE
+- [x] ~~workload_started, ws.py typos, dashboard import guard, logging config~~
 
 ### Modularization
 - [ ] Move `workload_running`, `workload_stop_event`, `workload_task`, `workload_stats` from module-level globals onto `app.state`
-- [ ] Extract constants: queue maxsize (1000), hardcoded WS port (6006)
+- [ ] Extract constants: hardcoded WS port (6006)
 - [ ] `sqlite_store.by_type` always returns `{}` — implement or remove
 
 ### New Transaction Type Follow-ups
-- [ ] Enable Vault/DelegateSet amendments when rippled develop marks them as `supported` (currently `SingleAssetVault`, `PermissionDelegationV1_1` are unsupported)
-- [ ] `alloc_seq` log message says "from current ledger" but actually uses `"validated"` — fix stale log string
+- [ ] Enable DelegateSet when `PermissionDelegationV1_1` is marked `Supported::yes` in rippled (currently `no`)
 - [ ] Consider baking MPToken issuances into genesis via `gl.ledger.LedgerConfig.mpt_issuances` for faster cold start
-- [ ] Memecoin drop test scenario (Task 3 from plan) — deferred, ready to design
 - [ ] gen auto metadata sidecar file — write gateway count alongside accounts.json so workload doesn't need config.toml for genesis loading
+- [ ] Intentionally bad txns — configurable knob to submit invalid/malformed transactions for testing rejection paths
+- [x] ~~Enable SingleAssetVault, fix alloc_seq log~~
 
 ### Python 3.13+ Modernization
 - [ ] Audit for opportunities: type parameter syntax, match statements, StrEnum patterns
-- [x] Pre-commit linting and formatting with ruff — DONE (pre-commit hooks configured)
 - [ ] Package & CI pipeline
+- [x] ~~Pre-commit linting and formatting with ruff~~
 
 ---
 
-## P0: Public Network Support — Run on Devnet/Testnet
+## generate_ledger
+- [ ] Redesign amendment profiles: `mainnet`/`testnet`/`devnet` (copy from real networks) + `custom` (any file path). Current "release"/"develop" distinction is meaningless.
+- [x] ~~`--amendment-source` auto-infers profile, default image `rippleci/xrpld:develop`, default accounts/gateways/coverage~~
+
+---
+
+## P2: Public Network Support — Run on Devnet/Testnet
 
 The workload must easily target the public XRPL devnet or testnet, not just local docker networks.
 
@@ -153,16 +145,16 @@ Options to investigate for faster/more reliable finality signaling:
 
 Long-term goal: a single, reliable event source that tells us definitively "tx X is terminal" so accounts can be freed immediately without waiting for LLS expiry as a safety margin.
 
-### Ledger-Close Event Bridge
-- [ ] Bridge WS processor ledger_closed events to the workload submission loop
-- [ ] Eliminate the `asyncio.sleep` polling loops in `continuous_workload()`
-- [ ] Workload loop should `await` a ledger-close signal, not poll
+### Submission Throughput
+- [ ] Parallelize build loop (alloc_seq + signing) — sequential RPC + signing is the main bottleneck. TODO marker in app.py.
+- [ ] Re-implement heartbeat — periodic signal that the workload is alive and submitting
+- [x] ~~Unified build-submit loop~~
 
 ### Object Tracking After Validation
 - [ ] Track minted NFTs (NFTokenID) per account after NFTokenMint validation
 - [ ] Track created offers (OfferSequence) per account after OfferCreate validation
 - [ ] This unblocks: NFTokenBurn, NFTokenCreateOffer/CancelOffer/AcceptOffer, OfferCancel in continuous mode
-- [x] Track MPToken issuance IDs after MPTokenIssuanceCreate validation — DONE
+- [x] ~~Track MPToken issuance IDs after MPTokenIssuanceCreate validation~~
 
 ### State Reload Performance
 - [ ] `load_state_from_store()` takes ~38s for ~3K wallets — will not scale to longer runs with 10K+ accounts
@@ -170,31 +162,26 @@ Long-term goal: a single, reliable event source that tells us definitively "tx X
 - [ ] Consider bulk loading wallets without per-wallet crypto key derivation on startup (defer to first use)
 
 ### AMM Improvements
+- [ ] Bump genesis AMM pool count — only ~4 pools with 4 gateways × 4 currencies. Need more currency pairs in generate_ledger.
+- [ ] Prevent tecDUPLICATE AMMCreate — builder should check registry and only create new asset pairs
+- [ ] AMM metrics dashboard — separate page with pool details, LP holder counts, deposit/withdraw ratios, TVL per pool
 - [ ] Persist AMM pool registry to SQLite (currently lost on hot-reload)
 - [ ] Parallelize `poll_dex_metrics` with `asyncio.gather` (112 sequential RPC calls)
-- [x] Track LP token holders for smarter AMMWithdraw/AMMDeposit targeting — DONE (`lp_holders` per pool)
 - [ ] Fix pool discovery: reduce IOU/IOU search space or read from generation output
+- [x] ~~LP token holder tracking, AMMWithdraw rand_owner~~
 
 ### Shutdown / Flush Performance
-- [x] `flush_to_persistent_store` now uses `SQLiteStore.bulk_upsert()` — one connection, one commit — DONE (was 2+ minutes for 5k records, now near-instant)
-- [x] Shutdown now stops workload before flushing — DONE
-- [x] Second Ctrl-C skips flush — DONE
+- [x] ~~bulk_upsert, stop before flush, second Ctrl-C skips flush~~
 
 ---
 
 ## P2: Dashboard & UI
 
 - [ ] Pie chart of txn types by volume
-- [x] Color-code MPT and NFT txn types separately in the WS terminal — DONE (grouped by family)
-- [x] Group related txn types in columns — DONE (Core, DEX, AMM, NFT, MPT, Other)
-- [x] Transaction Control pane with runtime enable/disable — DONE (group toggles + config-disabled indicators)
-- [x] Fill slider and target-txns control moved into Transaction Control pane — DONE
-- [x] Clickable error codes in Top Failures → detail page — DONE (`/state/failed/{code}/page`)
-- [x] Explorer embed cropped to ledger list only — DONE (see [explorer-embed-proposal.md](../explorer-embed-proposal.md) for upstream fix)
-- [ ] Don't abbreviate addresses in the terminal validation stream
 - [ ] Match filter button colors to stream colors
 - [ ] Interactive txn buttons — click to submit, tag and track the specific txn
 - [ ] Book depth visualization for asset pairs
+- [x] ~~Target slider, success rate table, side-by-side layout, clickable types/errors, disabled labels, cumulative counters, diagnostics endpoint, ledger utilization from WS, explorer embed~~
 
 ---
 
@@ -211,16 +198,16 @@ Long-term goal: a single, reliable event source that tells us definitively "tx X
 - [ ] Sentinel variable each module sets before fuzzing can begin
 
 ### Scenarios
-- [ ] **Out of Sync Update** — some nodes update version much sooner than the rest
 - [ ] **Memecoin Drop** — MPToken release scenario with pre-lifecycle setup
+- [ ] **Out of Sync Update** — some nodes update version much sooner than the rest
+- [ ] **UNL validator add/delete** — add and remove validators from UNL during a run
+- [ ] **Rolling upgrade** — upgrade N validators during run, verify consensus continues
 
 ---
 
 ## P3: Network Stress Testing
 
-- [ ] Allow specifying which node receives a transaction
 - [ ] Overlapping UNLs (mess with consensus)
-- [ ] Start with M-of-N validators running, bring up more during the run
 - [ ] Integrate sidecar monitoring into the workload process
 
 ---
@@ -237,10 +224,18 @@ Long-term goal: a single, reliable event source that tells us definitively "tx X
 ## Open Questions
 
 - What exactly happens at a flag ledger? (examine ledgers 256 & 257)
-- Is the per-account rippled queue limit still 10 (as defined in xrpld source)? (`config.toml` TODO)
+- Is the per-account xrpld queue limit still 10 (as defined in xrpld source)? (`config.toml` TODO)
 
 ---
 
 ## Historical Reference Docs
 
 - **`workload/XRPL_RELIABLE_SUBMISSION.md`** — Audit of our implementation against the XRPL reliable submission best practices. Gaps 1 (sequence collision) and 3 (tec code distinction) are now resolved; line numbers are stale. Keep for reference.
+
+## Bugs
+
+- [ ] Logs page doesn't work
+- [ ] Batch page doesn't work
+
+1. Flesh out a way to implement assertions for our project that can *optionally* be overidden as assertions from the
+   Antithesis SDK if this project optionally uses it.

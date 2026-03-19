@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 
-curl http://workload:8000/txn/create/NFTokenMint
+curl http://localhost:8000/txn/create/NFTokenMint

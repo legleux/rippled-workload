@@ -19,6 +19,18 @@ from workload.assertions import always, sometimes
 
 log = logging.getLogger("workload.ws_processor")
 
+# Counters for WS event matching — quantify how many validations we catch vs miss
+_ws_counters: dict[str, int] = {
+    "validated_matched": 0,
+    "validated_unmatched": 0,
+    "proposed_matched": 0,
+    "proposed_unmatched": 0,
+}
+
+
+def get_ws_counters() -> dict[str, int]:
+    return dict(_ws_counters)
+
 
 async def process_ws_events(
     workload: "Workload",
@@ -30,7 +42,8 @@ async def process_ws_events(
 
     This task runs for the lifetime of the application, processing:
     - Transaction validations from the stream (SEQUENTIAL - parallel caused blocking)
-    - Ledger close notifications
+    - Proposed transaction feedback (accounts_proposed subscription)
+    - Ledger close notifications (with txn_count and fee data from WS)
     - Immediate submission responses (if/when we switch to WS submission)
 
     Parameters
@@ -55,6 +68,9 @@ async def process_ws_events(
                     await _handle_tx_validated(workload, data)
                     processed_count += 1
 
+                elif event_type == "tx_proposed":
+                    await _handle_tx_proposed(workload, data)
+
                 elif event_type == "ledger_closed":
                     await _handle_ledger_closed(workload, data)
 
@@ -68,7 +84,12 @@ async def process_ws_events(
                     pass
 
                 if processed_count > 0 and processed_count % 100 == 0:
-                    log.info("WS processor: %d validations processed", processed_count)
+                    log.debug(
+                        "WS processor: %d validations processed (matched=%d unmatched=%d)",
+                        processed_count,
+                        _ws_counters["validated_matched"],
+                        _ws_counters["validated_unmatched"],
+                    )
 
             except asyncio.TimeoutError:
                 continue
@@ -79,7 +100,11 @@ async def process_ws_events(
         log.info("WS event processor cancelled")
         raise
     finally:
-        log.info("WS event processor stopped (processed %d events)", processed_count)
+        log.info(
+            "WS event processor stopped (processed %d events, counters=%s)",
+            processed_count,
+            _ws_counters,
+        )
 
 
 async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
@@ -108,8 +133,8 @@ async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
         "ledger_index": 12345
     }
     """
-    tx_data = msg.get("transaction", {})
-    tx_hash = tx_data.get("hash")
+    # Hash fallback: try top-level "hash" first (newer rippled), then nested "transaction.hash"
+    tx_hash = msg.get("hash") or msg.get("transaction", {}).get("hash")
 
     if not tx_hash:
         log.debug("WS validation missing tx hash, ignoring")
@@ -117,8 +142,11 @@ async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
 
     pending = workload.pending.get(tx_hash)
     if not pending:
-        log.debug("WS validation for non-pending tx affecting our accounts: %s", tx_hash[:8])
+        _ws_counters["validated_unmatched"] += 1
+        log.debug("WS validation for non-pending tx: %s", tx_hash)
         return
+
+    _ws_counters["validated_matched"] += 1
 
     ledger_index = msg.get("ledger_index")
     meta = msg.get("meta", {})
@@ -130,10 +158,10 @@ async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
 
     log.debug(
         "WS validation: tx=%s ledger=%s result=%s account=%s",
-        tx_hash[:8],
+        tx_hash,
         ledger_index,
         meta_result,
-        pending.account[:8],
+        pending.account,
     )
 
     validation_record = ValidationRecord(
@@ -149,19 +177,48 @@ async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
 
 
 async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
-    """Handle a ledger close notification. Fetches tx count and fires Antithesis assertions."""
+    """Handle a ledger close notification.
+
+    Uses WS-provided txn_count and fee_base directly — no RPC needed.
+    """
     ledger_index = msg.get("ledger_index")
+
+    # Wake the consumer — this is the tick, no RPC needed
+    if ledger_index:
+        workload.notify_ledger_closed(ledger_index)
     ledger_hash = msg.get("ledger_hash")
 
-    log.debug("Ledger %s closed (hash: %s)", ledger_index, ledger_hash)
+    # txn_count comes directly from the ledgerClosed WS message — zero RPC cost
+    txn_count = msg.get("txn_count")
+    if txn_count is not None:
+        workload.last_closed_ledger_txn_count = int(txn_count)
 
-    try:
-        txn_count = await workload.fetch_ledger_tx_count(ledger_index)
+    # Update cached fee from WS (fee_base is in the ledgerClosed message)
+    fee_base = msg.get("fee_base")
+    if fee_base is not None:
+        workload._cached_fee = int(fee_base)
+
+    # Update reserve info from WS
+    reserve_base = msg.get("reserve_base")
+    reserve_inc = msg.get("reserve_inc")
+    if reserve_base is not None:
+        workload._ws_reserve_base = int(reserve_base)
+    if reserve_inc is not None:
+        workload._ws_reserve_inc = int(reserve_inc)
+
+    log.debug("Ledger %s closed (hash: %s, txns: %s, fee_base: %s)", ledger_index, ledger_hash, txn_count, fee_base)
+
+    if txn_count is None:
+        # Fallback to RPC if WS doesn't provide txn_count (shouldn't happen)
+        try:
+            txn_count = await workload.fetch_ledger_tx_count(ledger_index)
+        except Exception as e:
+            log.error("Error fetching ledger %s txn count: %s", ledger_index, e)
+            return
         if txn_count is None:
             return
 
-        log.debug("Ledger %s closed with %d transactions", ledger_index, txn_count)
-
+    try:
         sometimes(
             txn_count > 0,
             "ledger_contains_transactions",
@@ -176,7 +233,40 @@ async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
             )
 
     except Exception as e:
-        log.error("Error fetching ledger %s for assertions: %s", ledger_index, e)
+        log.error("Error in ledger %s assertions: %s", ledger_index, e)
+
+
+async def _handle_tx_proposed(workload: "Workload", msg: dict) -> None:
+    """Handle a proposed (unvalidated) transaction from accounts_proposed subscription.
+
+    This gives us early feedback when rippled processes our txn — we see engine_result
+    (e.g. tesSUCCESS, tefPAST_SEQ) immediately via WS, before waiting for validation.
+    """
+    tx_hash = msg.get("hash") or msg.get("transaction", {}).get("hash")
+    engine_result = msg.get("engine_result")
+
+    if not tx_hash:
+        return
+
+    pending = workload.pending.get(tx_hash)
+    if not pending:
+        _ws_counters["proposed_unmatched"] += 1
+        return
+
+    _ws_counters["proposed_matched"] += 1
+
+    # Log early feedback — especially useful for tefPAST_SEQ detection
+    if engine_result and engine_result != "tesSUCCESS":
+        log.info(
+            "WS proposed: tx=%s result=%s type=%s account=%s seq=%s",
+            tx_hash,
+            engine_result,
+            pending.transaction_type,
+            pending.account,
+            pending.sequence,
+        )
+    else:
+        log.debug("WS proposed: tx=%s result=%s", tx_hash, engine_result)
 
 
 async def _handle_tx_response(workload: "Workload", msg: dict) -> None:
@@ -206,7 +296,7 @@ async def _handle_tx_response(workload: "Workload", msg: dict) -> None:
         log.debug("WS response missing tx hash")
         return
 
-    log.info("WS submission response: tx=%s result=%s", tx_hash[:8], engine_result)
+    log.info("WS submission response: tx=%s result=%s", tx_hash, engine_result)
 
 
 async def _handle_server_status(workload: "Workload", msg: dict) -> None:

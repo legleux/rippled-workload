@@ -12,9 +12,9 @@ names = [
     "all-crypto",
     "bit-bank",
     "coin-thang",
-    "digi-bux",
-    "flux-pay",
-    "zen-trade",
+    "digi-pay",
+    "ez-trade",
+    "flux-bux",
 ]
 number = 4
 default_balance = 1_000_000_000_000000
@@ -60,8 +60,7 @@ max_pending_per_account = 1
 
 # Disable specific transaction types (all types in _BUILDERS are enabled by default)
 disabled = [
-    "Batch"
-    # Batch now handled: sequences synced from ledger after validation/rejection/expiry
+    "Batch",          # Batch sequence handling is complex, disabled for now
 ]
 
 # Transaction type percentages for random selection (0.0 to 1.0)
@@ -69,13 +68,14 @@ disabled = [
 [transactions.percentages]
 Payment = 0.25
 OfferCreate = 0.20
-AMMDeposit = 0.15
+AMMCreate = 0.05
+AMMDeposit = 0.10
 AMMWithdraw = 0.10
-VaultCreate = 0.02
-VaultDeposit = 0.02
-CredentialCreate = 0.02
-DelegateSet = 0.01
-PermissionedDomainSet = 0.01
+DelegateSet = 0.02
+# VaultCreate
+# VaultDeposit
+# CredentialCreate
+# PermissionedDomainSet
 
 [transactions.mptoken.issuance_create]
 transfer_fee = 1000

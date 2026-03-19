@@ -5,6 +5,7 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
+import time
 from time import perf_counter
 
 import httpx
@@ -16,7 +17,7 @@ from xrpl.models import StreamParameter, Subscribe
 from xrpl.models.transactions import Payment
 
 from workload.ws import ws_listener
-from workload.ws_processor import process_ws_events
+from workload.ws_processor import get_ws_counters, process_ws_events
 
 from workload.assertions import setup_complete
 
@@ -109,7 +110,7 @@ async def wait_for_ledgers(url: str, count: int, timeout: float = 30.0) -> None:
                 async for msg in client:
                     if msg.get("type") == "ledgerClosed":
                         ledger_count += 1
-                        log.info("Ledger %s closed. (%s/%s)", msg.get("ledger_index"), ledger_count, count)
+                        log.debug("Ledger %s closed. (%s/%s)", msg.get("ledger_index"), ledger_count, count)
                         if ledger_count >= count:
                             log.info("Observed %s ledgers closed. Convinced network is progessing.", ledger_count)
                             break
@@ -245,6 +246,7 @@ async def lifespan(app: FastAPI):
                 )
 
         init_ledger = await app.state.workload._current_ledger_index()
+        app.state.workload.first_ledger_index = init_ledger
         setup_complete(
             {
                 "gateways": len(app.state.workload.gateways),
@@ -258,7 +260,6 @@ async def lifespan(app: FastAPI):
             }
         )
         log.info("[4/4] Initialization complete at ledger %d. Starting workload.", init_ledger)
-        setup_complete(details={"message": "Workload initialization complete"})
         await asyncio.sleep(5)
         await start_workload()
         try:
@@ -638,7 +639,7 @@ async def state_dashboard():
                 background: #161b22; border: 1px solid #30363d;
                 border-radius: 6px; padding: 20px; margin-bottom: 20px;
             }}
-            .failures-table {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 20px; margin-bottom: 20px; }}
+            .failures-table {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 20px; margin-bottom: 20px; flex: 1; min-width: 300px; }}
             table {{ width: 100%; border-collapse: collapse; }}
             th, td {{ text-align: left; padding: 10px; border-bottom: 1px solid #21262d; }}
             th {{ color: #8b949e; font-weight: 600; font-size: 11px; text-transform: uppercase; }}
@@ -836,15 +837,19 @@ async def state_dashboard():
             <div class="panel">
                 <h2>Transaction Control</h2>
                 <div style="display:flex;align-items:center;gap:20px;margin-bottom:12px;flex-wrap:wrap">
-                    <div class="fill-control">
-                        <label>Target txns/ledger</label>
-                        <input type="number" id="target-txns-input" min="1" max="500" value="30"
-                               style="width:70px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:14px;font-weight:600;text-align:center"
+                    <div class="fill-control" style="flex:1;min-width:280px">
+                        <label>Target txns/ledger: <span id="target-txns-value" style="font-weight:700;color:#58a6ff">0</span></label>
+                        <input type="range" id="target-txns-input" min="0" max="1000" step="10" value="100"
+                               style="width:100%;accent-color:#58a6ff;cursor:pointer"
+                               oninput="document.getElementById('target-txns-value').textContent=this.value"
                                onchange="fetch('/workload/target-txns',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{target_txns:parseInt(this.value)}})}})" >
                     </div>
                 </div>
                 <div class="txn-control-grid" id="txn-control-pane"></div>
             </div>
+
+            <!-- Transaction types + failures side by side -->
+            <div id="tables-container" style="display:flex;gap:20px;flex-wrap:wrap"></div>
 
             <!-- Explorer embed -->
             <div class="panel">
@@ -870,9 +875,6 @@ async def state_dashboard():
                 </div>
                 <div id="ws-output"></div>
             </div>
-
-            <!-- Submission results + failures (updated via JS) -->
-            <div id="tables-container"></div>
         </div>
 
         <script>
@@ -1151,6 +1153,15 @@ async def state_dashboard():
         // --- Stats polling (no page reload, keeps WS alive) ---
         function fmt(n) {{ return n == null ? '—' : Number(n).toLocaleString(); }}
         function pct(a, b) {{ return b > 0 ? (a/b*100).toFixed(1) : '0.0'; }}
+        function fmtUptime(sec) {{
+            if (!sec) return '—';
+            const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600),
+                  m = Math.floor(sec % 3600 / 60), s = sec % 60;
+            if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+            if (h > 0) return h + 'h ' + m + 'm ' + s + 's';
+            if (m > 0) return m + 'm ' + s + 's';
+            return s + 's';
+        }}
 
         function statCard(label, value, cls, extra, barPct) {{
             let html = '<div class="stat-card"><div class="stat-label">' + label + '</div>';
@@ -1183,22 +1194,25 @@ async def state_dashboard():
 
                 // Subtitle
                 document.getElementById('subtitle').innerHTML =
-                    'Live monitoring &bull; Ledger ' + f.ledger_current_index + ' @ {hostname}';
+                    'Live monitoring &bull; Ledger ' + f.ledger_current_index + ' @ {hostname}' +
+                    ' &bull; ' + fmt(s.ledgers_elapsed) + ' ledgers (' + fmtUptime(s.uptime_seconds) + ')';
 
-                // Target txns input (don't overwrite while user is editing)
+                // Target txns slider (don't overwrite while user is dragging)
                 const ttInput = document.getElementById('target-txns-input');
                 if (document.activeElement !== ttInput) {{
                     ttInput.value = ttRes.target_txns_per_ledger;
                 }}
+                document.getElementById('target-txns-value').textContent = ttRes.target_txns_per_ledger;
 
                 // Fee stats
                 const feeWarn = f.minimum_fee > f.base_fee ? 'warning' : 'success';
                 const qPct = f.max_queue_size > 0 ? (f.current_queue_size/f.max_queue_size*100) : 0;
-                const lPct = f.expected_ledger_size > 0 ? (f.current_ledger_size/f.expected_ledger_size*100) : 0;
+                const lastClosed = f.last_closed_txn_count || 0;
+                const lPct = f.expected_ledger_size > 0 ? (lastClosed/f.expected_ledger_size*100) : 0;
                 document.getElementById('fee-stats').innerHTML =
                     statCard('Fee (min/open/base)', f.minimum_fee+'/'+f.open_ledger_fee+'/'+f.base_fee, feeWarn, 'drops') +
                     statCard('Queue Utilization', f.current_queue_size+'/'+f.max_queue_size, 'info', qPct.toFixed(1)+'%', qPct) +
-                    statCard('Ledger Utilization', f.current_ledger_size+'/'+f.expected_ledger_size, 'info', lPct.toFixed(1)+'%', lPct);
+                    statCard('Ledger Utilization', lastClosed+'/'+f.expected_ledger_size, 'info', lPct.toFixed(1)+'%', lPct);
 
                 // Txn stats
                 document.getElementById('txn-stats').innerHTML =
@@ -1206,29 +1220,36 @@ async def state_dashboard():
                     statCard('Validated', fmt(validated), 'success', pct(validated,total)+'%', pct(validated,total)) +
                     statCard('Rejected', fmt(rejected), 'error', pct(rejected,total)+'%', pct(rejected,total)) +
                     statCard('In-Flight', fmt(submitted+created), 'warning', 'Submitted: '+submitted+' | Created: '+created) +
-                    statCard('Retryable', fmt(retryable), 'warning', 'terPRE_SEQ waiting') +
                     statCard('Expired', fmt(expired), '');
 
                 // Tables
-                const sr = s.submission_results || {{}};
-                const sorted_sr = Object.entries(sr).sort((a,b) => b[1]-a[1]);
                 let tablesHtml = '';
-                if (sorted_sr.length) {{
-                    tablesHtml += '<div class="failures-table"><h2>Submission Results</h2><table><thead><tr><th>Engine Result</th><th>Count</th></tr></thead><tbody>';
-                    sorted_sr.forEach(([r,c]) => {{
-                        let cls = 'info';
-                        if (r === 'tesSUCCESS') cls = 'success';
-                        else if (r.startsWith('ter')) cls = 'warning';
-                        else if (/^(tel|tec|tem|tef)/.test(r)) cls = 'error';
-                        tablesHtml += '<tr><td><span class="badge '+cls+'">'+r+'</span></td><td>'+fmt(c)+'</td></tr>';
+
+                // Transaction type breakdown (left)
+                const byTypeTotal = s.by_type_total || {{}};
+                const byTypeValidated = s.by_type_validated || {{}};
+                const typePct = (e) => e[1] > 0 ? (byTypeValidated[e[0]]||0)/e[1] : -1;
+                const sortedTypes = Object.entries(byTypeTotal).sort((a,b) => typePct(b)-typePct(a) || b[1]-a[1]);
+                if (sortedTypes.length) {{
+                    tablesHtml += '<div class="failures-table"><h2>Transaction Types ('+sortedTypes.length+')</h2><table><thead><tr><th>Type</th><th>Success Rate</th></tr></thead><tbody>';
+                    sortedTypes.forEach(([t,total]) => {{
+                        const validated = byTypeValidated[t] || 0;
+                        const pct = total > 0 ? Math.round(validated/total*100) : 0;
+                        const color = pct >= 80 ? '#3fb950' : pct >= 50 ? '#d29922' : '#f85149';
+                        const disabled = configDisabledTypes.has(t);
+                        const amendmentDisabled = !disabled && total > 0 && validated === 0;
+                        const link = '<a href="/state/type/'+t+'/page" target="_blank" style="text-decoration:none;color:inherit">'+t+'</a>';
+                        const nameHtml = disabled
+                            ? '<s style="color:#484f58">'+link+'</s> <span style="color:#484f58;font-size:11px">disabled</span>'
+                            : amendmentDisabled
+                            ? '<span style="opacity:0.4">'+link+'</span> <span style="color:#484f58;font-size:11px">temDISABLED</span>'
+                            : link;
+                        tablesHtml += '<tr><td>'+nameHtml+'</td><td><span style="color:'+color+';font-weight:600">'+fmt(validated)+'/'+fmt(total)+' ('+pct+'%)</span></td></tr>';
                     }});
-                    const cascadeCount = s.cascade_expired || 0;
-                    if (cascadeCount > 0) {{
-                        tablesHtml += '<tr><td><span class="badge" style="opacity:0.5">CASCADE_EXPIRED</span></td><td style="opacity:0.5">'+fmt(cascadeCount)+' (internal)</td></tr>';
-                    }}
                     tablesHtml += '</tbody></table></div>';
                 }}
-                // Top failures
+
+                // Top failures (right)
                 const INTERNAL = new Set(['CASCADE_EXPIRED','unknown','']);
                 const failMap = {{}};
                 (failedRes.failed||[]).forEach(f => {{
@@ -1240,16 +1261,6 @@ async def state_dashboard():
                     tablesHtml += '<div class="failures-table"><h2>Top Failures</h2><table><thead><tr><th>Error Code</th><th>Count</th></tr></thead><tbody>';
                     topFail.forEach(([r,c]) => {{
                         tablesHtml += '<tr><td><a href="/state/failed/'+r+'/page" target="_blank" style="text-decoration:none"><span class="badge error" style="cursor:pointer">'+r+'</span></a></td><td>'+fmt(c)+'</td></tr>';
-                    }});
-                    tablesHtml += '</tbody></table></div>';
-                }}
-                // Transaction type breakdown
-                const byType = s.by_type || {{}};
-                const sortedTypes = Object.entries(byType).sort((a,b) => b[1]-a[1]);
-                if (sortedTypes.length) {{
-                    tablesHtml += '<div class="failures-table"><h2>Transaction Types</h2><table><thead><tr><th>Type</th><th>Count</th></tr></thead><tbody>';
-                    sortedTypes.forEach(([t,c]) => {{
-                        tablesHtml += '<tr><td>'+t+'</td><td>'+fmt(c)+'</td></tr>';
                     }});
                     tablesHtml += '</tbody></table></div>';
                 }}
@@ -1307,23 +1318,32 @@ async def state_failed_page(error_code: str):
 
     hostname = RPC.split("//")[1].split(":")[0] if "//" in RPC else RPC.split(":")[0]
     explorer_base = f"https://custom.xrpl.org/{hostname}:6006"
+    # tec codes are applied to the ledger and have an on-chain hash
+    on_ledger = error_code.startswith("tec") or error_code.startswith("tes")
     rows = ""
     for f in filtered:
         account = f.get("account", "")
+        tx_hash = f.get("tx_hash", "")
         account_cell = (
             f'<a href="{explorer_base}/accounts/{account}" target="_blank"><code>{account}</code></a>'
             if account
             else ""
         )
+        if on_ledger and tx_hash:
+            hash_cell = f'<a href="{explorer_base}/transactions/{tx_hash}" target="_blank"><code>{tx_hash}</code></a>'
+        else:
+            hash_cell = f"<code>{tx_hash}</code>"
+        msg = f.get("engine_result_message") or ""
         rows += (
             f"<tr>"
-            f"<td><code>{f.get('tx_hash', '')}</code></td>"
+            f"<td>{hash_cell}</td>"
             f"<td>{f.get('transaction_type', '')}</td>"
             f"<td>{account_cell}</td>"
             f"<td>{f.get('sequence', '')}</td>"
             f"<td>{f.get('state', '')}</td>"
             f"<td>{f.get('created_ledger', '')}</td>"
             f"<td>{f.get('last_ledger_seq', '')}</td>"
+            f"<td style='font-size:11px;color:#8b949e'>{msg}</td>"
             f"</tr>"
         )
 
@@ -1336,7 +1356,9 @@ async def state_failed_page(error_code: str):
         a {{ color: #58a6ff; }}
         table {{ border-collapse: collapse; width: 100%; margin-top: 16px; }}
         th, td {{ padding: 8px 12px; border: 1px solid #30363d; text-align: left; font-size: 13px; }}
-        th {{ background: #161b22; color: #8b949e; text-transform: uppercase; font-size: 11px; }}
+        th {{ background: #161b22; color: #8b949e; text-transform: uppercase; font-size: 11px; cursor: pointer; user-select: none; }}
+        th:hover {{ color: #c9d1d9; }}
+        th .sort-arrow {{ font-size: 9px; margin-left: 4px; }}
         tr:hover {{ background: #161b22; }}
         code {{ color: #58a6ff; }}
         .badge {{ padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; background: #3d1f1f; color: #f85149; }}
@@ -1345,13 +1367,53 @@ async def state_failed_page(error_code: str):
     </head><body>
     <a href="/state/dashboard">&larr; Dashboard</a>
     <h1><span class="badge">{error_code}</span> <span class="count">{len(filtered)} transactions</span></h1>
-    <table>
+    <table id="results-table">
         <thead><tr>
-            <th>Hash</th><th>Type</th><th>Account</th><th>Seq</th><th>State</th><th>Created Ledger</th><th>Last Ledger Seq</th>
+            <th data-col="0">Hash <span class="sort-arrow"></span></th>
+            <th data-col="1">Type <span class="sort-arrow"></span></th>
+            <th data-col="2">Account <span class="sort-arrow"></span></th>
+            <th data-col="3" data-type="num">Seq <span class="sort-arrow"></span></th>
+            <th data-col="4">State <span class="sort-arrow"></span></th>
+            <th data-col="5" data-type="num">Created Ledger <span class="sort-arrow"></span></th>
+            <th data-col="6" data-type="num">Last Ledger Seq <span class="sort-arrow"></span></th>
+            <th data-col="7">Message <span class="sort-arrow"></span></th>
         </tr></thead>
-        <tbody>{rows if rows else '<tr><td colspan="7" style="text-align:center;color:#8b949e">No transactions found</td></tr>'}</tbody>
+        <tbody>{rows if rows else '<tr><td colspan="8" style="text-align:center;color:#8b949e">No transactions found</td></tr>'}</tbody>
     </table>
     <p style="margin-top:16px;color:#8b949e">JSON: <a href="/state/failed/{error_code}">/state/failed/{error_code}</a></p>
+    <script>
+    (function() {{
+        const table = document.getElementById('results-table');
+        const headers = table.querySelectorAll('th');
+        let sortCol = -1, sortAsc = true;
+
+        headers.forEach(th => {{
+            th.addEventListener('click', () => {{
+                const col = parseInt(th.dataset.col);
+                const isNum = th.dataset.type === 'num';
+                if (sortCol === col) {{ sortAsc = !sortAsc; }}
+                else {{ sortCol = col; sortAsc = true; }}
+
+                const tbody = table.querySelector('tbody');
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                rows.sort((a, b) => {{
+                    const aText = a.cells[col]?.textContent.trim() || '';
+                    const bText = b.cells[col]?.textContent.trim() || '';
+                    if (isNum) {{
+                        const aNum = parseInt(aText) || 0;
+                        const bNum = parseInt(bText) || 0;
+                        return sortAsc ? aNum - bNum : bNum - aNum;
+                    }}
+                    return sortAsc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+                }});
+                rows.forEach(r => tbody.appendChild(r));
+
+                headers.forEach(h => h.querySelector('.sort-arrow').textContent = '');
+                th.querySelector('.sort-arrow').textContent = sortAsc ? ' ▲' : ' ▼';
+            }});
+        }});
+    }})();
+    </script>
     </body></html>"""
     return HTMLResponse(content=html)
 
@@ -1362,6 +1424,128 @@ async def state_expired():
     wl = app.state.workload
     expired = [r for r in wl.snapshot_pending(open_only=False) if r["state"] == "EXPIRED"]
     return {"expired": expired}
+
+
+@r_state.get("/type/{txn_type}")
+async def state_type_json(txn_type: str):
+    """Get transactions filtered by transaction type."""
+    wl = app.state.workload
+    filtered = [r for r in wl.snapshot_pending(open_only=False) if r.get("transaction_type") == txn_type]
+    return {"transaction_type": txn_type, "count": len(filtered), "transactions": filtered}
+
+
+@r_state.get("/type/{txn_type}/page")
+async def state_type_page(txn_type: str):
+    """HTML page showing transactions for a specific type."""
+    wl = app.state.workload
+    filtered = [r for r in wl.snapshot_pending(open_only=False) if r.get("transaction_type") == txn_type]
+
+    hostname = RPC.split("//")[1].split(":")[0] if "//" in RPC else RPC.split(":")[0]
+    explorer_base = f"https://custom.xrpl.org/{hostname}:6006"
+    rows = ""
+    for f in filtered:
+        account = f.get("account", "")
+        tx_hash = f.get("tx_hash", "")
+        state = f.get("state", "")
+        account_cell = (
+            f'<a href="{explorer_base}/accounts/{account}" target="_blank"><code>{account}</code></a>'
+            if account
+            else ""
+        )
+        on_ledger = state == "VALIDATED" or f.get("engine_result_final", "").startswith("tec")
+        hash_cell = (
+            f'<a href="{explorer_base}/transactions/{tx_hash}" target="_blank"><code>{tx_hash}</code></a>'
+            if on_ledger and tx_hash
+            else f"<code>{tx_hash}</code>"
+        )
+        er = f.get("engine_result_final") or f.get("engine_result_first") or ""
+        state_cls = "success" if state == "VALIDATED" else "error" if state in ("REJECTED", "EXPIRED") else "warning"
+        msg = f.get("engine_result_message") or ""
+        rows += (
+            f"<tr>"
+            f"<td>{hash_cell}</td>"
+            f"<td>{account_cell}</td>"
+            f"<td>{f.get('sequence', '')}</td>"
+            f"<td><span class='badge {state_cls}'>{state}</span></td>"
+            f"<td><span class='badge'>{er}</span></td>"
+            f"<td>{f.get('created_ledger', '')}</td>"
+            f"<td>{f.get('validated_ledger') or ''}</td>"
+            f"<td style='font-size:11px;color:#8b949e'>{msg}</td>"
+            f"</tr>"
+        )
+
+    html = f"""<!DOCTYPE html>
+    <html><head>
+    <title>{txn_type}</title>
+    <style>
+        body {{ background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; padding: 20px; }}
+        h1 {{ color: #58a6ff; }}
+        a {{ color: #58a6ff; }}
+        table {{ border-collapse: collapse; width: 100%; margin-top: 16px; }}
+        th, td {{ padding: 8px 12px; border: 1px solid #30363d; text-align: left; font-size: 13px; }}
+        th {{ background: #161b22; color: #8b949e; text-transform: uppercase; font-size: 11px; cursor: pointer; user-select: none; }}
+        th:hover {{ color: #c9d1d9; }}
+        th .sort-arrow {{ font-size: 9px; margin-left: 4px; }}
+        tr:hover {{ background: #161b22; }}
+        code {{ color: #58a6ff; }}
+        .badge {{ padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }}
+        .badge.success {{ background: #1f3d2a; color: #3fb950; }}
+        .badge.error {{ background: #3d1f1f; color: #f85149; }}
+        .badge.warning {{ background: #3d2f1f; color: #d29922; }}
+        .count {{ color: #8b949e; font-size: 14px; }}
+    </style>
+    </head><body>
+    <a href="/state/dashboard">&larr; Dashboard</a>
+    <h1>{txn_type} <span class="count">{len(filtered)} transactions</span></h1>
+    <table id="results-table">
+        <thead><tr>
+            <th data-col="0">Hash <span class="sort-arrow"></span></th>
+            <th data-col="1">Account <span class="sort-arrow"></span></th>
+            <th data-col="2" data-type="num">Seq <span class="sort-arrow"></span></th>
+            <th data-col="3">State <span class="sort-arrow"></span></th>
+            <th data-col="4">Result <span class="sort-arrow"></span></th>
+            <th data-col="5" data-type="num">Created Ledger <span class="sort-arrow"></span></th>
+            <th data-col="6" data-type="num">Validated Ledger <span class="sort-arrow"></span></th>
+            <th data-col="7">Message <span class="sort-arrow"></span></th>
+        </tr></thead>
+        <tbody>{rows if rows else '<tr><td colspan="8" style="text-align:center;color:#8b949e">No transactions found</td></tr>'}</tbody>
+    </table>
+    <p style="margin-top:16px;color:#8b949e">JSON: <a href="/state/type/{txn_type}">/state/type/{txn_type}</a></p>
+    <script>
+    (function() {{{{
+        const table = document.getElementById('results-table');
+        const headers = table.querySelectorAll('th');
+        let sortCol = -1, sortAsc = true;
+
+        headers.forEach(th => {{{{
+            th.addEventListener('click', () => {{{{
+                const col = parseInt(th.dataset.col);
+                const isNum = th.dataset.type === 'num';
+                if (sortCol === col) {{{{ sortAsc = !sortAsc; }}}}
+                else {{{{ sortCol = col; sortAsc = true; }}}}
+
+                const tbody = table.querySelector('tbody');
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                rows.sort((a, b) => {{{{
+                    const aText = a.cells[col]?.textContent.trim() || '';
+                    const bText = b.cells[col]?.textContent.trim() || '';
+                    if (isNum) {{{{
+                        const aNum = parseInt(aText) || 0;
+                        const bNum = parseInt(bText) || 0;
+                        return sortAsc ? aNum - bNum : bNum - aNum;
+                    }}}}
+                    return sortAsc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+                }}}});
+                rows.forEach(r => tbody.appendChild(r));
+
+                headers.forEach(h => h.querySelector('.sort-arrow').textContent = '');
+                th.querySelector('.sort-arrow').textContent = sortAsc ? ' ▲' : ' ▼';
+            }}}});
+        }}}});
+    }}}})();
+    </script>
+    </body></html>"""
+    return HTMLResponse(content=html)
 
 
 @r_state.get("/tx/{tx_hash}")
@@ -1389,6 +1573,7 @@ async def state_fees():
         "ledger_current_index": fee_info.ledger_current_index,
         "queue_utilization": f"{fee_info.current_queue_size}/{fee_info.max_queue_size}",
         "ledger_utilization": f"{fee_info.current_ledger_size}/{fee_info.expected_ledger_size}",
+        "last_closed_txn_count": wl.last_closed_ledger_txn_count,
     }
 
 
@@ -1518,7 +1703,15 @@ async def ws_stats():
         "queue_maxsize": app.state.ws_queue.maxsize,
         "validations_by_source": store_stats.get("validated_by_source", {}),
         "recent_validations_count": store_stats.get("recent_validations", 0),
+        "ws_event_counters": get_ws_counters(),
     }
+
+
+@r_state.get("/diagnostics")
+async def diagnostics():
+    """Return diagnostic data about pending txn and account health."""
+    wl = app.state.workload
+    return wl.diagnostics_snapshot()
 
 
 workload_running = False
@@ -1527,111 +1720,23 @@ workload_task = None
 workload_stats = {"submitted": 0, "validated": 0, "failed": 0, "started_at": None}
 
 
-async def _txn_producer(queue: asyncio.Queue, wl: "Workload", stop_event: asyncio.Event) -> None:
-    """Background producer: continuously build and sign transactions into the queue.
-
-    Runs concurrently with the ledger-close consumer. Iterates free accounts, picks an
-    eligible txn type, builds, allocates sequence, signs, and enqueues the PendingTx.
-    record_created() is called inside build_sign_and_track, so the account immediately
-    appears as pending=1 — preventing double-allocation on the next producer iteration.
-    Yields (sleep(0)) when all accounts are occupied to avoid busy-looping.
-    """
-    from workload.txn_factory.builder import build_txn_dict, pick_eligible_txn_type, txn_model_cls
-
-    while not stop_event.is_set():
-        try:
-            try:
-                fee_info = await asyncio.wait_for(wl.get_fee_info(), timeout=5.0)
-            except Exception as e:
-                log.debug("producer: fee_info failed: %s", e)
-                await asyncio.sleep(0.5)
-                continue
-
-            batch_fee = fee_info.minimum_fee
-            batch_ledger = fee_info.ledger_current_index
-            batch_lls = batch_ledger + C.HORIZON
-
-            pending_counts = wl.get_pending_txn_counts_by_account()
-            free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
-
-            built_any = False
-            queue_full = False
-            target = wl.target_txns_per_ledger
-            for addr in free_accounts[:target]:
-                if queue.full():
-                    queue_full = True
-                    break
-
-                wallet = wl.wallets[addr]
-                txn_type = pick_eligible_txn_type(wallet, wl.ctx)
-                if txn_type is None:
-                    continue
-
-                try:
-                    ctx = replace(wl.ctx, forced_account=wallet)
-                    composed = build_txn_dict(txn_type, ctx)
-                    if composed is None:
-                        continue
-                    txn = txn_model_cls(txn_type).from_xrpl(composed)
-                except Exception as e:
-                    log.warning("producer build %s/%s: %s", addr[:8], txn_type, e)
-                    continue
-
-                try:
-                    seq = await wl.alloc_seq(wallet.address)
-                except Exception as e:
-                    log.warning("producer alloc_seq %s: %s", addr[:8], e)
-                    continue
-
-                try:
-                    pending = await wl.build_sign_and_track(
-                        txn,
-                        wallet,
-                        fee_drops=batch_fee,
-                        created_ledger=batch_ledger,
-                        last_ledger_seq=batch_lls,
-                        preallocated_seq=seq,
-                    )
-                    queue.put_nowait(pending)
-                    built_any = True
-                except asyncio.QueueFull:
-                    await wl.record_expired(pending.tx_hash)
-                    queue_full = True
-                    break
-                except Exception as e:
-                    await wl.release_seq(wallet.address, seq)
-                    log.warning("producer sign %s/%s: %s", addr[:8], txn_type, e)
-                    continue
-
-            if queue_full:
-                await asyncio.sleep(1)  # back off — let consumer drain
-            elif not built_any:
-                await asyncio.sleep(0)
-            else:
-                await asyncio.sleep(0)
-
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.error("PRODUCER CRASH (recovering): %s: %s", type(e).__name__, e, exc_info=True)
-            await asyncio.sleep(1)
-
-
 async def continuous_workload():
-    """Continuously submit transactions, one per account per batch.
+    """Continuously build and submit transactions as fast as possible.
 
-    Architecture: producer-consumer split.
-    - _txn_producer (background task): picks eligible accounts, builds+signs txns, enqueues them.
-    - consumer loop (this coroutine): fires on each new ledger close, drains the queue,
-      validates generation freshness, then submits all in parallel via TaskGroup.
+    No queue, no producer-consumer split. Single loop that:
+    1. Finds free accounts (no in-flight txns)
+    2. Builds + signs txns for up to `target_txns_per_ledger` accounts
+    3. Submits them all in parallel via TaskGroup
+    4. Immediately loops back — no waiting for ledger close
 
-    Sequence safety invariant: an account is only picked when it has zero in-flight
-    transactions. record_created() is called at build time, so pending_count is 1
-    immediately after building — the producer never double-allocates a sequence.
-    Generation counter on AccountRecord detects stale pre-signed txns (built before a
-    cascade-expire reset the account sequence) and discards them before submission.
+    The ledger close is the tick for *validation tracking*, not for submission.
+    Real-world users submit whenever they want; so do we.
+
+    Sequence safety: an account is only picked when pending_count == 0.
+    record_created() marks it pending at build time, preventing double-allocation.
     """
     from workload.randoms import random
+    from workload.txn_factory.builder import build_txn_dict, pick_eligible_txn_type, txn_model_cls
 
     global workload_stats
     wl = app.state.workload
@@ -1639,119 +1744,199 @@ async def continuous_workload():
     log.debug("Continuous workload started")
     workload_stats["started_at"] = perf_counter()
 
-    last_batch_ledger = 0
-    queue_size = wl.target_txns_per_ledger * 2
-    txn_queue: asyncio.Queue[PendingTx] = asyncio.Queue(maxsize=queue_size)
+    consecutive_empty = 0
+    last_account_create_ledger = 0
 
-    producer_task = asyncio.create_task(
-        _txn_producer(txn_queue, wl, workload_stop_event),
-        name="txn_producer",
-    )
-    producer_task.add_done_callback(_log_task_exception)
+    # Fetch fee once, then rely on WS ledgerClosed updates (or re-fetch on telINSUF_FEE_P)
+    if wl._cached_fee is None:
+        try:
+            fee_info = await asyncio.wait_for(wl.get_fee_info(), timeout=5.0)
+            wl._cached_fee = fee_info.minimum_fee
+            log.info("workload: fetched base fee = %d drops", wl._cached_fee)
+        except Exception as e:
+            log.warning("workload: initial fee fetch failed: %s", e)
 
     try:
         while not workload_stop_event.is_set():
             try:
-                fee_info = await asyncio.wait_for(wl.get_fee_info(), timeout=5.0)
-            except Exception as e:
-                log.debug("consumer: fee_info failed: %s", e)
-                await asyncio.sleep(0.5)
-                continue
-            batch_ledger = fee_info.ledger_current_index
+                # Wait for first ledger index from WS
+                batch_ledger = wl.latest_ledger_index
+                if batch_ledger == 0:
+                    await asyncio.sleep(0.5)
+                    continue
+                batch_lls = batch_ledger + C.HORIZON
 
-            # Ledger-driven: one batch per new ledger close.
-            # Ensures queued txns from the previous ledger are applied before re-sampling sequences.
-            if batch_ledger == last_batch_ledger:
-                await asyncio.sleep(0.1)
-                continue
-            last_batch_ledger = batch_ledger
-
-            # Occasionally grow the account pool via a funding Payment
-            if random() < 0.50 and "Payment" not in wl.disabled_txn_types:
-                funding_pending = wl.get_pending_txn_counts_by_account().get(wl.funding_wallet.address, 0)
-                if funding_pending == 0:
+                # Re-fetch fee if invalidated (telINSUF_FEE_P sets _cached_fee = None)
+                if wl._cached_fee is None:
                     try:
-                        default_balance = wl.config["users"]["default_balance"]
-                        large_balance = str(int(default_balance) * 10)
-                        await wl.create_account(initial_xrp_drops=large_balance)
-                        workload_stats["submitted"] += 1
-                    except Exception as e:
-                        log.debug("Failed to create new account: %s", e)
-                        workload_stats["failed"] += 1
+                        fee_info = await asyncio.wait_for(wl.get_fee_info(), timeout=2.0)
+                        wl._cached_fee = fee_info.minimum_fee
+                        log.info("workload: refreshed fee = %d drops (fee escalation detected)", wl._cached_fee)
+                    except Exception:
+                        pass
+                batch_fee = wl._cached_fee or 10
 
-            # Drain queue up to target, discarding stale txns and deduplicating per account.
-            # The producer runs continuously and can enqueue multiple sequential txns for the
-            # same account between ledger closes (each valid at build time). Submitting them
-            # all in parallel causes tefPAST_SEQ. Keep only the latest per account.
-            target = wl.target_txns_per_ledger
-            by_account: dict[str, PendingTx] = {}
-            while len(by_account) < target and not txn_queue.empty():
-                p = txn_queue.get_nowait()
-                rec = wl._record_for(p.account)
-                async with rec.lock:
-                    if rec.generation != p.account_generation:
-                        await wl.record_expired(p.tx_hash)
-                        log.debug(
-                            "consumer: stale tx %s gen=%d != %d, expired",
-                            p.tx_hash[:8],
-                            p.account_generation,
-                            rec.generation,
+                # Find free accounts
+                pending_counts = wl.get_pending_txn_counts_by_account()
+                free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
+
+                n_free = len(free_accounts)
+                if n_free == 0:
+                    consecutive_empty += 1
+                    if consecutive_empty == 1 or consecutive_empty % 5 == 0:
+                        log.warning(
+                            "workload: 0 free accounts (consecutive=%d, total=%d, pending=%d)",
+                            consecutive_empty,
+                            len(wl.wallets),
+                            sum(pending_counts.values()),
                         )
+                    # Self-healing: force-expire txns past their LastLedgerSequence
+                    if consecutive_empty >= 3:
+                        expired = wl.expire_past_lls(batch_ledger)
+                        if expired:
+                            log.warning("workload: self-heal expired %d stale txns at ledger %d", expired, batch_ledger)
+                            pending_counts = wl.get_pending_txn_counts_by_account()
+                            free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
+                            n_free = len(free_accounts)
+                            if n_free > 0:
+                                log.info("workload: self-heal freed %d accounts", n_free)
+                        elif consecutive_empty % 10 == 0:
+                            diag = wl.diagnostics_snapshot()
+                            log.warning(
+                                "workload: STUCK for %d iterations — blocked=%d free=%d pending_by_state=%s oldest_age=%d",
+                                consecutive_empty,
+                                diag["blocked_accounts"],
+                                diag["free_accounts"],
+                                diag["pending_by_state"],
+                                diag["oldest_pending_age_ledgers"],
+                            )
+                    if n_free == 0:
+                        await asyncio.sleep(0.5)
                         continue
-                # Keep latest per account (higher sequence); expire the older one
-                prev = by_account.get(p.account)
-                if prev is not None:
-                    await wl.record_expired(prev.tx_hash)
-                by_account[p.account] = p
-            pending_batch = list(by_account.values())
+                else:
+                    if consecutive_empty >= 3:
+                        log.info(
+                            "workload: recovered — %d free accounts after %d empty iterations", n_free, consecutive_empty
+                        )
+                    consecutive_empty = 0
 
-            if not pending_batch:
-                continue
+                # Occasionally grow the account pool (once per ledger)
+                current_ledger = wl.latest_ledger_index
+                if (
+                    current_ledger > last_account_create_ledger
+                    and random() < 0.50
+                    and "Payment" not in wl.disabled_txn_types
+                ):
+                    funding_pending = pending_counts.get(wl.funding_wallet.address, 0)
+                    if funding_pending == 0:
+                        try:
+                            default_balance = wl.config["users"]["default_balance"]
+                            large_balance = str(int(default_balance) * 10)
+                            await wl.create_account(initial_xrp_drops=large_balance)
+                            workload_stats["submitted"] += 1
+                            last_account_create_ledger = current_ledger
+                        except Exception as e:
+                            log.debug("Failed to create new account: %s", e)
+                            workload_stats["failed"] += 1
 
-            log.info(
-                "Batch: %d txns, ledger=%d, total_wallets=%d",
-                len(pending_batch),
-                batch_ledger,
-                len(wl.wallets),
-            )
+                # Build + sign txns for free accounts
+                # TODO: Parallelize this loop — alloc_seq RPCs and signing are sequential.
+                # With 400 accounts, build phase takes 2-3s. Use TaskGroup for alloc_seq,
+                # then sign concurrently. This is the main throughput bottleneck.
+                target = wl.target_txns_per_ledger
+                build_start = perf_counter()
+                batch: list[PendingTx] = []
+                for addr in free_accounts[:target]:
+                    wallet = wl.wallets[addr]
+                    txn_type = pick_eligible_txn_type(wallet, wl.ctx)
+                    if txn_type is None:
+                        continue
 
-            try:
-                async with asyncio.TaskGroup() as tg:
-                    tasks = [tg.create_task(wl.submit_pending(p)) for p in pending_batch]
+                    try:
+                        ctx = replace(wl.ctx, forced_account=wallet)
+                        composed = build_txn_dict(txn_type, ctx)
+                        if composed is None:
+                            continue
+                        txn = txn_model_cls(txn_type).from_xrpl(composed)
+                    except Exception as e:
+                        log.debug("build %s/%s: %s", addr, txn_type, e)
+                        continue
 
-                submitted = 0
-                failed = 0
-                errors: dict[str, int] = {}
-                for task in tasks:
-                    result = task.result()
-                    if result is None:
-                        failed += 1
-                        errors["build_failed"] = errors.get("build_failed", 0) + 1
-                    else:
-                        er = result.get("engine_result")
-                        # terQUEUED = accepted into rippled queue (will apply next ledger) — counts as ok
-                        if er and er not in ("terQUEUED",) and er.startswith(("ter", "tem", "tef", "tel")):
+                    try:
+                        seq = await wl.alloc_seq(wallet.address)
+                    except Exception as e:
+                        log.debug("alloc_seq %s: %s", addr, e)
+                        continue
+
+                    try:
+                        pending = await wl.build_sign_and_track(
+                            txn,
+                            wallet,
+                            fee_drops=batch_fee,
+                            created_ledger=batch_ledger,
+                            last_ledger_seq=batch_lls,
+                            preallocated_seq=seq,
+                        )
+                        batch.append(pending)
+                    except Exception as e:
+                        await wl.release_seq(wallet.address, seq)
+                        log.debug("sign %s/%s: %s", addr, txn_type, e)
+                        continue
+
+                if not batch:
+                    await asyncio.sleep(0)
+                    continue
+
+                build_ms = (perf_counter() - build_start) * 1000
+                log.info(
+                    "Batch: %d txns, ledger=%d, wallets=%d, build=%.0fms",
+                    len(batch), batch_ledger, len(wl.wallets), build_ms,
+                )
+
+                # Submit all in parallel — no waiting, fire immediately
+                try:
+                    async with asyncio.TaskGroup() as tg:
+                        tasks = [tg.create_task(wl.submit_pending(p)) for p in batch]
+
+                    submitted = 0
+                    failed = 0
+                    errors: dict[str, int] = {}
+                    for task in tasks:
+                        result = task.result()
+                        if result is None:
                             failed += 1
-                            errors[er] = errors.get(er, 0) + 1
+                            errors["build_failed"] = errors.get("build_failed", 0) + 1
                         else:
-                            submitted += 1
-                workload_stats["submitted"] += submitted
-                workload_stats["failed"] += failed
-                log.warning("Batch result: %d ok, %d failed — errors=%s", submitted, failed, errors or None)
-            except* Exception as eg:
-                for exc in eg.exceptions:
-                    log.error("Batch error: %s: %s", type(exc).__name__, exc)
-                workload_stats["failed"] += len(pending_batch)
+                            er = result.get("engine_result")
+                            if er and er not in ("terQUEUED",) and er.startswith(("ter", "tem", "tef", "tel")):
+                                failed += 1
+                                errors[er] = errors.get(er, 0) + 1
+                            else:
+                                submitted += 1
+                    workload_stats["submitted"] += submitted
+                    workload_stats["failed"] += failed
+                    if "telINSUF_FEE_P" in errors:
+                        wl._cached_fee = None
+                        log.warning("Fee escalation detected — invalidating cached fee")
+                    if failed:
+                        log.info("Batch result: %d ok, %d failed — errors=%s", submitted, failed, errors)
+                    else:
+                        log.info("Batch result: %d ok", submitted)
+                except* Exception as eg:
+                    for exc in eg.exceptions:
+                        log.error("Batch error: %s: %s", type(exc).__name__, exc)
+                    workload_stats["failed"] += len(batch)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error("WORKLOAD CRASH (recovering): %s: %s", type(e).__name__, e, exc_info=True)
+                await asyncio.sleep(1)
 
     except asyncio.CancelledError:
         log.debug("Continuous workload cancelled")
         raise
     finally:
-        producer_task.cancel()
-        try:
-            await producer_task
-        except asyncio.CancelledError:
-            pass
         log.debug("Continuous workload stopped — stats: %s", workload_stats)
 
 
@@ -1800,10 +1985,12 @@ async def stop_workload():
 @r_workload.get("/status")
 async def workload_status():
     """Get current workload status and statistics."""
+    wl = app.state.workload
     return {
         "running": workload_running,
         "stats": workload_stats,
-        "uptime_seconds": perf_counter() - workload_stats["started_at"] if workload_stats["started_at"] else 0,
+        "uptime_seconds": round(time.time() - wl.started_at),
+        "started_at": wl.started_at,
     }
 
 
@@ -1834,8 +2021,8 @@ async def set_target_txns(req: TargetTxnsReq):
 
     Takes effect immediately on next batch.
     """
-    if req.target_txns < 1 or req.target_txns > 500:
-        raise HTTPException(status_code=400, detail="target_txns must be between 1 and 500")
+    if req.target_txns < 0 or req.target_txns > 1000:
+        raise HTTPException(status_code=400, detail="target_txns must be between 0 and 1000")
 
     old_value = app.state.workload.target_txns_per_ledger
     app.state.workload.target_txns_per_ledger = req.target_txns

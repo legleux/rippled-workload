@@ -6,15 +6,20 @@ cd testnet && docker compose down && cd ..
 
 ## 2. Generate testnet
 
-Using 4 gateways and 1000 users. `--amendment-source` enables all amendments from develop branch.
+Using 4 gateways and 1000 users. Point `--amendment-source` to the xrpld `features.macro` file
+(${REPO_PATH}/include/xrpl/protocol/detail/features.macro).
+The defaults are:
+**output directory:** testnet
+**validators:** 5
+**accounts:** 1000
+**gateways:** 4
+**assets-per-gateway:** 4
+**gateway-currencies:** USD, CNY, BTC, ETH
+**gateway-coverage:** 1.0 # TODO: Explain
+**gateway-connectivity:** 1.0 # TODO: Explain
+
 ```bash
-uv run gen auto -o testnet -v 5 --accounts 1000 \
-  --gateways 4 \
-  --assets-per-gateway 4 \
-  --gateway-currencies "USD,CNY,BTC,ETH" \
-  --gateway-coverage 1.0 \
-  --gateway-connectivity 1.0 \
-  --amendment-source ../../rippled/rippled/develop/include/xrpl/protocol/detail/features.macro
+uv run gen auto --amendment-source ../../rippled/rippled/develop/include/xrpl/protocol/detail/features.macro
 ```
 
 ## 3. Start network
