@@ -1,7 +1,6 @@
-FROM ghcr.io/astral-sh/uv:0.9-python3.13-trixie
+FROM ghcr.io/astral-sh/uv:0.10-python3.13-trixie
 
-ENV \
-    PYTHONUNBUFFERED=1 \
+ENV PYTHONUNBUFFERED=1 \
     PATH="/opt/antithesis/catalog/workload/.venv/bin:/opt/antithesis/test/v1/all_transactions:$PATH"
 
 WORKDIR /opt/antithesis/catalog/workload
