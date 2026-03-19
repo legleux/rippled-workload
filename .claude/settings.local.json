@@ -66,7 +66,13 @@
       "Bash(uv lock:*)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:xrpl-py.readthedocs.io)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(pkill -9 -f uvicorn)",
+      "Bash(pkill -9 -f \"uv run workload\")",
+      "Bash(for f:*)",
+      "Bash(do grep:*)",
+      "Bash(done)",
+      "WebFetch(domain:antithesis.com)"
     ],
     "deny": [],
     "ask": []

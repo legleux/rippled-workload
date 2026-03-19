@@ -39,15 +39,15 @@ rippled-workload/
 
 **LEDGER-BASED TIMING: The ledger is the tick, not the clock**
 
-This workload operates on **ledger close events** as the fundamental unit of time, not wall-clock time:
+The ledger close is the tick for **validation tracking and lifecycle management**, not for submission:
 
-- DO: Wait for ledger closes, count ledgers, use ledger index as the tick
-- DO: Use time for timeouts (network connectivity issues) and measuring operation duration (metrics)
-- DON'T: Use time-based delays for submission logic (no `await asyncio.sleep()` between batches)
-- DON'T: Spread submissions over time intervals
-- DON'T: Use time to control submission rate
+- DO: Use ledger close events for tracking validation, expiry (LastLedgerSequence), and metrics
+- DO: Use ledger index as the canonical time unit for transaction lifecycle
+- DO: Submit transactions as fast as possible — real users don't wait for ledger closes
+- DON'T: Gate submission on ledger close events
+- DON'T: Use wall-clock time for submission pacing
 
-**Rationale**: XRPL consensus operates on discrete ledger closes (~3-4 seconds). Transaction validation, sequence numbers, and queue behavior are all tied to ledger boundaries. Time-based logic creates race conditions and unpredictable behavior.
+**Rationale**: XRPL consensus operates on discrete ledger closes (~3-4 seconds). Validation, sequence numbers, and queue behavior are tied to ledger boundaries. But submission should be immediate — txns sit in rippled's internal queue until applied. The workload submits continuously (build → sign → submit → repeat) like a real-world client.
 
 ### Domain Model
 
@@ -88,9 +88,15 @@ Supported transaction types (31): Payment, OfferCreate, OfferCancel, TrustSet, A
 Two concurrent paths to validation (see workload/ws-architecture.md):
 
 1. **WebSocket** (primary): `ws_listener` → event queue → `ws_processor` → `record_validated(src=WS)`
+   - Subscribes to `accounts_proposed` (early engine_result feedback) + `transactions` stream (catches newly-created accounts)
+   - `ledgerClosed` events provide `txn_count`, `fee_base`, `reserve_base`, `reserve_inc` — eliminates RPC calls
 2. **RPC Polling** (fallback): `periodic_finality_check` every 5s → `record_validated(src=POLL)`
 
 Both paths deduplicate by `(tx_hash, ledger_index)`. See `workload/ws-architecture.md` and `workload/ws-architecture.excalidraw` for the full architecture diagram.
+
+### Submission Architecture
+
+Single unified loop in `continuous_workload()` (app.py): build → sign → submit → repeat. No queue, no producer-consumer split. Submissions are not gated on ledger close — txns go to rippled's internal queue immediately. `target_txns_per_ledger` controls batch size per iteration. Self-healing via `expire_past_lls()` when all accounts are blocked.
 
 ### Assertions Framework
 
@@ -161,14 +167,16 @@ On startup the workload will:
 
 ```bash
 # Generate everything: ledger.json, rippled configs, docker-compose.yml
-gen auto -o /path/to/testnet -v 5 -n 40 -t "0:1:USD:1000000000"
+# Defaults: 1000 accounts, 4 gateways, USD/CNY/BTC/ETH, full trust line coverage
+# --amendment-source automatically uses develop profile
+gen auto --amendment-source /path/to/rippled/include/xrpl/protocol/detail/features.macro
 
 # Start network
-cd /path/to/testnet
+cd testnet
 docker compose up -d
 
 # Verify nodes are synced
-docker exec rippled rippled --silent server_info | python3 -c "
+docker exec val0 rippled --silent server_info | python3 -c "
 import sys,json; i=json.load(sys.stdin)['result']['info']
 print(f\"state: {i['server_state']}, ledgers: {i['complete_ledgers']}, peers: {i['peers']}\")"
 ```
@@ -198,7 +206,7 @@ Key settings:
 - **users**: Number (1000) and balance
 - **amm**: Trading fee, pool counts (12 gateway + 100 user), deposit/withdraw amounts
 - **currencies**: 20 currency codes with rates
-- **transactions.disabled**: Transaction types to skip
+- **transactions.disabled**: Transaction types to skip (currently: Batch, DelegateSet)
 - **transactions.percentages**: Weight distribution (Payment=0.25, OfferCreate=0.20, AMMDeposit=0.15, AMMWithdraw=0.10)
 - **genesis**: Path to accounts.json, gateway/user counts, currencies per gateway
 - **rippled**: Connection settings (docker hostname, local IP, ports)
@@ -265,7 +273,7 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 
 - **workload:latest**: Built from `workload/Dockerfile` (uvicorn FastAPI app). For local development, run natively with `uv run workload` instead.
 - **workload (Antithesis)**: Built from root `Dockerfile` (includes test_composer scripts at `/opt/antithesis/test/`)
-- **rippled:latest**: Built from `Dockerfile.rippled` (clones and builds rippled with Antithesis instrumentation)
+- **rippleci/xrpld:develop**: Default rippled image for testnet (from Docker Hub). Override with `gen auto --image`
 - **config:latest**: Built from `Dockerfile.config` (network configs)
 - **sidecar:latest**: Built from `sidecar/Dockerfile` (monitoring service)
 
@@ -278,7 +286,10 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 - Account initialization happens at startup in `lifespan()` (app.py)
 - WebSocket listener, WS processor, finality checker, and DEX metrics poller run as concurrent tasks in an asyncio.TaskGroup
 - `prepare-workload/` is legacy — superseded by the `generate_ledger` package (`gen auto` CLI). Do not add new code there.
-- New transaction types (Vaults, DelegateSet, etc.) require amendments not yet enabled in rippled develop. They get `temDISABLED` gracefully on networks without the amendments.
+- DelegateSet requires `PermissionDelegationV1_1` which is `Supported::no` in rippled develop — disabled in config.toml until rippled enables it.
+- Vaults require `SingleAssetVault` (`Supported::yes` in develop) — works if testnet is generated with `--amendment-source` pointing at current features.macro.
+- `--amendment-source` on `gen auto` now automatically uses the develop profile (no need for `--amendment-profile develop`).
+- Default rippled image is now `rippleci/xrpld:develop` (override with `--image`).
 
 ## Current Priorities
 
