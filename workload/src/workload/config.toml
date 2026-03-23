@@ -22,7 +22,7 @@ require_auth = false
 default_ripple = true
 
 [users]
-number = 100
+number = 1000
 default_balance = 50_000_000000
 
 [amm]

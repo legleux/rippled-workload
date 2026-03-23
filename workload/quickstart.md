@@ -12,13 +12,20 @@ uv sync
 ## Option A: Generate a new testnet and start everything
 
 ```bash
-# 1. Generate testnet configs + docker-compose.yml
-#    (requires generate_ledger: uv pip install -e ../../generate_ledger)
+# 1. Install generate_ledger (required for 'workload gen')
+#    Uncomment [tool.uv.sources] and gen group in pyproject.toml, then:
+uv sync --group gen
+#    Or without modifying pyproject.toml:
+#    uv pip install -e /path/to/generate_ledger
+
+# 2. Generate testnet configs + docker-compose.yml
 uv run workload gen --amendment-profile develop
 
-# 2. Start the network and workload together
+# 3. Start the network and workload together
 docker compose up -d --build
 ```
+
+> **Note:** Plain `uv sync` does NOT install generate_ledger — you must use `--group gen`.
 
 `workload gen` produces:
 - `testnet/` — ledger.json, accounts.json, validator configs, testnet docker-compose.yml
