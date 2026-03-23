@@ -1,12 +1,15 @@
 ## 1. Tear down old network (if any)
 
 ```bash
-cd testnet && docker compose down && cd ..
+docker compose down
 ```
 
 ## 2. Generate testnet
 
-Using 4 gateways and 1000 users. Amendment profiles: `release` (mainnet, default), `develop` (auto-fetch from GitHub), or provide a local `--amendment-source`.
+Generates the testnet configs (`testnet/`) and a `docker-compose.yml` that includes both the rippled network and the workload container.
+
+Amendment profiles: `mainnet` (default), `develop` (auto-fetch from GitHub), or provide a local `--amendment-source`.
+
 The defaults are:
 **output directory:** testnet
 **validators:** 5
@@ -19,21 +22,24 @@ The defaults are:
 
 ```bash
 # Option A: develop profile (auto-fetches features.macro from GitHub)
-uv run gen auto --amendment-profile develop
+uv run workload gen --amendment-profile develop
 
 # Option B: local features.macro
-uv run gen auto --amendment-source ../../rippled/rippled/develop/include/xrpl/protocol/detail/features.macro
+uv run workload gen --amendment-source ../../rippled/rippled/develop/include/xrpl/protocol/detail/features.macro
 ```
 
-## 3. Start network
+## 3. Start everything (network + workload)
+
+### Docker (builds and runs workload in same network as testnet)
+
+```bash
+docker compose up -d --build
+```
+
+### Or run workload natively (if testnet is already running)
 
 ```bash
 cd testnet && docker compose up -d && cd ..
-```
-
-## 4. Start workload
-
-```bash
 uv run workload
 ```
 

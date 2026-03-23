@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import tomllib
+from ruamel.yaml import YAML
 
 from gl.compose import ComposeConfig, write_compose_file
 from gl.ledger import LedgerConfig, write_ledger_file
@@ -14,6 +15,33 @@ CONFIG_PATH = Path(__file__).parent / "config.toml"
 def _load_config() -> dict:
     with open(CONFIG_PATH, "rb") as f:
         return tomllib.load(f)
+
+
+def _write_workload_compose(testnet_dir: str) -> Path:
+    """Write the outer docker-compose.yml that includes the testnet and adds the workload service."""
+    compose = {
+        "include": [f"{testnet_dir}/docker-compose.yml"],
+        "services": {
+            "workload": {
+                "image": "workload:latest",
+                "build": {"context": ".", "dockerfile": "Dockerfile"},
+                "container_name": "workload",
+                "hostname": "workload",
+                "ports": ["8000:8000"],
+                "init": True,
+                "restart": "on-failure",
+                "depends_on": {"rippled": {"condition": "service_started"}},
+                "networks": {"xrpl_net": {}},
+                "volumes": [f"./{testnet_dir}/accounts.json:/workload/testnet/accounts.json:ro"],
+            },
+        },
+    }
+    out = Path("docker-compose.yml")
+    yaml = YAML()
+    yaml.default_flow_style = False
+    with open(out, "w") as f:
+        yaml.dump(compose, f)
+    return out
 
 
 def run_gen(
@@ -78,14 +106,17 @@ def run_gen(
     )
     rippled_cfg.write()
 
-    # --- docker-compose.yml ---
+    # --- testnet docker-compose.yml ---
     compose_cfg = ComposeConfig(
         num_validators=num_validators,
         base_dir=base_dir,
     )
     write_compose_file(config=compose_cfg)
 
+    # --- outer docker-compose.yml (includes testnet + workload service) ---
+    _write_workload_compose(output_dir)
+
     print(f"\nTestnet generated in {base_dir.resolve()}/")
     print(f"  Accounts: {total_accounts} ({gw_number} gateways + {user_number} users)")
     print(f"  Validators: {num_validators}")
-    print(f"\nTo start: cd {base_dir} && docker compose up -d")
+    print("\nTo start: docker compose up -d --build")

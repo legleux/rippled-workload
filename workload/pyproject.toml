@@ -60,8 +60,8 @@ quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
 
-[tool.uv.sources]
-generate-ledger = { path = "../../generate_ledger", editable = true }
+# [tool.uv.sources]
+# generate-ledger = { path = "../../generate_ledger", editable = true }
 
 [dependency-groups]
 dev = [
@@ -70,6 +70,6 @@ dev = [
 lint = [
     "ruff>=0.14.1",
 ]
-gen = [
-    "generate-ledger",
-]
+# gen = [
+#     "generate-ledger",
+# ]

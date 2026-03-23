@@ -1,15 +1,21 @@
 include:
-  - testnet/docker-compose.yml
-
+- testnet/docker-compose.yml
 services:
   workload:
     image: workload:latest
     build:
+      context: .
       dockerfile: Dockerfile
     container_name: workload
     hostname: workload
-    ports: ["8000:8000"]
+    ports:
+    - 8000:8000
     init: true
-    networks: { xrpl_net: {} }
+    restart: on-failure
+    depends_on:
+      rippled:
+        condition: service_started
+    networks:
+      xrpl_net: {}
     volumes:
-      - ./testnet/accounts.json:/workload/testnet/accounts.json:ro
+    - ./testnet/accounts.json:/workload/testnet/accounts.json:ro

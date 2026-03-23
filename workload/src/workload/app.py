@@ -3,10 +3,8 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from pathlib import Path
 import time
-from time import perf_counter
 
 import httpx
 from fastapi import APIRouter, FastAPI, HTTPException
@@ -25,7 +23,8 @@ from workload.assertions import setup_complete
 import workload.constants as C
 from workload.config import cfg
 from workload.logging_config import setup_logging
-from workload.workload_core import PendingTx, Workload, periodic_dex_metrics, periodic_finality_check
+from workload.workload_core import Workload, periodic_dex_metrics, periodic_finality_check
+from workload import workload_runner
 
 setup_logging()
 log = logging.getLogger("workload.app")
@@ -97,35 +96,50 @@ async def _probe_rippled(url: str, max_retries: int = 30, retry_delay: float = 2
                 raise SystemExit(1)
 
 
-async def wait_for_ledgers(url: str, count: int, timeout: float = 30.0) -> None:
-    """
-    Connects to the rippled WebSocket and waits for 'count' ledgers to close.
+async def wait_for_ledgers(url: str, count: int, timeout: float = 120.0, retry_delay: float = 5.0) -> None:
+    """Connect to the rippled WebSocket and wait for *count* ledger closes.
+
+    Retries the WS connection on failure (the hub may not be ready yet).
+    The overall *timeout* caps total wall-clock time across all attempts.
     """
     log.info(f"Connecting to WebSocket {url} to wait for {count} ledgers...")
-    try:
-        async with asyncio.timeout(timeout):
-            async with AsyncWebsocketClient(url) as client:
-                await client.send(Subscribe(streams=[StreamParameter.LEDGER]))
-                ledger_count = 0
-                async for msg in client:
-                    if msg.get("type") == "ledgerClosed":
-                        ledger_count += 1
-                        log.debug("Ledger %s closed. (%s/%s)", msg.get("ledger_index"), ledger_count, count)
-                        if ledger_count >= count:
-                            log.info("Observed %s ledgers closed. Convinced network is progessing.", ledger_count)
-                            break
-    except Exception as e:
-        log.error(
-            "\n"
-            "========================================================\n"
-            f"  Cannot connect to rippled WebSocket at {url}\n"
-            f"  {e.__class__.__name__}: {e}\n"
-            "\n"
-            "  The RPC endpoint responded but the WebSocket is not\n"
-            "  reachable. Check that port 6006 is exposed/forwarded.\n"
-            "========================================================"
-        )
-        raise SystemExit(1)
+    deadline = asyncio.get_event_loop().time() + timeout
+    attempt = 0
+    while True:
+        attempt += 1
+        remaining = deadline - asyncio.get_event_loop().time()
+        if remaining <= 0:
+            break
+        try:
+            async with asyncio.timeout(remaining):
+                async with AsyncWebsocketClient(url) as client:
+                    await client.send(Subscribe(streams=[StreamParameter.LEDGER]))
+                    ledger_count = 0
+                    async for msg in client:
+                        if msg.get("type") == "ledgerClosed":
+                            ledger_count += 1
+                            log.debug("Ledger %s closed. (%s/%s)", msg.get("ledger_index"), ledger_count, count)
+                            if ledger_count >= count:
+                                log.info("Observed %s ledgers closed. Convinced network is progressing.", ledger_count)
+                                return
+        except Exception as e:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= retry_delay:
+                log.error(
+                    "\n"
+                    "========================================================\n"
+                    f"  Cannot connect to rippled WebSocket at {url}\n"
+                    f"  {e.__class__.__name__}: {e}\n"
+                    "\n"
+                    "  The RPC endpoint responded but the WebSocket is not\n"
+                    "  reachable or no ledgers are closing yet.\n"
+                    "========================================================"
+                )
+                raise SystemExit(1)
+            log.info(
+                f"WebSocket not ready (attempt {attempt}): {e.__class__.__name__} - retrying in {retry_delay}s..."
+            )
+            await asyncio.sleep(retry_delay)
 
 
 @asynccontextmanager
@@ -256,21 +270,14 @@ async def lifespan(app: FastAPI):
         )
         log.info("[4/4] Initialization complete at ledger %d. Starting workload.", init_ledger)
         await asyncio.sleep(5)
-        await start_workload()
+        await workload_runner.start(app.state.workload)
         try:
             yield
         finally:
             log.info("Shutting down...")
 
             # Stop workload first to prevent new submissions during flush
-            if workload_running and workload_stop_event:
-                log.info("Stopping workload...")
-                workload_stop_event.set()
-                if workload_task:
-                    try:
-                        await asyncio.wait_for(workload_task, timeout=3.0)
-                    except (TimeoutError, asyncio.CancelledError, Exception):
-                        log.info("Workload task didn't stop cleanly, continuing shutdown")
+            await workload_runner.force_stop()
 
             stop.set()
 
@@ -1711,289 +1718,30 @@ async def diagnostics():
     return wl.diagnostics_snapshot()
 
 
-workload_running = False
-workload_stop_event = None
-workload_task = None
-workload_stats = {"submitted": 0, "validated": 0, "failed": 0, "started_at": None}
-
-
-async def continuous_workload():
-    """Continuously build and submit transactions as fast as possible.
-
-    No queue, no producer-consumer split. Single loop that:
-    1. Finds free accounts (no in-flight txns)
-    2. Builds + signs txns for up to `target_txns_per_ledger` accounts
-    3. Submits them all in parallel via TaskGroup
-    4. Immediately loops back — no waiting for ledger close
-
-    The ledger close is the tick for *validation tracking*, not for submission.
-    Real-world users submit whenever they want; so do we.
-
-    Sequence safety: an account is only picked when pending_count == 0.
-    record_created() marks it pending at build time, preventing double-allocation.
-    """
-    from workload.constants import TxIntent
-    from workload.randoms import choices, random
-    from workload.txn_factory.builder import build_txn_dict, pick_eligible_txn_type, txn_model_cls
-
-    global workload_stats
-    wl = app.state.workload
-
-    log.debug("Continuous workload started")
-    workload_stats["started_at"] = perf_counter()
-
-    consecutive_empty = 0
-    last_account_create_ledger = 0
-
-    # Fetch fee once, then rely on WS ledgerClosed updates (or re-fetch on telINSUF_FEE_P)
-    if wl._cached_fee is None:
-        try:
-            fee_info = await asyncio.wait_for(wl.get_fee_info(), timeout=5.0)
-            wl._cached_fee = fee_info.minimum_fee
-            log.info("workload: fetched base fee = %d drops", wl._cached_fee)
-        except Exception as e:
-            log.warning("workload: initial fee fetch failed: %s", e)
-
-    try:
-        while not workload_stop_event.is_set():
-            try:
-                # Wait for first ledger index from WS
-                batch_ledger = wl.latest_ledger_index
-                if batch_ledger == 0:
-                    await asyncio.sleep(0.5)
-                    continue
-                batch_lls = batch_ledger + C.HORIZON
-
-                # Re-fetch fee if invalidated (telINSUF_FEE_P sets _cached_fee = None)
-                if wl._cached_fee is None:
-                    try:
-                        fee_info = await asyncio.wait_for(wl.get_fee_info(), timeout=2.0)
-                        wl._cached_fee = fee_info.minimum_fee
-                        log.info("workload: refreshed fee = %d drops (fee escalation detected)", wl._cached_fee)
-                    except Exception:
-                        pass
-                batch_fee = wl._cached_fee or 10
-
-                # Find free accounts
-                pending_counts = wl.get_pending_txn_counts_by_account()
-                free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
-
-                n_free = len(free_accounts)
-                if n_free == 0:
-                    consecutive_empty += 1
-                    if consecutive_empty == 1 or consecutive_empty % 5 == 0:
-                        log.warning(
-                            "workload: 0 free accounts (consecutive=%d, total=%d, pending=%d)",
-                            consecutive_empty,
-                            len(wl.wallets),
-                            sum(pending_counts.values()),
-                        )
-                    # Self-healing: force-expire txns past their LastLedgerSequence
-                    if consecutive_empty >= 3:
-                        expired = wl.expire_past_lls(batch_ledger)
-                        if expired:
-                            log.warning("workload: self-heal expired %d stale txns at ledger %d", expired, batch_ledger)
-                            pending_counts = wl.get_pending_txn_counts_by_account()
-                            free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
-                            n_free = len(free_accounts)
-                            if n_free > 0:
-                                log.info("workload: self-heal freed %d accounts", n_free)
-                        elif consecutive_empty % 10 == 0:
-                            diag = wl.diagnostics_snapshot()
-                            log.warning(
-                                "workload: STUCK for %d iterations — blocked=%d free=%d pending_by_state=%s oldest_age=%d",
-                                consecutive_empty,
-                                diag["blocked_accounts"],
-                                diag["free_accounts"],
-                                diag["pending_by_state"],
-                                diag["oldest_pending_age_ledgers"],
-                            )
-                    if n_free == 0:
-                        await asyncio.sleep(0.5)
-                        continue
-                else:
-                    if consecutive_empty >= 3:
-                        log.info(
-                            "workload: recovered — %d free accounts after %d empty iterations", n_free, consecutive_empty
-                        )
-                    consecutive_empty = 0
-
-                # Occasionally grow the account pool (once per ledger)
-                current_ledger = wl.latest_ledger_index
-                if (
-                    current_ledger > last_account_create_ledger
-                    and random() < 0.50
-                    and "Payment" not in wl.disabled_txn_types
-                ):
-                    funding_pending = pending_counts.get(wl.funding_wallet.address, 0)
-                    if funding_pending == 0:
-                        try:
-                            default_balance = wl.config["users"]["default_balance"]
-                            large_balance = str(int(default_balance) * 10)
-                            await wl.create_account(initial_xrp_drops=large_balance)
-                            workload_stats["submitted"] += 1
-                            last_account_create_ledger = current_ledger
-                        except Exception as e:
-                            log.debug("Failed to create new account: %s", e)
-                            workload_stats["failed"] += 1
-
-                # Build + sign txns for free accounts
-                # TODO: Parallelize this loop — alloc_seq RPCs and signing are sequential.
-                # With 400 accounts, build phase takes 2-3s. Use TaskGroup for alloc_seq,
-                # then sign concurrently. This is the main throughput bottleneck.
-                target = wl.target_txns_per_ledger
-                intent_cfg = wl.config.get("transactions", {}).get("intent", {})
-                intent_weights = [intent_cfg.get("valid", 0.90), intent_cfg.get("invalid", 0.10)]
-                intent_choices = [TxIntent.VALID, TxIntent.INVALID]
-                build_start = perf_counter()
-                batch: list[PendingTx] = []
-                for addr in free_accounts[:target]:
-                    wallet = wl.wallets[addr]
-                    intent = choices(intent_choices, weights=intent_weights, k=1)[0]
-                    txn_type = pick_eligible_txn_type(wallet, wl.ctx, intent)
-                    if txn_type is None:
-                        continue
-
-                    try:
-                        ctx = replace(wl.ctx, forced_account=wallet)
-                        composed = build_txn_dict(txn_type, ctx, intent)
-                        if composed is None:
-                            continue
-                        txn = txn_model_cls(txn_type).from_xrpl(composed)
-                    except Exception as e:
-                        log.debug("build %s/%s: %s", addr, txn_type, e)
-                        continue
-
-                    try:
-                        seq = await wl.alloc_seq(wallet.address)
-                    except Exception as e:
-                        log.debug("alloc_seq %s: %s", addr, e)
-                        continue
-
-                    try:
-                        pending = await wl.build_sign_and_track(
-                            txn,
-                            wallet,
-                            fee_drops=batch_fee,
-                            created_ledger=batch_ledger,
-                            last_ledger_seq=batch_lls,
-                            preallocated_seq=seq,
-                        )
-                        batch.append(pending)
-                    except Exception as e:
-                        await wl.release_seq(wallet.address, seq)
-                        log.debug("sign %s/%s: %s", addr, txn_type, e)
-                        continue
-
-                if not batch:
-                    await asyncio.sleep(0)
-                    continue
-
-                build_ms = (perf_counter() - build_start) * 1000
-                log.info(
-                    "Batch: %d txns, ledger=%d, wallets=%d, build=%.0fms",
-                    len(batch), batch_ledger, len(wl.wallets), build_ms,
-                )
-
-                # Submit all in parallel — no waiting, fire immediately
-                try:
-                    async with asyncio.TaskGroup() as tg:
-                        tasks = [tg.create_task(wl.submit_pending(p)) for p in batch]
-
-                    submitted = 0
-                    failed = 0
-                    errors: dict[str, int] = {}
-                    for task in tasks:
-                        result = task.result()
-                        if result is None:
-                            failed += 1
-                            errors["build_failed"] = errors.get("build_failed", 0) + 1
-                        else:
-                            er = result.get("engine_result")
-                            if er and er not in ("terQUEUED",) and er.startswith(("ter", "tem", "tef", "tel")):
-                                failed += 1
-                                errors[er] = errors.get(er, 0) + 1
-                            else:
-                                submitted += 1
-                    workload_stats["submitted"] += submitted
-                    workload_stats["failed"] += failed
-                    if "telINSUF_FEE_P" in errors:
-                        wl._cached_fee = None
-                        log.warning("Fee escalation detected — invalidating cached fee")
-                    if failed:
-                        log.info("Batch result: %d ok, %d failed — errors=%s", submitted, failed, errors)
-                    else:
-                        log.info("Batch result: %d ok", submitted)
-                except* Exception as eg:
-                    for exc in eg.exceptions:
-                        log.error("Batch error: %s: %s", type(exc).__name__, exc)
-                    workload_stats["failed"] += len(batch)
-
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                log.error("WORKLOAD CRASH (recovering): %s: %s", type(e).__name__, e, exc_info=True)
-                await asyncio.sleep(1)
-
-    except asyncio.CancelledError:
-        log.debug("Continuous workload cancelled")
-        raise
-    finally:
-        log.debug("Continuous workload stopped — stats: %s", workload_stats)
-
-
 @r_workload.post("/start")
 async def start_workload():
     """Start continuous random transaction workload."""
-    global workload_running, workload_stop_event, workload_task, workload_stats
-
-    if workload_running:
-        raise HTTPException(status_code=400, detail="Workload already running")
-
-    workload_stats = {"submitted": 0, "validated": 0, "failed": 0, "started_at": perf_counter()}
-
-    log.info("Starting workload")
-    workload_stop_event = asyncio.Event()
-    workload_task = asyncio.create_task(continuous_workload(), name="continuous_workload")
-    workload_task.add_done_callback(_log_task_exception)
-    workload_running = True
-    app.state.workload.workload_started = True
-
-    return {
-        "status": "started",
-        "message": "Continuous workload started - submitting random transactions at expected_ledger_size + 1 per ledger (max 200)",
-    }
+    try:
+        result = await workload_runner.start(app.state.workload)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
 
 
 @r_workload.post("/stop")
 async def stop_workload():
     """Stop continuous workload."""
-    global workload_running, workload_stop_event, workload_task
-
-    if not workload_running:
-        raise HTTPException(status_code=400, detail="Workload not running")
-
-    log.info("Stopping workload")
-    workload_stop_event.set()
-    await workload_task
-    stop_ledger = await app.state.workload._current_ledger_index()
-    log.info("Stopped workload at ledger %s", stop_ledger)
-    workload_running = False
-    app.state.workload.workload_started = False
-
-    return {"status": "stopped", "stats": workload_stats}
+    try:
+        result = await workload_runner.stop(app.state.workload)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
 
 
 @r_workload.get("/status")
 async def workload_status():
     """Get current workload status and statistics."""
-    wl = app.state.workload
-    return {
-        "running": workload_running,
-        "stats": workload_stats,
-        "uptime_seconds": round(time.time() - wl.started_at),
-        "started_at": wl.started_at,
-    }
+    return workload_runner.status(app.state.workload)
 
 
 class TargetTxnsReq(BaseModel):
@@ -2105,15 +1853,7 @@ async def network_reset():
     import subprocess
 
     # 1. Stop workload if running
-    global workload_running, workload_stop_event, workload_task
-    if workload_running and workload_stop_event:
-        workload_stop_event.set()
-        if workload_task:
-            try:
-                await workload_task
-            except Exception:
-                pass
-        workload_running = False
+    await workload_runner.force_stop()
 
     testnet_dir = os.getenv("TESTNET_DIR", str(Path(__file__).resolve().parents[3] / "prepare-workload" / "testnet"))
     gen_bin = os.getenv("GEN_BIN", "gen")
