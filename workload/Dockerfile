@@ -5,15 +5,18 @@ WORKDIR /workload
 
 RUN apt-get update && apt-get install -y curl jq
 
+# Copy and strip generate_ledger references (local-only dev dep, not available in Docker)
+COPY pyproject.toml uv.lock ./
+RUN sed -i '/\[tool\.uv\.sources\]/,/^$/d; /^gen = \[/,/^\]/d' pyproject.toml
+
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-install-project --no-dev
+    uv sync --no-install-project --no-dev
 
 COPY . /workload
+RUN sed -i '/\[tool\.uv\.sources\]/,/^$/d; /^gen = \[/,/^\]/d' pyproject.toml
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
+    uv sync --no-dev
 
 EXPOSE 8000
 CMD ["uv", "run", "uvicorn", "workload.app:app", "--host", "0.0.0.0", "--port", "8000"]

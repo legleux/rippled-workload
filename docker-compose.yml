@@ -2,7 +2,7 @@ services:
   workload:
     image: workload:latest
     build:
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.workload
     container_name: workload
     hostname: workload
     ports: ["8000:8000"]
