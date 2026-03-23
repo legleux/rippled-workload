@@ -8,7 +8,7 @@ import time
 
 import httpx
 from fastapi import APIRouter, FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from xrpl.asyncio.clients import AsyncJsonRpcClient, AsyncWebsocketClient
 from xrpl.models import StreamParameter, Subscribe
@@ -341,6 +341,11 @@ class SendPaymentReq(BaseModel):
     source: str
     destination: str
     amount: str | dict  # XRP drops as string, or IOU as {"currency": "USD", "issuer": "r...", "value": "100"}
+
+
+@app.get("/")
+def root():
+    return RedirectResponse(url="/state/dashboard")
 
 
 @app.get("/health")
