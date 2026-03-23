@@ -1,63 +1,87 @@
-## 1. Tear down old network (if any)
+# Quickstart
+
+All commands run from the `workload/` directory.
+
+## Setup
+
+```bash
+cd workload
+uv sync
+```
+
+## Option A: Generate a new testnet and start everything
+
+```bash
+# 1. Generate testnet configs + docker-compose.yml
+#    (requires generate_ledger: uv pip install -e ../../generate_ledger)
+uv run workload gen --amendment-profile develop
+
+# 2. Start the network and workload together
+docker compose up -d --build
+```
+
+`workload gen` produces:
+- `testnet/` — ledger.json, accounts.json, validator configs, testnet docker-compose.yml
+- `docker-compose.yml` — includes testnet + workload service in the same Docker network
+
+## Option B: Use an existing testnet
+
+If you already have a `testnet/` directory (e.g. copied from another machine):
+
+```bash
+# 1. Write docker-compose.yml for the existing testnet
+uv run workload compose
+
+# 2. Start everything
+docker compose up -d --build
+```
+
+## Option C: Run the workload natively
+
+If you prefer running the workload outside Docker (e.g. for development):
+
+```bash
+# Start just the testnet in Docker
+cd testnet && docker compose up -d && cd ..
+
+# Run workload natively
+uv run workload
+```
+
+## Verify
+
+```bash
+# Dashboard
+open http://localhost:8000
+
+# Health check
+curl http://localhost:8000/health
+
+# Exercise all 31 transaction types
+./test_composer/all_transactions/exercise_all_types.sh localhost:8000
+```
+
+## Tear down
 
 ```bash
 docker compose down
 ```
 
-## 2. Generate testnet
+## CLI reference
 
-Generates the testnet configs (`testnet/`) and a `docker-compose.yml` that includes both the rippled network and the workload container.
+| Command | Description |
+|---------|-------------|
+| `uv run workload gen` | Generate testnet + docker-compose.yml (needs generate_ledger) |
+| `uv run workload compose` | Write docker-compose.yml for existing testnet/ |
+| `uv run workload run` | Run workload server natively (default if no subcommand) |
 
-Amendment profiles: `mainnet` (default), `develop` (auto-fetch from GitHub), or provide a local `--amendment-source`.
+## gen defaults
 
-The defaults are:
-**output directory:** testnet
-**validators:** 5
-**accounts:** 1000
-**gateways:** 4
-**assets-per-gateway:** 4
-**gateway-currencies:** USD, CNY, BTC, ETH
-**gateway-coverage:** 1.0 # TODO: Explain
-**gateway-connectivity:** 1.0 # TODO: Explain
-
-```bash
-# Option A: develop profile (auto-fetches features.macro from GitHub)
-uv run workload gen --amendment-profile develop
-
-# Option B: local features.macro
-uv run workload gen --amendment-source ../../rippled/rippled/develop/include/xrpl/protocol/detail/features.macro
-```
-
-## 3. Start everything (network + workload)
-
-### Docker (builds and runs workload in same network as testnet)
-
-```bash
-docker compose up -d --build
-```
-
-### Or run workload natively (if testnet is already running)
-
-```bash
-cd testnet && docker compose up -d && cd ..
-uv run workload
-```
-
-To enable SQLite persistence across restarts (not needed for dev):
-```bash
-WORKLOAD_PERSIST=1 uv run workload
-```
-
-Once it's submitting, from another terminal:
-
-## Exercise all 31 types
-
-```bash
-./test_composer/all_transactions/exercise_all_types.sh localhost:8000
-```
-
-## Or check the dashboard
-
-```bash
-open http://localhost:8000/state/dashboard
-```
+| Setting | Default |
+|---------|---------|
+| output directory | `testnet` |
+| validators | 5 |
+| accounts | 1000 (4 gateways + 996 users) |
+| assets per gateway | 4 |
+| gateway currencies | USD, CNY, BTC, ETH |
+| amendment profile | `mainnet` |
