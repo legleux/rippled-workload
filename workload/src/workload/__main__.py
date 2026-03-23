@@ -28,7 +28,16 @@ def main() -> None:
 
     match args.command:
         case "gen":
-            from workload.gen_cmd import run_gen
+            try:
+                from workload.gen_cmd import run_gen
+            except ModuleNotFoundError:
+                print(
+                    "Error: 'workload gen' requires the generate_ledger package.\n"
+                    "Install it with:\n"
+                    "  uv pip install -e /path/to/generate_ledger\n\n"
+                    "If you already have a testnet/ directory, use 'workload compose' instead."
+                )
+                raise SystemExit(1)
 
             run_gen(
                 output_dir=args.output_dir,
