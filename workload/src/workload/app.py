@@ -216,11 +216,6 @@ async def lifespan(app: FastAPI):
                 if not accounts_path.is_absolute() and not accounts_path.exists():
                     # Try relative to app.py's directory as fallback
                     accounts_path = Path(__file__).parent / accounts_json
-                if not accounts_path.exists():
-                    # Try absolute from repo root
-                    accounts_path = (
-                        Path(__file__).parent.parent.parent.parent / "prepare-workload" / "testnet" / "accounts.json"
-                    )
                 log.info("Genesis accounts path: %s (exists=%s)", accounts_path, accounts_path.exists())
 
                 genesis_loaded = await app.state.workload.load_from_genesis(str(accounts_path))

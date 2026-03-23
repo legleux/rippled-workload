@@ -1245,7 +1245,6 @@ dependencies = [
     { name = "asyncio" },
     { name = "complexipy" },
     { name = "fastapi", extra = ["standard"] },
-    { name = "generate-ledger" },
     { name = "names" },
     { name = "pydantic-settings" },
     { name = "pynacl" },
@@ -1259,6 +1258,9 @@ dependencies = [
 dev = [
     { name = "pre-commit" },
 ]
+gen = [
+    { name = "generate-ledger" },
+]
 lint = [
     { name = "ruff" },
 ]
@@ -1270,7 +1272,6 @@ requires-dist = [
     { name = "asyncio", specifier = ">=4.0.0" },
     { name = "complexipy", specifier = ">=5.2.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.116.1" },
-    { name = "generate-ledger", editable = "../../generate_ledger" },
     { name = "names", specifier = ">=0.3.0" },
     { name = "pydantic-settings", specifier = ">=2.11.0" },
     { name = "pynacl", specifier = ">=1.5.0" },
@@ -1282,6 +1283,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [{ name = "pre-commit", specifier = ">=4.3.0" }]
+gen = [{ name = "generate-ledger", editable = "../../generate_ledger" }]
 lint = [{ name = "ruff", specifier = ">=0.14.1" }]
 
 [[package]]

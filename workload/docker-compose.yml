@@ -1,3 +1,6 @@
+include:
+  - testnet/docker-compose.yml
+
 services:
   workload:
     image: workload:latest
@@ -10,14 +13,3 @@ services:
     networks: { xrpl_net: {} }
     volumes:
       - ./testnet/accounts.json:/workload/testnet/accounts.json:ro
-
-    develop:
-      watch:
-        - action: rebuild
-          path: ./workload/pyproject.toml
-        - action: rebuild
-          path: ./Dockerfile
-
-networks:
-  xrpl_net:
-    external: true
