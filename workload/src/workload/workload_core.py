@@ -2731,7 +2731,7 @@ class Workload:
 
     def snapshot_tx(self, tx_hash: str) -> dict[str, Any]:
         p = self.pending.get(tx_hash)
-        ws_port = 6006  # TODO: Use the real ws port
+        ws_port = self.config.get("rippled", {}).get("ws_port", 6006)
         if not p:
             return {}
         return {

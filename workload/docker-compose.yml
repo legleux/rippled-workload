@@ -8,6 +8,8 @@ services:
     ports: ["8000:8000"]
     init: true
     networks: { xrpl_net: {} }
+    volumes:
+      - ./testnet/accounts.json:/workload/testnet/accounts.json:ro
 
     develop:
       watch:

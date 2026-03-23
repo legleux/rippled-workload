@@ -1,5 +1,3 @@
-include:
-  - prepare-workload/testnet/compose.yml
 services:
   workload:
     image: workload:latest
@@ -10,6 +8,8 @@ services:
     ports: ["8000:8000"]
     init: true
     networks: { xrpl_net: {} }
+    volumes:
+      - ./testnet/accounts.json:/opt/antithesis/catalog/workload/testnet/accounts.json:ro
 
 networks:
   xrpl_net:
