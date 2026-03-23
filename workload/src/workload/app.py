@@ -1331,6 +1331,8 @@ async def state_failed_page(error_code: str):
         )
         if on_ledger and tx_hash:
             hash_cell = f'<a href="{explorer_base}/transactions/{tx_hash}" target="_blank"><code>{tx_hash}</code></a>'
+        elif tx_hash:
+            hash_cell = f'<a href="/state/tx/{tx_hash}" target="_blank"><code>{tx_hash}</code></a>'
         else:
             hash_cell = f"<code>{tx_hash}</code>"
         msg = f.get("engine_result_message") or ""
@@ -1735,7 +1737,8 @@ async def continuous_workload():
     Sequence safety: an account is only picked when pending_count == 0.
     record_created() marks it pending at build time, preventing double-allocation.
     """
-    from workload.randoms import random
+    from workload.constants import TxIntent
+    from workload.randoms import choices, random
     from workload.txn_factory.builder import build_txn_dict, pick_eligible_txn_type, txn_model_cls
 
     global workload_stats
@@ -1844,17 +1847,21 @@ async def continuous_workload():
                 # With 400 accounts, build phase takes 2-3s. Use TaskGroup for alloc_seq,
                 # then sign concurrently. This is the main throughput bottleneck.
                 target = wl.target_txns_per_ledger
+                intent_cfg = wl.config.get("transactions", {}).get("intent", {})
+                intent_weights = [intent_cfg.get("valid", 0.90), intent_cfg.get("invalid", 0.10)]
+                intent_choices = [TxIntent.VALID, TxIntent.INVALID]
                 build_start = perf_counter()
                 batch: list[PendingTx] = []
                 for addr in free_accounts[:target]:
                     wallet = wl.wallets[addr]
-                    txn_type = pick_eligible_txn_type(wallet, wl.ctx)
+                    intent = choices(intent_choices, weights=intent_weights, k=1)[0]
+                    txn_type = pick_eligible_txn_type(wallet, wl.ctx, intent)
                     if txn_type is None:
                         continue
 
                     try:
                         ctx = replace(wl.ctx, forced_account=wallet)
-                        composed = build_txn_dict(txn_type, ctx)
+                        composed = build_txn_dict(txn_type, ctx, intent)
                         if composed is None:
                             continue
                         txn = txn_model_cls(txn_type).from_xrpl(composed)

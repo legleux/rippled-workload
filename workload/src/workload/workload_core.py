@@ -747,9 +747,13 @@ class Workload:
         p_live = await self._apply_validation_state(rec, meta_result)
         if p_live and p_live.transaction_type and not was_already_validated:
             tt = p_live.transaction_type
-            tx_validated(tt, meta_result or "unknown", details={
-                "hash": rec.txn, "ledger_index": rec.seq, "account": p_live.account, "source": rec.src,
-            })
+            tx_validated(
+                tt, meta_result or "unknown",
+                details={
+                    "hash": rec.txn, "ledger_index": rec.seq, "account": p_live.account,
+                    "source": rec.src, "tx_json": p_live.tx_json,
+                },
+            )
             self._type_validated[tt] = self._type_validated.get(tt, 0) + 1
             self._total_validated += 1
         self._on_account_adopted(p_live, rec)
@@ -1384,7 +1388,10 @@ class Workload:
                 p.state = C.TxState.REJECTED
                 self._total_rejected += 1
                 if p.transaction_type:
-                    tx_rejected(p.transaction_type, er, details={"hash": p.tx_hash, "account": p.account, "sequence": p.sequence})
+                    tx_rejected(
+                        p.transaction_type, er,
+                        details={"hash": p.tx_hash, "account": p.account, "sequence": p.sequence, "tx_json": p.tx_json},
+                    )
                 self.pending[p.tx_hash] = p
                 await self.store.mark(
                     p.tx_hash,
@@ -1434,7 +1441,10 @@ class Workload:
                 p.state = C.TxState.REJECTED
                 self._total_rejected += 1
                 if p.transaction_type:
-                    tx_rejected(p.transaction_type, er, details={"hash": p.tx_hash, "account": p.account, "sequence": p.sequence})
+                    tx_rejected(
+                        p.transaction_type, er,
+                        details={"hash": p.tx_hash, "account": p.account, "sequence": p.sequence, "tx_json": p.tx_json},
+                    )
                 self.pending[p.tx_hash] = p
                 await self.store.mark(
                     p.tx_hash,
@@ -2727,6 +2737,7 @@ class Workload:
         return {
             "tx_hash": p.tx_hash,
             "state": p.state.name,
+            "transaction_type": p.transaction_type,
             "account": p.account,
             "sequence": p.sequence,
             "last_ledger_seq": p.last_ledger_seq,
@@ -2735,6 +2746,7 @@ class Workload:
             "engine_result_first": p.engine_result_first,
             "validated_ledger": p.validated_ledger,
             "meta_txn_result": p.meta_txn_result,
+            "tx_json": p.tx_json,
             "link": f"https://custom.xrpl.org/localhost:{ws_port}/transactions/{tx_hash}",
         }
 

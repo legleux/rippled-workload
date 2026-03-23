@@ -6,8 +6,7 @@ cd testnet && docker compose down && cd ..
 
 ## 2. Generate testnet
 
-Using 4 gateways and 1000 users. Point `--amendment-source` to the xrpld `features.macro` file
-(${REPO_PATH}/include/xrpl/protocol/detail/features.macro).
+Using 4 gateways and 1000 users. Amendment profiles: `release` (mainnet, default), `develop` (auto-fetch from GitHub), or provide a local `--amendment-source`.
 The defaults are:
 **output directory:** testnet
 **validators:** 5
@@ -19,6 +18,10 @@ The defaults are:
 **gateway-connectivity:** 1.0 # TODO: Explain
 
 ```bash
+# Option A: develop profile (auto-fetches features.macro from GitHub)
+uv run gen auto --amendment-profile develop
+
+# Option B: local features.macro
 uv run gen auto --amendment-source ../../rippled/rippled/develop/include/xrpl/protocol/detail/features.macro
 ```
 

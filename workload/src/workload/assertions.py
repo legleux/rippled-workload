@@ -112,22 +112,22 @@ def tx_submitted(tx_type: str, *, details: dict[str, Any] | None = None) -> None
     sometimes(True, f"workload::submitted:{tx_type}")
 
 
+def _check_internal(tx_type: str, code: str, details: dict[str, Any] | None) -> None:
+    """INTERNAL result codes are rippled bugs — assert unreachable."""
+    if code.endswith("INTERNAL"):
+        unreachable(f"workload::{code}:{tx_type}", {"code": code, **(details or {})})
+
+
 def tx_validated(tx_type: str, result: str, *, details: dict[str, Any] | None = None) -> None:
     send_event(f"workload::validated:{tx_type}", {"result": result, **(details or {})})
     sometimes(result == "tesSUCCESS", f"workload::validated:{tx_type}", {"result": result})
-
-    # tecINTERNAL is a bug
-    if result == "tecINTERNAL": # TODO: enum
-        unreachable(f"workload::tecINTERNAL:{tx_type}", {"result": result, **(details or {})})
+    _check_internal(tx_type, result, details)
 
 
 def tx_rejected(tx_type: str, code: str, *, details: dict[str, Any] | None = None) -> None:
     send_event(f"workload::rejected:{tx_type}", {"code": code, **(details or {})})
     sometimes(True, f"workload::rejected:{tx_type}", {"code": code})
-
-    # tefINTERNAL is a bug — should never happen
-    if code == "tefINTERNAL": # TODO: enum
-        unreachable(f"workload::tefINTERNAL:{tx_type}", {"code": code, **(details or {})})
+    _check_internal(tx_type, code, details)
 
 
 # ---------------------------------------------------------------------------

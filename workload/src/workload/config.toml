@@ -77,6 +77,10 @@ DelegateSet = 0.02
 # CredentialCreate
 # PermissionedDomainSet
 
+[transactions.intent]
+valid = 0.90
+invalid = 0.10
+
 [transactions.mptoken.issuance_create]
 transfer_fee = 1000
 

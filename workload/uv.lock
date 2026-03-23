@@ -346,14 +346,11 @@ wheels = [
 
 [[package]]
 name = "generate-ledger"
-version = "0.0.5"
+version = "0.0.6"
 source = { editable = "../../generate_ledger" }
 dependencies = [
     { name = "base58" },
     { name = "click" },
-    { name = "complexipy" },
-    { name = "httpx" },
-    { name = "platformdirs" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "ruamel-yaml" },
@@ -365,9 +362,6 @@ dependencies = [
 requires-dist = [
     { name = "base58", specifier = ">=2.1.1" },
     { name = "click", specifier = ">=8.2.1" },
-    { name = "complexipy", specifier = ">=5.2.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "platformdirs", specifier = ">=4.3.8" },
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pydantic-settings", specifier = ">=2.10.1" },
     { name = "ruamel-yaml", specifier = ">=0.18.14" },
@@ -377,13 +371,23 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "complexipy", specifier = ">=5.2.0" },
+    { name = "mkdocs-material", specifier = ">=9.6.0" },
     { name = "pre-commit", specifier = ">=4.2.0" },
-    { name = "pynacl", specifier = ">=1.5.0" },
     { name = "pytest", specifier = ">=8.4.1" },
     { name = "pytest-cov", specifier = ">=6.0" },
+    { name = "radon", specifier = ">=6.0.1" },
     { name = "ruff", specifier = ">=0.12.11" },
 ]
-fast = [{ name = "pynacl", specifier = ">=1.5.0" }]
+fast = [
+    { name = "coincurve", specifier = ">=20.0.0,<21.0.0" },
+    { name = "pynacl", specifier = ">=1.5.0" },
+]
+gpu = [
+    { name = "cupy-cuda12x", specifier = ">=13.0.0" },
+    { name = "nvidia-cuda-nvcc-cu12", specifier = ">=12.9.86" },
+    { name = "nvidia-cuda-nvrtc-cu12", specifier = ">=12.9.86" },
+]
 lint = [
     { name = "pre-commit", specifier = ">=4.2.0" },
     { name = "ruff", specifier = ">=0.12.11" },

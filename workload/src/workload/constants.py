@@ -51,6 +51,11 @@ class TxType(StrEnum):
     VAULT_CLAWBACK = "VaultClawback"
 
 
+class TxIntent(StrEnum):
+    VALID = "valid"
+    INVALID = "invalid"
+
+
 class TxState(StrEnum):
     CREATED = "CREATED"
     SUBMITTED = "SUBMITTED"
@@ -87,6 +92,7 @@ __all__ = [
     "SUBMIT_TIMEOUT",
     "PENDING_STATES",
     "TERMINAL_STATE",
+    "TxIntent",
     "TxType",
     "TxState",
 ]

@@ -168,7 +168,9 @@ On startup the workload will:
 ```bash
 # Generate everything: ledger.json, rippled configs, docker-compose.yml
 # Defaults: 1000 accounts, 4 gateways, USD/CNY/BTC/ETH, full trust line coverage
-# --amendment-source automatically uses develop profile
+# Amendment profiles: release (mainnet amendments, default), develop (auto-fetch from GitHub), custom (JSON file)
+gen auto --amendment-profile develop
+# Or with a local features.macro (implies develop profile):
 gen auto --amendment-source /path/to/rippled/include/xrpl/protocol/detail/features.macro
 
 # Start network
@@ -288,7 +290,7 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 - `prepare-workload/` is legacy — superseded by the `generate_ledger` package (`gen auto` CLI). Do not add new code there.
 - DelegateSet requires `PermissionDelegationV1_1` which is `Supported::no` in rippled develop — disabled in config.toml until rippled enables it.
 - Vaults require `SingleAssetVault` (`Supported::yes` in develop) — works if testnet is generated with `--amendment-source` pointing at current features.macro.
-- `--amendment-source` on `gen auto` now automatically uses the develop profile (no need for `--amendment-profile develop`).
+- Amendment profiles: `release` (default, fetches enabled amendments from mainnet RPC), `develop` (auto-fetches features.macro from GitHub), `custom` (local JSON). Use `--amendment-source` to provide a local features.macro instead of GitHub fetch. Per-amendment overrides via `--enable`/`--disable` flags.
 - Default rippled image is now `rippleci/xrpld:develop` (override with `--image`).
 
 ## Current Priorities

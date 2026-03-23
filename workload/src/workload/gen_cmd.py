@@ -20,6 +20,9 @@ def run_gen(
     output_dir: str = "testnet",
     num_validators: int = 5,
     amendment_profile: str | None = None,
+    amendment_source: str | None = None,
+    enable_amendments: list[str] | None = None,
+    disable_amendments: list[str] | None = None,
 ) -> None:
     """Read config.toml and call generate_ledger to produce a testnet."""
     cfg = _load_config()
@@ -53,6 +56,12 @@ def run_gen(
     }
     if amendment_profile is not None:
         ledger_kwargs["amendment_profile"] = amendment_profile
+    if amendment_source is not None:
+        ledger_kwargs["amendment_profile_source"] = amendment_source
+    if enable_amendments:
+        ledger_kwargs["enable_amendments"] = enable_amendments
+    if disable_amendments:
+        ledger_kwargs["disable_amendments"] = disable_amendments
 
     ledger_cfg = LedgerConfig(**ledger_kwargs)
 

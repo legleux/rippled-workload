@@ -50,6 +50,7 @@ from xrpl.models.transactions.deposit_preauth import Credential as XRPLCredentia
 from xrpl.transaction import transaction_json_to_binary_codec_form
 from xrpl.wallet import Wallet
 
+from workload.constants import TxIntent
 from workload.randoms import randrange, random
 
 log = logging.getLogger("workload.txn")
@@ -226,7 +227,7 @@ def deep_update(base: dict, override: dict) -> dict:
     return base
 
 
-def _build_payment(ctx: TxnContext) -> dict:
+def _build_payment(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build a Payment transaction with random source and destination."""
     src = ctx.rand_account()
     dst = ctx.rand_account(omit=[src.address])
@@ -262,7 +263,7 @@ def _build_payment(ctx: TxnContext) -> dict:
     return result
 
 
-def _build_trustset(ctx: TxnContext) -> dict:
+def _build_trustset(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build a TrustSet transaction with random account and currency.
 
     Picks a currency where:
@@ -296,7 +297,7 @@ def _build_trustset(ctx: TxnContext) -> dict:
     return result
 
 
-def _build_offer_create(ctx: TxnContext) -> dict:
+def _build_offer_create(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an OfferCreate transaction to trade currencies on the DEX.
 
     Creates offers to exchange XRP/IOU or IOU/IOU pairs.
@@ -350,7 +351,7 @@ def _build_offer_create(ctx: TxnContext) -> dict:
     }
 
 
-def _build_offer_cancel(ctx: TxnContext) -> dict:
+def _build_offer_cancel(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an OfferCancel transaction to cancel an existing offer.
 
     Requires at least one IOU offer to exist in tracking.
@@ -371,7 +372,7 @@ def _build_offer_cancel(ctx: TxnContext) -> dict:
     }
 
 
-def _build_accountset(ctx: TxnContext) -> dict:
+def _build_accountset(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an AccountSet transaction with random account."""
     src = ctx.rand_account()
     return {
@@ -380,7 +381,7 @@ def _build_accountset(ctx: TxnContext) -> dict:
     }
 
 
-def _build_nftoken_mint(ctx: TxnContext) -> dict:
+def _build_nftoken_mint(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an NFTokenMint transaction with random account."""
     src = ctx.rand_account()
     memo_msg = "Some really cool info no doubt"
@@ -393,7 +394,7 @@ def _build_nftoken_mint(ctx: TxnContext) -> dict:
     }
 
 
-def _build_nftoken_burn(ctx: TxnContext) -> dict:
+def _build_nftoken_burn(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an NFTokenBurn transaction to burn a random NFT.
 
     Requires at least one NFT to exist in tracking.
@@ -410,7 +411,7 @@ def _build_nftoken_burn(ctx: TxnContext) -> dict:
     }
 
 
-def _build_nftoken_create_offer(ctx: TxnContext) -> dict:
+def _build_nftoken_create_offer(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an NFTokenCreateOffer transaction to create a sell or buy offer.
 
     Randomly creates either:
@@ -448,7 +449,7 @@ def _build_nftoken_create_offer(ctx: TxnContext) -> dict:
         }
 
 
-def _build_nftoken_cancel_offer(ctx: TxnContext) -> dict:
+def _build_nftoken_cancel_offer(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an NFTokenCancelOffer transaction to cancel an existing offer.
 
     Requires at least one NFT offer to exist in tracking.
@@ -469,7 +470,7 @@ def _build_nftoken_cancel_offer(ctx: TxnContext) -> dict:
     }
 
 
-def _build_nftoken_accept_offer(ctx: TxnContext) -> dict:
+def _build_nftoken_accept_offer(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an NFTokenAcceptOffer transaction to accept an existing offer.
 
     Requires at least one NFT offer to exist in tracking.
@@ -508,7 +509,7 @@ def _build_nftoken_accept_offer(ctx: TxnContext) -> dict:
             }
 
 
-def _build_ticket_create(ctx: TxnContext) -> dict:
+def _build_ticket_create(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build a TicketCreate transaction to create tickets for an account.
 
     Tickets allow transactions to be submitted out of sequence order.
@@ -524,7 +525,7 @@ def _build_ticket_create(ctx: TxnContext) -> dict:
     }
 
 
-def _build_mptoken_issuance_create(ctx: TxnContext) -> dict:
+def _build_mptoken_issuance_create(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an MPTokenIssuanceCreate transaction with random account."""
     src = ctx.rand_account()
     metadata_hex = json.dumps(choice(token_metadata)).encode("utf-8").hex()
@@ -535,7 +536,7 @@ def _build_mptoken_issuance_create(ctx: TxnContext) -> dict:
     }
 
 
-def _build_mptoken_issuance_set(ctx: TxnContext) -> dict:
+def _build_mptoken_issuance_set(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an MPTokenIssuanceSet transaction to modify MPToken properties."""
     src = ctx.rand_account()
     mpt_id = ctx.rand_mptoken_id()
@@ -547,7 +548,7 @@ def _build_mptoken_issuance_set(ctx: TxnContext) -> dict:
     }
 
 
-def _build_mptoken_authorize(ctx: TxnContext) -> dict:
+def _build_mptoken_authorize(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an MPTokenAuthorize transaction to authorize/unauthorize holder."""
     src = ctx.rand_account()
     mpt_id = ctx.rand_mptoken_id()
@@ -559,7 +560,7 @@ def _build_mptoken_authorize(ctx: TxnContext) -> dict:
     }
 
 
-def _build_mptoken_issuance_destroy(ctx: TxnContext) -> dict:
+def _build_mptoken_issuance_destroy(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an MPTokenIssuanceDestroy transaction to destroy an MPToken issuance."""
     src = ctx.rand_account()
     mpt_id = ctx.rand_mptoken_id()
@@ -571,7 +572,7 @@ def _build_mptoken_issuance_destroy(ctx: TxnContext) -> dict:
     }
 
 
-async def _build_batch(ctx: TxnContext) -> dict:
+async def _build_batch(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build a Batch transaction with random inner transactions of various types."""
     src = ctx.rand_account()
 
@@ -672,7 +673,7 @@ async def _build_batch(ctx: TxnContext) -> dict:
     }
 
 
-def _build_amm_create(ctx: TxnContext) -> dict:
+def _build_amm_create(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build an AMMCreate transaction with random currency pair.
 
     NOTE: Fee will be set to owner_reserve in build_sign_and_track based on TransactionType.
@@ -708,7 +709,7 @@ def _build_amm_create(ctx: TxnContext) -> dict:
     }
 
 
-def _build_amm_deposit(ctx: TxnContext) -> dict | None:
+def _build_amm_deposit(ctx: TxnContext, intent: TxIntent) -> dict | None:  # TODO: handle TxIntent.INVALID
     """Build an AMMDeposit transaction to add liquidity to an existing AMM pool.
 
     Uses TF_TWO_ASSET flag for dual-asset deposit.
@@ -777,7 +778,7 @@ def _build_amm_deposit(ctx: TxnContext) -> dict | None:
     }
 
 
-def _build_amm_withdraw(ctx: TxnContext) -> dict | None:
+def _build_amm_withdraw(ctx: TxnContext, intent: TxIntent) -> dict | None:  # TODO: handle TxIntent.INVALID
     """Build an AMMWithdraw transaction to remove liquidity from an existing AMM pool.
 
     Uses TF_TWO_ASSET flag for proportional dual-asset withdrawal.
@@ -897,7 +898,7 @@ def _vault_amount_for_asset(asset: dict, cfg: dict) -> str | dict:
 # ---------------------------------------------------------------------------
 # Delegation
 # ---------------------------------------------------------------------------
-def _build_delegate_set(ctx: TxnContext) -> dict:
+def _build_delegate_set(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build a DelegateSet transaction to delegate permissions to another account.
 
     Uses GranularPermission enum values from xrpl-py, matching upstream branch.
@@ -920,7 +921,7 @@ def _build_delegate_set(ctx: TxnContext) -> dict:
 # ---------------------------------------------------------------------------
 # Credentials
 # ---------------------------------------------------------------------------
-def _build_credential_create(ctx: TxnContext) -> dict:
+def _build_credential_create(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build a CredentialCreate — issuer attests about a subject.
 
     Includes Expiration (1 hour – 30 days from now) and URI, matching upstream params.py ranges.
@@ -945,7 +946,7 @@ def _build_credential_create(ctx: TxnContext) -> dict:
     }
 
 
-def _build_credential_accept(ctx: TxnContext) -> dict | None:
+def _build_credential_accept(ctx: TxnContext, intent: TxIntent) -> dict | None:  # TODO: handle TxIntent.INVALID
     """Build a CredentialAccept — subject accepts an issued credential."""
     if not ctx.credentials:
         return None
@@ -968,7 +969,7 @@ def _build_credential_accept(ctx: TxnContext) -> dict | None:
     }
 
 
-def _build_credential_delete(ctx: TxnContext) -> dict | None:
+def _build_credential_delete(ctx: TxnContext, intent: TxIntent) -> dict | None:  # TODO: handle TxIntent.INVALID
     """Build a CredentialDelete — issuer or subject removes a credential."""
     if not ctx.credentials:
         return None
@@ -992,7 +993,7 @@ def _build_credential_delete(ctx: TxnContext) -> dict | None:
 # ---------------------------------------------------------------------------
 # Permissioned Domains
 # ---------------------------------------------------------------------------
-def _build_permissioned_domain_set(ctx: TxnContext) -> dict:
+def _build_permissioned_domain_set(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build a PermissionedDomainSet — create or update a permissioned domain.
 
     Accepts 1-10 credential definitions (matching upstream params.domain_credential_count).
@@ -1024,7 +1025,8 @@ def _build_permissioned_domain_set(ctx: TxnContext) -> dict:
     return result
 
 
-def _build_permissioned_domain_delete(ctx: TxnContext) -> dict | None:
+def _build_permissioned_domain_delete(ctx: TxnContext, intent: TxIntent) -> dict | None:
+    # TODO: handle TxIntent.INVALID
     """Build a PermissionedDomainDelete — owner removes a domain."""
     if not ctx.domains:
         return None
@@ -1046,7 +1048,7 @@ def _build_permissioned_domain_delete(ctx: TxnContext) -> dict | None:
 # ---------------------------------------------------------------------------
 # Vaults
 # ---------------------------------------------------------------------------
-def _build_vault_create(ctx: TxnContext) -> dict:
+def _build_vault_create(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
     """Build a VaultCreate — open a new vault for an asset.
 
     Includes AssetsMaximum (100M-10B drops) and Data (1-256 bytes hex),
@@ -1067,7 +1069,7 @@ def _build_vault_create(ctx: TxnContext) -> dict:
     }
 
 
-def _build_vault_set(ctx: TxnContext) -> dict | None:
+def _build_vault_set(ctx: TxnContext, intent: TxIntent) -> dict | None:  # TODO: handle TxIntent.INVALID
     """Build a VaultSet — owner updates vault settings.
 
     Includes AssetsMaximum and Data, matching upstream params.py ranges.
@@ -1095,7 +1097,7 @@ def _build_vault_set(ctx: TxnContext) -> dict | None:
     }
 
 
-def _build_vault_delete(ctx: TxnContext) -> dict | None:
+def _build_vault_delete(ctx: TxnContext, intent: TxIntent) -> dict | None:  # TODO: handle TxIntent.INVALID
     """Build a VaultDelete — owner removes a vault."""
     if not ctx.vaults:
         return None
@@ -1114,15 +1116,53 @@ def _build_vault_delete(ctx: TxnContext) -> dict | None:
     }
 
 
-def _build_vault_deposit(ctx: TxnContext) -> dict | None:
+def _eligible_vaults_for_account(wallet: "Wallet", ctx: TxnContext) -> list[dict]:
+    """Return vaults this account can deposit to (has the vault's asset)."""
+    if not ctx.vaults:
+        return []
+    account_currencies = {(c.currency, c.issuer) for c in ctx.get_account_currencies(wallet)}
+    eligible = []
+    for v in ctx.vaults:
+        asset = v.get("asset", {})
+        if "mpt_issuance_id" in asset:
+            eligible.append(v)  # No MPT balance tracking yet — assume eligible
+        elif asset.get("currency") and asset.get("issuer"):
+            # IOU vault: account needs a trust line with balance
+            if (asset["currency"], asset["issuer"]) in account_currencies:
+                eligible.append(v)
+        else:
+            eligible.append(v)  # XRP vault: any account can deposit
+    return eligible
+
+
+def _ineligible_vault_for_account(wallet: "Wallet", ctx: TxnContext) -> dict | None:
+    """Return a vault this account CANNOT deposit to, or None if all are eligible."""
+    if not ctx.vaults:
+        return None
+    eligible_ids = {id(v) for v in _eligible_vaults_for_account(wallet, ctx)}
+    ineligible = [v for v in ctx.vaults if id(v) not in eligible_ids]
+    return choice(ineligible) if ineligible else None
+
+
+def _build_vault_deposit(ctx: TxnContext, intent: TxIntent) -> dict | None:
     """Build a VaultDeposit — deposit assets into an existing vault.
 
-    Amount matches vault's asset type (IOU 1-10k, MPT 1-10k, XRP 1M-100M drops).
+    VALID: picks a vault the account can actually deposit to (has the asset).
+    INVALID: deliberately picks a vault the account has no trust line for.
     """
     if not ctx.vaults:
         return None
     src = ctx.rand_account()
-    vault = choice(ctx.vaults)
+    match intent:
+        case TxIntent.VALID:
+            eligible = _eligible_vaults_for_account(src, ctx)
+            if not eligible:
+                return None
+            vault = choice(eligible)
+        case TxIntent.INVALID:
+            vault = _ineligible_vault_for_account(src, ctx)
+            if vault is None:
+                vault = choice(ctx.vaults)  # fallback: can't find mismatch
     return {
         "TransactionType": "VaultDeposit",
         "Account": src.address,
@@ -1131,7 +1171,7 @@ def _build_vault_deposit(ctx: TxnContext) -> dict | None:
     }
 
 
-def _build_vault_withdraw(ctx: TxnContext) -> dict | None:
+def _build_vault_withdraw(ctx: TxnContext, intent: TxIntent) -> dict | None:  # TODO: handle TxIntent.INVALID
     """Build a VaultWithdraw — owner withdraws from a vault.
 
     Amount matches vault's asset type, same ranges as deposit.
@@ -1154,7 +1194,7 @@ def _build_vault_withdraw(ctx: TxnContext) -> dict | None:
     }
 
 
-def _build_vault_clawback(ctx: TxnContext) -> dict | None:
+def _build_vault_clawback(ctx: TxnContext, intent: TxIntent) -> dict | None:  # TODO: handle TxIntent.INVALID
     """Build a VaultClawback — vault owner claws back from a holder.
 
     Matches upstream branch: Account = vault owner, Holder = random other account.
@@ -1179,7 +1219,7 @@ def _build_vault_clawback(ctx: TxnContext) -> dict | None:
     }
 
 
-_BUILDERS: dict[str, tuple[Callable[[TxnContext], dict], type[Transaction]]] = {
+_BUILDERS: dict[str, tuple[Callable[[TxnContext, TxIntent], dict], type[Transaction]]] = {
     "Payment": (_build_payment, Payment),
     "TrustSet": (_build_trustset, TrustSet),
     "OfferCreate": (_build_offer_create, OfferCreate),
@@ -1218,12 +1258,15 @@ _BUILDERS: dict[str, tuple[Callable[[TxnContext], dict], type[Transaction]]] = {
 }
 
 
-def pick_eligible_txn_type(wallet: "Wallet", ctx: TxnContext) -> str | None:
+def pick_eligible_txn_type(wallet: "Wallet", ctx: TxnContext, intent: TxIntent = TxIntent.VALID) -> str | None:
     """Return a weight-sampled eligible transaction type for wallet, or None if none available.
 
     Applies global capability filters (disabled, MPT IDs, NFTs, offers, AMM pools)
     and per-account filters (LP holder for AMMWithdraw, asset availability for AMMDeposit,
     offer ownership for OfferCancel). Excludes Batch (async builder, multi-seq allocation).
+
+    When intent is INVALID, per-account filters are skipped — the point is to build
+    ineligible txns that will fail on the server.
     """
     candidates = list(_BUILDERS.keys())
 
@@ -1262,69 +1305,80 @@ def pick_eligible_txn_type(wallet: "Wallet", ctx: TxnContext) -> str | None:
         vault_ops = {"VaultSet", "VaultDelete", "VaultDeposit", "VaultWithdraw", "VaultClawback"}
         candidates = [t for t in candidates if t not in vault_ops]
 
-    # Per-account: OfferCancel requires wallet to own at least one IOU offer
-    if "OfferCancel" in candidates:
-        has_own_offer = ctx.offers and any(
-            v.get("type") == "IOUOffer" and v.get("owner") == wallet.address for v in ctx.offers.values()
-        )
-        if not has_own_offer:
-            candidates = [t for t in candidates if t != "OfferCancel"]
-
-    # Per-account: AMMWithdraw requires wallet to hold LP tokens in at least one pool
-    if "AMMWithdraw" in candidates:
-        is_lp = any(
-            wallet.address in p.get("lp_holders", [p.get("creator", "")]) for p in (ctx.amm_pool_registry or [])
-        )
-        if not is_lp:
-            candidates = [t for t in candidates if t != "AMMWithdraw"]
-
-    # Per-account: AMMDeposit requires at least one pool where wallet can provide both assets
-    if "AMMDeposit" in candidates:
-        account_currencies = {(c.currency, c.issuer) for c in ctx.get_account_currencies(wallet)}
-        has_balance_data = bool(account_currencies)
-        eligible = any(
-            (
-                p["asset1"].get("currency") == "XRP"
-                and (not has_balance_data or (p["asset2"].get("currency"), p["asset2"].get("issuer")) in account_currencies)
+    # Per-account filters: only apply for VALID intent — INVALID deliberately skips eligibility
+    if intent == TxIntent.VALID:
+        # Per-account: OfferCancel requires wallet to own at least one IOU offer
+        if "OfferCancel" in candidates:
+            has_own_offer = ctx.offers and any(
+                v.get("type") == "IOUOffer" and v.get("owner") == wallet.address for v in ctx.offers.values()
             )
-            or (
-                has_balance_data
-                and "issuer" in p["asset1"] and "issuer" in p["asset2"]
-                and (p["asset1"]["currency"], p["asset1"]["issuer"]) in account_currencies
-                and (p["asset2"]["currency"], p["asset2"]["issuer"]) in account_currencies
+            if not has_own_offer:
+                candidates = [t for t in candidates if t != "OfferCancel"]
+
+        # Per-account: AMMWithdraw requires wallet to hold LP tokens in at least one pool
+        if "AMMWithdraw" in candidates:
+            is_lp = any(
+                wallet.address in p.get("lp_holders", [p.get("creator", "")]) for p in (ctx.amm_pool_registry or [])
             )
-            for p in (ctx.amm_pool_registry or [])
-        )
-        if not eligible:
-            candidates = [t for t in candidates if t != "AMMDeposit"]
+            if not is_lp:
+                candidates = [t for t in candidates if t != "AMMWithdraw"]
 
-    # Per-account: CredentialAccept needs an unaccepted credential where wallet is subject
-    if "CredentialAccept" in candidates:
-        has_unaccepted = ctx.credentials and any(
-            c["subject"] == wallet.address and not c.get("accepted") for c in ctx.credentials
-        )
-        if not has_unaccepted:
-            candidates = [t for t in candidates if t != "CredentialAccept"]
+        # Per-account: AMMDeposit requires at least one pool where wallet can provide both assets
+        if "AMMDeposit" in candidates:
+            account_currencies = {(c.currency, c.issuer) for c in ctx.get_account_currencies(wallet)}
+            has_balance_data = bool(account_currencies)
+            eligible = any(
+                (
+                    p["asset1"].get("currency") == "XRP"
+                    and (
+                        not has_balance_data
+                        or (p["asset2"].get("currency"), p["asset2"].get("issuer")) in account_currencies
+                    )
+                )
+                or (
+                    has_balance_data
+                    and "issuer" in p["asset1"] and "issuer" in p["asset2"]
+                    and (p["asset1"]["currency"], p["asset1"]["issuer"]) in account_currencies
+                    and (p["asset2"]["currency"], p["asset2"]["issuer"]) in account_currencies
+                )
+                for p in (ctx.amm_pool_registry or [])
+            )
+            if not eligible:
+                candidates = [t for t in candidates if t != "AMMDeposit"]
 
-    # Per-account: CredentialDelete needs a credential where wallet is issuer or subject
-    if "CredentialDelete" in candidates:
-        involved = ctx.credentials and any(
-            c["issuer"] == wallet.address or c["subject"] == wallet.address for c in ctx.credentials
-        )
-        if not involved:
-            candidates = [t for t in candidates if t != "CredentialDelete"]
+        # Per-account: CredentialAccept needs an unaccepted credential where wallet is subject
+        if "CredentialAccept" in candidates:
+            has_unaccepted = ctx.credentials and any(
+                c["subject"] == wallet.address and not c.get("accepted") for c in ctx.credentials
+            )
+            if not has_unaccepted:
+                candidates = [t for t in candidates if t != "CredentialAccept"]
 
-    # Per-account: PermissionedDomainDelete needs wallet to own a domain
-    if "PermissionedDomainDelete" in candidates:
-        owns_domain = ctx.domains and any(d["owner"] == wallet.address for d in ctx.domains)
-        if not owns_domain:
-            candidates = [t for t in candidates if t != "PermissionedDomainDelete"]
+        # Per-account: CredentialDelete needs a credential where wallet is issuer or subject
+        if "CredentialDelete" in candidates:
+            involved = ctx.credentials and any(
+                c["issuer"] == wallet.address or c["subject"] == wallet.address for c in ctx.credentials
+            )
+            if not involved:
+                candidates = [t for t in candidates if t != "CredentialDelete"]
 
-    # Per-account: VaultSet/Delete/Withdraw/Clawback need wallet to own a vault
-    if any(t in candidates for t in ("VaultSet", "VaultDelete", "VaultWithdraw", "VaultClawback")):
-        owns_vault = ctx.vaults and any(v["owner"] == wallet.address for v in ctx.vaults)
-        if not owns_vault:
-            candidates = [t for t in candidates if t not in {"VaultSet", "VaultDelete", "VaultWithdraw", "VaultClawback"}]
+        # Per-account: PermissionedDomainDelete needs wallet to own a domain
+        if "PermissionedDomainDelete" in candidates:
+            owns_domain = ctx.domains and any(d["owner"] == wallet.address for d in ctx.domains)
+            if not owns_domain:
+                candidates = [t for t in candidates if t != "PermissionedDomainDelete"]
+
+        # Per-account: VaultSet/Delete/Withdraw/Clawback need wallet to own a vault
+        if any(t in candidates for t in ("VaultSet", "VaultDelete", "VaultWithdraw", "VaultClawback")):
+            owns_vault = ctx.vaults and any(v["owner"] == wallet.address for v in ctx.vaults)
+            if not owns_vault:
+                vault_owner_ops = {"VaultSet", "VaultDelete", "VaultWithdraw", "VaultClawback"}
+                candidates = [t for t in candidates if t not in vault_owner_ops]
+
+        # Per-account: VaultDeposit requires at least one vault the account can deposit to
+        if "VaultDeposit" in candidates:
+            if not _eligible_vaults_for_account(wallet, ctx):
+                candidates = [t for t in candidates if t != "VaultDeposit"]
 
     # Batch uses an async builder with multi-seq allocations — not supported in sync pre-build path
     candidates = [t for t in candidates if t != "Batch"]
@@ -1341,10 +1395,10 @@ def pick_eligible_txn_type(wallet: "Wallet", ctx: TxnContext) -> str | None:
     return choices(candidates, weights=weights, k=1)[0]
 
 
-def build_txn_dict(txn_type: str, ctx: TxnContext) -> dict | None:
+def build_txn_dict(txn_type: str, ctx: TxnContext, intent: TxIntent = TxIntent.VALID) -> dict | None:
     """Call the synchronous builder for txn_type and return the raw dict (or None if ineligible)."""
     builder_fn, _ = _BUILDERS[txn_type]
-    return builder_fn(ctx)
+    return builder_fn(ctx, intent)
 
 
 def txn_model_cls(txn_type: str) -> type[Transaction]:
@@ -1353,7 +1407,9 @@ def txn_model_cls(txn_type: str) -> type[Transaction]:
     return model_cls
 
 
-async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides: Any) -> Transaction:
+async def generate_txn(
+    ctx: TxnContext, txn_type: str | None = None, intent: TxIntent = TxIntent.VALID, **overrides: Any
+) -> Transaction:
     """Generate a transaction with sane defaults.
 
     Args:
@@ -1451,9 +1507,9 @@ async def generate_txn(ctx: TxnContext, txn_type: str | None = None, **overrides
     builder_fn, model_cls = builder_spec
 
     if inspect.iscoroutinefunction(builder_fn):
-        composed = await builder_fn(ctx)
+        composed = await builder_fn(ctx, intent)
     else:
-        composed = builder_fn(ctx)
+        composed = builder_fn(ctx, intent)
 
     if composed is None:
         log.debug("Builder for %s returned None (account ineligible) — skipping", txn_type)
