@@ -29,10 +29,11 @@ from xrpl.wallet import Wallet
 
 import workload.constants as C
 from workload.amm import AMMPoolRegistry, DEXMetrics
-from workload.assertions import tx_rejected, tx_submitted, tx_validated
+from workload.assertions import tx_intentionally_rejected, tx_rejected, tx_submitted, tx_validated
+from workload.ledger_objects import nftoken_id, nftoken_offer_index
 from workload.balances import BalanceTracker
 from workload.sqlite_store import SQLiteStore
-from workload.txn_factory.builder import TxnContext, generate_txn
+from workload.txn_factory import TxnContext, generate_txn
 from workload.validation import ValidationRecord, ValidationSrc
 
 log = logging.getLogger("workload")
@@ -58,6 +59,10 @@ class PendingTx:
     created_at: float = field(default_factory=time.time)
     finalized_at: float | None = None
     account_generation: int = 0  # AccountRecord.generation at build time; used to detect stale pre-signed txns
+    # CAUTION: expect_rejection suppresses rejection warnings and assertion
+    # severity. A false positive hides real bugs. Only set by workload_runner
+    # when intent==INVALID AND taint_txn() was applied. Review any new callers.
+    expect_rejection: bool = False
 
     def __str__(self):
         return f"{self.transaction_type} -- {self.account} -- {self.state}"
@@ -224,6 +229,8 @@ class Workload:
         self._credentials: list[dict] = []  # [{issuer, subject, credential_type, accepted}]
         self._vaults: list[dict] = []  # [{vault_id, owner, asset}]
         self._domains: list[dict] = []  # [{domain_id, owner}]
+        self._nfts: dict[str, str] = {}  # {nft_id: owner_address}
+        self._offers: dict[str, dict] = {}  # {offer_key: {type, owner, sequence, ...}}
 
         self.amm = AMMPoolRegistry()
         self.dex_metrics = DEXMetrics()
@@ -292,6 +299,8 @@ class Workload:
         ctx.credentials = self._credentials
         ctx.vaults = self._vaults
         ctx.domains = self._domains
+        ctx.nfts = self._nfts
+        ctx.offers = self._offers
         return ctx
 
     def update_txn_context(self):
@@ -769,6 +778,12 @@ class Workload:
         self._on_vault_deleted(p_live)
         await self._on_domain_created(p_live, rec)
         self._on_domain_deleted(p_live)
+        self._on_nftoken_minted(p_live)
+        self._on_nftoken_burned(p_live)
+        self._on_offer_created(p_live)
+        self._on_offer_cancelled(p_live)
+        self._on_nft_offer_created(p_live)
+        self._on_nft_offer_accepted(p_live)
         log.debug("txn %s validated at ledger %s via %s", rec.txn, rec.seq, rec.src)
         return {"tx_hash": rec.txn, "ledger_index": rec.seq, "source": rec.src, "meta_result": meta_result}
 
@@ -945,6 +960,7 @@ class Workload:
         for c in self._credentials:
             if c["issuer"] == issuer and c["subject"] == subject and c["credential_type"] == cred_type:
                 c["accepted"] = True
+                self.update_txn_context()
                 break
 
     def _on_credential_deleted(self, p_live: PendingTx | None) -> None:
@@ -1029,6 +1045,110 @@ class Workload:
         domain_id = tx_json.get("DomainID")
         if domain_id:
             self._domains = [d for d in self._domains if d["domain_id"] != domain_id]
+            self.update_txn_context()
+
+    # ------------------------------------------------------------------
+    # NFToken hooks
+    # ------------------------------------------------------------------
+    def _on_nftoken_minted(self, p_live: PendingTx | None) -> None:
+        """Track a newly minted NFToken — ID is deterministic, no RPC needed."""
+        if not (p_live and p_live.transaction_type == C.TxType.NFTOKEN_MINT):
+            return
+        tx_json = p_live.tx_json or {}
+        sequence = tx_json.get("Sequence")
+        if sequence is None:
+            return
+        nft_id_hex = nftoken_id(
+            account=p_live.account,
+            sequence=sequence,
+            taxon=tx_json.get("NFTokenTaxon", 0),
+            flags=tx_json.get("Flags", 0),
+            transfer_fee=tx_json.get("TransferFee", 0),
+        )
+        self._nfts[nft_id_hex] = p_live.account
+        self.update_txn_context()
+        log.debug("Tracked NFToken: %s owner=%s", nft_id_hex, p_live.account)
+
+    def _on_nftoken_burned(self, p_live: PendingTx | None) -> None:
+        if not (p_live and p_live.transaction_type == C.TxType.NFTOKEN_BURN):
+            return
+        nft_id_hex = (p_live.tx_json or {}).get("NFTokenID", "").upper()
+        if nft_id_hex and nft_id_hex in self._nfts:
+            del self._nfts[nft_id_hex]
+            self.update_txn_context()
+            log.debug("Removed burned NFToken: %s", nft_id_hex)
+
+    # ------------------------------------------------------------------
+    # DEX Offer hooks
+    # ------------------------------------------------------------------
+    def _on_offer_created(self, p_live: PendingTx | None) -> None:
+        """Track a new DEX offer — index computed from account + sequence."""
+        if not (p_live and p_live.transaction_type == C.TxType.OFFER_CREATE):
+            return
+        tx_json = p_live.tx_json or {}
+        sequence = tx_json.get("Sequence")
+        if sequence is None:
+            return
+        offer_key = f"{p_live.account}:{sequence}"
+        self._offers[offer_key] = {
+            "type": "IOUOffer",
+            "owner": p_live.account,
+            "sequence": sequence,
+        }
+        self.update_txn_context()
+        log.debug("Tracked offer: %s", offer_key)
+
+    def _on_offer_cancelled(self, p_live: PendingTx | None) -> None:
+        if not (p_live and p_live.transaction_type == C.TxType.OFFER_CANCEL):
+            return
+        tx_json = p_live.tx_json or {}
+        offer_seq = tx_json.get("OfferSequence")
+        if offer_seq is not None:
+            offer_key = f"{p_live.account}:{offer_seq}"
+            if offer_key in self._offers:
+                del self._offers[offer_key]
+                self.update_txn_context()
+
+    # ------------------------------------------------------------------
+    # NFToken Offer hooks
+    # ------------------------------------------------------------------
+    def _on_nft_offer_created(self, p_live: PendingTx | None) -> None:
+        """Track a new NFToken offer — ledger index computed locally."""
+        if not (p_live and p_live.transaction_type == C.TxType.NFTOKEN_CREATE_OFFER):
+            return
+        tx_json = p_live.tx_json or {}
+        sequence = tx_json.get("Sequence")
+        if sequence is None:
+            return
+        offer_idx = nftoken_offer_index(p_live.account, sequence)
+        is_sell = bool(tx_json.get("Flags", 0) & 1)  # tfSellNFToken = 0x0001
+        self._offers[offer_idx] = {
+            "type": "NFTokenOffer",
+            "owner": p_live.account,
+            "is_sell_offer": is_sell,
+            "nft_id": tx_json.get("NFTokenID", ""),
+            "sequence": sequence,
+        }
+        self.update_txn_context()
+        log.debug("Tracked NFToken offer: %s sell=%s", offer_idx, is_sell)
+
+    def _on_nft_offer_accepted(self, p_live: PendingTx | None) -> None:
+        """Remove accepted NFToken offer and update NFT ownership if sell offer."""
+        if not (p_live and p_live.transaction_type == C.TxType.NFTOKEN_ACCEPT_OFFER):
+            return
+        tx_json = p_live.tx_json or {}
+        changed = False
+        for offer_field in ("NFTokenSellOffer", "NFTokenBuyOffer"):
+            offer_id = tx_json.get(offer_field)
+            if offer_id and offer_id in self._offers:
+                offer_data = self._offers.pop(offer_id)
+                changed = True
+                # Update NFT ownership for sell offers — buyer is the acceptor
+                if offer_data.get("is_sell_offer") and offer_data.get("nft_id"):
+                    nft_id_upper = offer_data["nft_id"].upper()
+                    if nft_id_upper in self._nfts:
+                        self._nfts[nft_id_upper] = p_live.account
+        if changed:
             self.update_txn_context()
 
     async def _cascade_expire_account(
@@ -1273,6 +1393,7 @@ class Workload:
         created_ledger: int | None = None,
         last_ledger_seq: int | None = None,
         preallocated_seq: int | None = None,
+        expect_rejection: bool = False,
     ) -> PendingTx:
         if created_ledger is not None and last_ledger_seq is not None:
             created_li = created_ledger
@@ -1342,6 +1463,7 @@ class Workload:
             transaction_type=tx.get("TransactionType"),
             created_ledger=created_li,
             account_generation=acct_gen,
+            expect_rejection=expect_rejection,
         )
         await self.record_created(p)
         return p
@@ -1385,10 +1507,18 @@ class Workload:
                 return res
 
             if er == "tefPAST_SEQ":
+                # !! CAUTION: expect_rejection suppresses cascade-expire and downgrades
+                # logging/assertions for this rejection. If the flag is ever set
+                # incorrectly (e.g., a valid txn tagged as invalid, or a tainting
+                # strategy that accidentally produces a valid txn), real sequence
+                # desync bugs will be silently swallowed. Any change to how
+                # expect_rejection is set MUST be reviewed for false positives.
+                # See also the general tem/tef handler below (~20 lines down).
                 p.state = C.TxState.REJECTED
                 self._total_rejected += 1
+                _reject_fn = tx_intentionally_rejected if p.expect_rejection else tx_rejected
                 if p.transaction_type:
-                    tx_rejected(
+                    _reject_fn(
                         p.transaction_type, er,
                         details={"hash": p.tx_hash, "account": p.account, "sequence": p.sequence, "tx_json": p.tx_json},
                     )
@@ -1405,6 +1535,11 @@ class Workload:
                 # Only cascade + resync if this is the first tefPAST_SEQ for
                 # this account (i.e., its next_seq hasn't already been reset
                 # below this txn's sequence by a prior cascade).
+                # Skip cascade for intentionally bad txns — sequence is still valid
+                if p.expect_rejection:
+                    log.debug("tefPAST_SEQ (expected): %s %s seq=%s", p.transaction_type, p.account, p.sequence)
+                    return res
+
                 rec = self._record_for(p.account)
                 try:
                     _ai = await self._rpc(AccountInfo(account=p.account, ledger_index="current"))
@@ -1438,10 +1573,17 @@ class Workload:
                 return res
 
             if isinstance(er, str) and er.startswith(("tem", "tef")):
+                # !! CAUTION: expect_rejection downgrades logging and routes to
+                # tx_intentionally_rejected() instead of tx_rejected(). A false
+                # positive (valid txn wrongly tagged) hides real builder bugs.
+                # Only workload_runner sets this flag, and only when intent==INVALID
+                # AND taint_txn() was applied. If you add other callers, audit
+                # carefully — a suppressed warning here is invisible in production.
                 p.state = C.TxState.REJECTED
                 self._total_rejected += 1
+                _reject_fn = tx_intentionally_rejected if p.expect_rejection else tx_rejected
                 if p.transaction_type:
-                    tx_rejected(
+                    _reject_fn(
                         p.transaction_type, er,
                         details={"hash": p.tx_hash, "account": p.account, "sequence": p.sequence, "tx_json": p.tx_json},
                     )
@@ -1455,7 +1597,9 @@ class Workload:
                     engine_result_first=p.engine_result_first,
                     engine_result_final=er,
                 )
-                if er == "temDISABLED":
+                if p.expect_rejection:
+                    log.debug(f"REJECTED (expected): {er} - {p.transaction_type} from {p.account}")
+                elif er == "temDISABLED":
                     log.debug(f"REJECTED: {er} - {p.transaction_type} from {p.account} (amendment not enabled)")
                 else:
                     log.warning(f"REJECTED: {er} - {p.transaction_type} from {p.account} seq={p.sequence} hash={p.tx_hash}")

@@ -81,6 +81,11 @@ DelegateSet = 0.02
 valid = 0.90
 invalid = 0.10
 
+# Per-type invalid ratio overrides. Types not listed use the global ratio above.
+# [transactions.intent.per_type]
+# Payment = 0.15
+# VaultDeposit = 0.30
+
 [transactions.mptoken.issuance_create]
 transfer_fee = 1000
 

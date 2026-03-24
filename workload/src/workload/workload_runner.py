@@ -11,8 +11,9 @@ from time import perf_counter
 
 import workload.constants as C
 from workload.constants import TxIntent
-from workload.randoms import choices, random
-from workload.txn_factory.builder import build_txn_dict, pick_eligible_txn_type, txn_model_cls
+from workload.randoms import random
+from workload.txn_factory import build_txn_dict, compose_submission_set, txn_model_cls
+from workload.txn_factory.taint import taint_txn
 from workload.workload_core import PendingTx, Workload
 
 log = logging.getLogger("workload.runner")
@@ -148,28 +149,29 @@ async def continuous_workload(wl: Workload) -> None:
                             log.debug("Failed to create new account: %s", e)
                             stats["failed"] += 1
 
-                # Build + sign txns for free accounts
+                # Build + sign txns — type-first composition
                 # TODO: Parallelize this loop — alloc_seq RPCs and signing are sequential.
                 # With 400 accounts, build phase takes 2-3s. Use TaskGroup for alloc_seq,
                 # then sign concurrently. This is the main throughput bottleneck.
                 target = wl.target_txns_per_ledger
-                intent_cfg = wl.config.get("transactions", {}).get("intent", {})
-                intent_weights = [intent_cfg.get("valid", 0.90), intent_cfg.get("invalid", 0.10)]
-                intent_choices = [TxIntent.VALID, TxIntent.INVALID]
                 build_start = perf_counter()
-                batch: list[PendingTx] = []
-                for addr in free_accounts[:target]:
+
+                # Type-first: roll types, assign eligible accounts, determine intent
+                assignments = compose_submission_set(free_accounts, target, wl.ctx, wl.config)
+
+                submission_set: list[PendingTx] = []
+                for addr, txn_type, intent in assignments:
                     wallet = wl.wallets[addr]
-                    intent = choices(intent_choices, weights=intent_weights, k=1)[0]
-                    txn_type = pick_eligible_txn_type(wallet, wl.ctx, intent)
-                    if txn_type is None:
-                        continue
+
+                    is_invalid = intent == TxIntent.INVALID
 
                     try:
                         ctx = replace(wl.ctx, forced_account=wallet)
                         composed = build_txn_dict(txn_type, ctx, intent)
                         if composed is None:
                             continue
+                        if is_invalid:
+                            composed = taint_txn(composed, txn_type)
                         txn = txn_model_cls(txn_type).from_xrpl(composed)
                     except Exception as e:
                         log.debug("build %s/%s: %s", addr, txn_type, e)
@@ -189,27 +191,28 @@ async def continuous_workload(wl: Workload) -> None:
                             created_ledger=batch_ledger,
                             last_ledger_seq=batch_lls,
                             preallocated_seq=seq,
+                            expect_rejection=is_invalid,
                         )
-                        batch.append(pending)
+                        submission_set.append(pending)
                     except Exception as e:
                         await wl.release_seq(wallet.address, seq)
                         log.debug("sign %s/%s: %s", addr, txn_type, e)
                         continue
 
-                if not batch:
+                if not submission_set:
                     await asyncio.sleep(0)
                     continue
 
                 build_ms = (perf_counter() - build_start) * 1000
                 log.info(
-                    "Batch: %d txns, ledger=%d, wallets=%d, build=%.0fms",
-                    len(batch), batch_ledger, len(wl.wallets), build_ms,
+                    "Submission set: %d txns, ledger=%d, wallets=%d, build=%.0fms",
+                    len(submission_set), batch_ledger, len(wl.wallets), build_ms,
                 )
 
                 # Submit all in parallel — no waiting, fire immediately
                 try:
                     async with asyncio.TaskGroup() as tg:
-                        tasks = [tg.create_task(wl.submit_pending(p)) for p in batch]
+                        tasks = [tg.create_task(wl.submit_pending(p)) for p in submission_set]
 
                     submitted = 0
                     failed = 0
@@ -232,13 +235,13 @@ async def continuous_workload(wl: Workload) -> None:
                         wl._cached_fee = None
                         log.warning("Fee escalation detected — invalidating cached fee")
                     if failed:
-                        log.info("Batch result: %d ok, %d failed — errors=%s", submitted, failed, errors)
+                        log.info("Submit result: %d ok, %d failed — errors=%s", submitted, failed, errors)
                     else:
-                        log.info("Batch result: %d ok", submitted)
+                        log.info("Submit result: %d ok", submitted)
                 except* Exception as eg:
                     for exc in eg.exceptions:
-                        log.error("Batch error: %s: %s", type(exc).__name__, exc)
-                    stats["failed"] += len(batch)
+                        log.error("Submit error: %s: %s", type(exc).__name__, exc)
+                    stats["failed"] += len(submission_set)
 
             except asyncio.CancelledError:
                 raise

@@ -1792,10 +1792,61 @@ async def set_target_txns(req: TargetTxnsReq):
     }
 
 
+@r_workload.get("/intent")
+async def get_intent_ratio() -> dict:
+    """Get current valid/invalid intent ratio for transaction generation."""
+    intent_cfg = app.state.workload.config.get("transactions", {}).get("intent", {})
+    return {
+        "valid": intent_cfg.get("valid", 0.90),
+        "invalid": intent_cfg.get("invalid", 0.10),
+        "per_type": intent_cfg.get("per_type", {}),
+    }
+
+
+class IntentReq(BaseModel):
+    valid: float | None = None
+    invalid: float | None = None
+
+
+@r_workload.post("/intent")
+async def set_intent_ratio(req: IntentReq) -> dict:
+    """Set valid/invalid intent ratio. Takes effect immediately.
+
+    Provide either valid or invalid (the other is computed as 1 - value).
+    Values must be between 0.0 and 1.0.
+    """
+    intent_cfg = app.state.workload.config.setdefault("transactions", {}).setdefault("intent", {})
+    old_valid = intent_cfg.get("valid", 0.90)
+    old_invalid = intent_cfg.get("invalid", 0.10)
+
+    if req.invalid is not None:
+        if not 0.0 <= req.invalid <= 1.0:
+            raise HTTPException(status_code=400, detail="invalid must be between 0.0 and 1.0")
+        intent_cfg["invalid"] = req.invalid
+        intent_cfg["valid"] = 1.0 - req.invalid
+    elif req.valid is not None:
+        if not 0.0 <= req.valid <= 1.0:
+            raise HTTPException(status_code=400, detail="valid must be between 0.0 and 1.0")
+        intent_cfg["valid"] = req.valid
+        intent_cfg["invalid"] = 1.0 - req.valid
+    else:
+        raise HTTPException(status_code=400, detail="Provide either 'valid' or 'invalid'")
+
+    log.info(
+        "Intent ratio changed: valid=%.2f->%.2f invalid=%.2f->%.2f",
+        old_valid, intent_cfg["valid"], old_invalid, intent_cfg["invalid"],
+    )
+    return {
+        "old": {"valid": old_valid, "invalid": old_invalid},
+        "new": {"valid": intent_cfg["valid"], "invalid": intent_cfg["invalid"]},
+        "status": "updated",
+    }
+
+
 @r_workload.get("/disabled-types")
 async def get_disabled_types():
     """Get currently disabled transaction types for random generation."""
-    from workload.txn_factory.builder import _BUILDERS
+    from workload.txn_factory import _BUILDERS
 
     all_types = list(_BUILDERS.keys())
     disabled = sorted(app.state.workload.disabled_txn_types)
@@ -1819,7 +1870,7 @@ async def toggle_txn_type(req: ToggleTypeReq):
 
     Takes effect immediately on the next transaction generation.
     """
-    from workload.txn_factory.builder import _BUILDERS
+    from workload.txn_factory import _BUILDERS
 
     if req.txn_type not in _BUILDERS:
         raise HTTPException(

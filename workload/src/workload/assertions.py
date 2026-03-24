@@ -130,6 +130,12 @@ def tx_rejected(tx_type: str, code: str, *, details: dict[str, Any] | None = Non
     _check_internal(tx_type, code, details)
 
 
+def tx_intentionally_rejected(tx_type: str, code: str, *, details: dict[str, Any] | None = None) -> None:
+    """Record a rejection for a known-bad (tainted) transaction — informational, not a failure."""
+    send_event(f"workload::intentional_reject:{tx_type}", {"code": code, **(details or {})})
+    sometimes(True, f"workload::intentional_reject:{tx_type}", {"code": code})
+
+
 # ---------------------------------------------------------------------------
 # Stats accessor
 # ---------------------------------------------------------------------------

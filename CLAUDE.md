@@ -18,8 +18,12 @@ rippled-workload/
 │   └── src/workload/
 │       ├── app.py                 # FastAPI application, endpoints, lifespan, dashboard
 │       ├── workload_core.py       # Core workload logic (Workload class, stores, validation)
-│       ├── txn_factory/           # Transaction generation
-│       │   └── builder.py         # Transaction builders and registry
+│       ├── txn_factory/           # Transaction generation (modular)
+│       │   ├── context.py         # TxnContext dataclass + utilities
+│       │   ├── registry.py        # Builder registry, eligibility, compose_submission_set()
+│       │   ├── taint.py           # Semantic tainting for invalid txns
+│       │   └── builders/          # Per-group builder modules (payment, dex, nft, etc.)
+│       ├── ledger_objects.py      # Deterministic XRPL object ID computation
 │       ├── ws.py                  # WebSocket listener for ledger/tx events
 │       ├── ws_processor.py        # WS event dispatcher (validation, ledger close, server status)
 │       ├── sqlite_store.py        # SQLite persistence (primary store)
@@ -72,14 +76,36 @@ Transactions move through these states (constants.py):
 
 ### Transaction Generation
 
-The `txn_factory` uses a registry pattern (builder.py):
+The `txn_factory` package uses a modular registry pattern:
 
-- `_BUILDERS` dict maps type name → (builder_fn, model_class) pairs
-- `TxnContext` provides wallets, currencies, AMM pools, credentials, vaults, domains, and defaults
-- `generate_txn()` selects a random or specified transaction type, weighted by config percentages
-- `pick_eligible_txn_type(wallet, ctx)` applies global + per-account capability filters before weighted sampling
-- Builders return dicts (or None if ineligible) that are converted to xrpl-py Transaction models
-- Capability-aware: skips types requiring MPT IDs, NFTs, AMM pools, credentials, vaults, or domains when those don't exist
+```
+txn_factory/
+├── context.py      # TxnContext dataclass + shared utilities
+├── registry.py     # Builder registry, eligibility, compose_submission_set()
+├── taint.py        # Semantic tainting for intentionally invalid txns
+├── builders/       # Per-group builder modules
+│   ├── payment.py  # Payment, TrustSet, AccountSet
+│   ├── dex.py      # OfferCreate/Cancel, AMM*
+│   ├── nft.py      # NFToken*
+│   ├── mptoken.py  # MPToken*
+│   ├── vault.py    # Vault*
+│   ├── credential.py # Credential*, DelegateSet
+│   ├── domain.py   # PermissionedDomain*
+│   └── batch.py    # Batch, TicketCreate
+```
+
+Each builder module exports:
+- `BUILDERS`: dict mapping type name → (builder_fn, model_class) pairs
+- `ELIGIBILITY` (optional): per-account eligibility predicates
+- `TAINTERS` (optional): semantic tainting strategies for invalid txns
+
+**Submission set composition** (`compose_submission_set()` in registry.py):
+1. Type-first: rolls N types from weighted config distribution
+2. Per-type intent: rolls VALID/INVALID per txn using configurable ratio
+3. Account matching: finds eligible accounts for each (type, intent) pair
+4. Tainting: applies `taint_txn()` to INVALID-intent txns before model construction
+
+**Note**: Groups of transactions submitted together are called **submission sets**, not "batches" (overloaded with the Batch transaction type).
 
 Supported transaction types (31): Payment, OfferCreate, OfferCancel, TrustSet, AccountSet, AMMCreate, AMMDeposit, AMMWithdraw, NFTokenMint, NFTokenBurn, NFTokenCreateOffer/CancelOffer/AcceptOffer, MPTokenIssuanceCreate/Set/Authorize/Destroy, TicketCreate, Batch, DelegateSet, CredentialCreate/Accept/Delete, PermissionedDomainSet/Delete, VaultCreate/Set/Delete/Deposit/Withdraw/Clawback
 
@@ -96,7 +122,15 @@ Both paths deduplicate by `(tx_hash, ledger_index)`. See `workload/ws-architectu
 
 ### Submission Architecture
 
-Single unified loop in `continuous_workload()` (app.py): build → sign → submit → repeat. No queue, no producer-consumer split. Submissions are not gated on ledger close — txns go to rippled's internal queue immediately. `target_txns_per_ledger` controls batch size per iteration. Self-healing via `expire_past_lls()` when all accounts are blocked.
+Single unified loop in `continuous_workload()` (workload_runner.py): compose submission set → build → taint (if invalid) → sign → submit → repeat. No queue, no producer-consumer split. Submissions are not gated on ledger close — txns go to rippled's internal queue immediately. `target_txns_per_ledger` controls submission set size per iteration. Self-healing via `expire_past_lls()` when all accounts are blocked.
+
+### Intentionally Invalid Transactions
+
+Configurable ratio of valid/invalid transactions via `[transactions.intent]` in config.toml or dynamically via `POST /workload/intent`. Invalid txns are semantically tainted (valid structure, wrong values) so they pass xrpl-py model validation and binary codec encoding but get rejected by rippled (tem/tef/tec codes). Signing uses manual `encode_for_signing` + `sign` + `encode` + `SubmitOnly` — no xrpl-py convenience methods that could interfere.
+
+### Ledger Object ID Computation
+
+`ledger_objects.py` computes XRPL object IDs deterministically from transaction fields (no RPC needed): NFTokenID, Offer/NFTOffer/Check/Escrow/Ticket/Vault/Domain/Credential indices. Self-contained module designed for eventual xrpl-py contribution. Used by validation hooks to track NFTs and offers without metadata RPC calls.
 
 ### Assertions Framework
 
@@ -248,19 +282,27 @@ AMM pools are tracked in `_amm_pool_registry` (list of pool dicts) with deduplic
 - Network timeouts: Mark as FAILED_NET
 - Expired (past LastLedgerSequence): Mark as EXPIRED, cascade-expire dependent txns
 
+### `expect_rejection` — Handle With Extreme Care
+
+`PendingTx.expect_rejection` suppresses rejection warnings and routes assertions to `tx_intentionally_rejected()` instead of `tx_rejected()`. For `tefPAST_SEQ`, it also skips the cascade-expire sequence resync. This means a false positive (a valid transaction incorrectly tagged as intentionally invalid) will **silently swallow real bugs** — sequence desyncs, builder errors, and rejection spikes will not be logged or alerted.
+
+**The flag is only set in one place**: `workload_runner.py`, when `intent == TxIntent.INVALID` AND `taint_txn()` was applied. Any new code path that sets this flag must be reviewed with the same scrutiny as disabling a safety check. See the CAUTION comments in `submit_pending()` (~line 1506 and ~1572 in `workload_core.py`).
+
 ## Common Patterns
 
 ### Adding a New Transaction Type
 
 1. Add to `TxType` enum in constants.py
-2. Add xrpl-py model import and `_build_*` function in txn_factory/builder.py (sync, returns dict or None)
-3. Add entry to `_BUILDERS` dict: `"MyNewTxn": (_build_mynew_txn, MyNewTxn)`
-4. Add capability filters in `pick_eligible_txn_type()` (global and per-account) and `generate_txn()`
-5. If stateful: add tracking list in workload_core.py (`self._things`), wire into `configure_txn_context()`, add `TxnContext` field, add validation hook(s) in `record_validated()`
-6. Add tunable params in config.toml under `[transactions.mynew_txn]`, read via `ctx.config`
-7. Optionally add percentage weight in `[transactions.percentages]`
-8. Add POST endpoint in app.py and test_composer script
-9. If creates a ledger object: add to owner_reserve fee path in `build_sign_and_track()`
+2. Create builder function in the appropriate `txn_factory/builders/*.py` module (sync, returns dict or None)
+3. Add entry to the module's `BUILDERS` dict: `"MyNewTxn": (build_mynew_txn, MyNewTxn)`
+4. If per-account eligibility needed: add predicate to module's `ELIGIBILITY` dict
+5. Add tainting strategies to module's `TAINTERS` dict
+6. If stateful: add tracking in workload_core.py (`self._things`), wire into `configure_txn_context()`, add `TxnContext` field, add validation hook in `record_validated()`. Use `ledger_objects.py` for deterministic ID computation.
+7. Add global capability filter in `registry.py:global_eligible_types()` if needed
+8. Add tunable params in config.toml under `[transactions.mynew_txn]`, read via `ctx.config`
+9. Optionally add percentage weight in `[transactions.percentages]`
+10. Add POST endpoint in app.py and test_composer script
+11. If creates a ledger object: add to owner_reserve fee path in `build_sign_and_track()`
 
 ### Working with Accounts
 
