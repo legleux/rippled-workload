@@ -57,7 +57,7 @@ class AmendmentTracker:
                         "supporters": supporters,
                         "total_validators": total,
                         "percentage": percentage,
-                    }
+                    },
                 )
             return sorted(results, key=lambda x: x["percentage"], reverse=True)
 
@@ -83,7 +83,7 @@ def on_message(ws, message, tracker):
                 # Print update
                 print(
                     f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                    f"Validator {validator_key[:16]}... voted for {len(amendments)} amendments"
+                    f"Validator {validator_key[:16]}... voted for {len(amendments)} amendments",
                 )
 
     except Exception as e:
@@ -138,7 +138,7 @@ def print_status(tracker):
 
             print(f"{i:2}. {amend['amendment_id'][:32]}...")
             print(
-                f"    [{bar}] {amend['percentage']:.1f}% ({amend['supporters']}/{amend['total_validators']}) {status}"
+                f"    [{bar}] {amend['percentage']:.1f}% ({amend['supporters']}/{amend['total_validators']}) {status}",
             )
 
         if len(amendments) > 10:

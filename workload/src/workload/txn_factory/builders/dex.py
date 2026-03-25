@@ -1,6 +1,6 @@
 """DEX-related transaction builders: OfferCreate, OfferCancel, AMM*."""
 
-from random import choice, sample
+from random import choice
 
 from xrpl.models.transactions import (
     AMMCreate,
@@ -17,51 +17,69 @@ from workload.randoms import random, randrange
 from workload.txn_factory.context import TxnContext
 
 
-def build_offer_create(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
+def build_offer_create(ctx: TxnContext, intent: TxIntent) -> dict:
     """Build an OfferCreate transaction to trade currencies on the DEX.
 
-    Creates offers to exchange XRP/IOU or IOU/IOU pairs.
+    Uses balance tracking to pick currencies the account actually holds,
+    with amounts within their balance to avoid tecUNFUNDED_OFFER.
+    TakerGets = what the account sells (must have balance).
+    TakerPays = what the account wants to buy (any currency).
     """
     src = ctx.rand_account()
+    acct_balances = (ctx.balances or {}).get(src.address, {})
 
-    use_xrp = random() < 0.5
+    # What the account can sell — needs actual balance
+    xrp_bal = acct_balances.get("XRP", 0)
+    iou_holdings = [(k, v) for k, v in acct_balances.items() if isinstance(k, tuple) and v > 0]
 
-    if use_xrp or not ctx.currencies:
-        currency = ctx.rand_currency() if ctx.currencies else None
-        if currency:
-            if random() < 0.5:
-                taker_pays = str(randrange(1_000_000, 100_000_000))  # XRP in drops
-                taker_gets = {
-                    "currency": currency.currency,
-                    "issuer": currency.issuer,
-                    "value": str(randrange(10, 1000)),
-                }
-            else:
-                taker_pays = {
-                    "currency": currency.currency,
-                    "issuer": currency.issuer,
-                    "value": str(randrange(10, 1000)),
-                }
-                taker_gets = str(randrange(1_000_000, 100_000_000))  # XRP in drops
-        else:
-            taker_pays = str(randrange(1_000_000, 100_000_000))
-            taker_gets = str(randrange(1_000_000, 100_000_000))
+    # Build TakerGets from what the account actually has
+    # Reserve 20 XRP (20M drops) for fees + reserves
+    xrp_available = max(0, xrp_bal - 20_000_000)
+    can_sell_xrp = xrp_available > 1_000_000  # at least 1 XRP
+
+    if not can_sell_xrp and not iou_holdings:
+        # Account has nothing to sell — use small XRP amount anyway (will likely fail)
+        taker_gets = str(randrange(1_000_000, 10_000_000))
+    elif can_sell_xrp and (not iou_holdings or random() < 0.4):
+        # Sell XRP — use 1-10% of available balance
+        max_sell = max(1_000_000, int(xrp_available * 0.10))
+        taker_gets = str(randrange(1_000_000, max_sell + 1))
     else:
-        if len(ctx.currencies) >= 2:
-            cur1, cur2 = sample(ctx.currencies, 2)
-        else:
-            cur1 = cur2 = ctx.rand_currency()
-
-        taker_pays = {
-            "currency": cur1.currency,
-            "issuer": cur1.issuer,
-            "value": str(randrange(10, 1000)),
-        }
+        # Sell an IOU the account holds
+        cur_key, bal = choice(iou_holdings)
+        currency_code, issuer = cur_key
+        max_sell = max(1, int(bal * 0.10))
         taker_gets = {
-            "currency": cur2.currency,
-            "issuer": cur2.issuer,
-            "value": str(randrange(10, 1000)),
+            "currency": currency_code,
+            "issuer": issuer,
+            "value": str(randrange(1, max_sell + 1)),
         }
+
+    # Build TakerPays — what the account wants to buy (any currency)
+    if isinstance(taker_gets, str):
+        # Selling XRP → want to buy an IOU
+        if ctx.currencies:
+            cur = ctx.rand_currency()
+            taker_pays = {
+                "currency": cur.currency,
+                "issuer": cur.issuer,
+                "value": str(randrange(1, 100)),
+            }
+        else:
+            taker_pays = str(randrange(1_000_000, 50_000_000))
+    else:
+        # Selling IOU → want to buy XRP or a different IOU
+        if random() < 0.6:
+            taker_pays = str(randrange(1_000_000, 50_000_000))  # Buy XRP
+        elif ctx.currencies:
+            cur = ctx.rand_currency()
+            taker_pays = {
+                "currency": cur.currency,
+                "issuer": cur.issuer,
+                "value": str(randrange(1, 100)),
+            }
+        else:
+            taker_pays = str(randrange(1_000_000, 50_000_000))
 
     return {
         "TransactionType": "OfferCreate",

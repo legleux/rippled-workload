@@ -40,6 +40,14 @@ class TxType(StrEnum):
     # Permissioned Domains
     PERMISSIONED_DOMAIN_SET = "PermissionedDomainSet"
     PERMISSIONED_DOMAIN_DELETE = "PermissionedDomainDelete"
+    # Checks
+    CHECK_CREATE = "CheckCreate"
+    CHECK_CASH = "CheckCash"
+    CHECK_CANCEL = "CheckCancel"
+    # Escrows
+    ESCROW_CREATE = "EscrowCreate"
+    ESCROW_FINISH = "EscrowFinish"
+    ESCROW_CANCEL = "EscrowCancel"
     # Delegation
     DELEGATE_SET = "DelegateSet"
     # Vaults

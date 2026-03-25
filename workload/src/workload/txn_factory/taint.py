@@ -14,14 +14,14 @@ import logging
 from collections.abc import Callable
 from random import choice
 
-from workload.txn_factory.builders import batch, credential, dex, domain, mptoken, nft, payment, vault
+from workload.txn_factory.builders import batch, check, credential, dex, domain, escrow, mptoken, nft, payment, vault
 
 log = logging.getLogger("workload.txn")
 
 # Collect TAINTERS from all builder modules
 _TAINTERS: dict[str, list[Callable[[dict], dict]]] = {}
 
-for _mod in [payment, dex, nft, mptoken, vault, credential, domain, batch]:
+for _mod in [payment, dex, nft, mptoken, vault, credential, domain, batch, check, escrow]:
     _TAINTERS.update(getattr(_mod, "TAINTERS", {}))
 
 

@@ -1,4 +1,4 @@
-"""Batch and TicketCreate transaction builders."""
+"""Batch, TicketCreate, and ticket-consuming transaction builders."""
 
 from random import choice
 
@@ -33,6 +33,45 @@ def build_ticket_create(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: han
         "TransactionType": "TicketCreate",
         "Account": src.address,
         "TicketCount": ticket_count,
+    }
+
+
+def build_ticket_use(ctx: TxnContext, intent: TxIntent) -> dict | None:
+    """Build a Payment using a ticket sequence instead of a regular sequence.
+
+    Pops a ticket from the account's available set at build time to prevent
+    double-use within the same submission set. The actual XRPL transaction type
+    is Payment — TicketSequence replaces Sequence.
+    When forced_account is set, uses that account's tickets.
+    """
+    if not ctx.tickets:
+        return None
+
+    # Use forced_account if set, otherwise find any account with tickets
+    if ctx.forced_account:
+        src = ctx.forced_account
+        if not ctx.tickets.get(src.address):
+            return None
+    else:
+        accounts_with_tickets = [w for w in ctx.wallets if ctx.tickets.get(w.address)]
+        if not accounts_with_tickets:
+            return None
+        src = choice(accounts_with_tickets)
+
+    ticket_seq = ctx.tickets[src.address].pop()
+    if not ctx.tickets[src.address]:
+        del ctx.tickets[src.address]
+
+    dst = choice_omit(ctx.wallets, [src])
+    amount = str(randrange(1_000_000, 100_000_000))  # 1-100 XRP in drops
+
+    return {
+        "TransactionType": "Payment",
+        "Account": src.address,
+        "Destination": dst.address,
+        "Amount": amount,
+        "Sequence": 0,
+        "TicketSequence": ticket_seq,
     }
 
 
@@ -139,5 +178,16 @@ async def build_batch(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handl
 
 BUILDERS = {
     "TicketCreate": (build_ticket_create, TicketCreate),
+    "TicketUse": (build_ticket_use, Payment),
     "Batch": (build_batch, Batch),
+}
+
+
+def _is_eligible_ticket_use(wallet, ctx) -> bool:
+    """Account must have at least one available ticket."""
+    return bool(ctx.tickets and ctx.tickets.get(wallet.address))
+
+
+ELIGIBILITY = {
+    "TicketUse": _is_eligible_ticket_use,
 }

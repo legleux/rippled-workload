@@ -30,7 +30,7 @@ from xrpl.wallet import Wallet
 import workload.constants as C
 from workload.amm import AMMPoolRegistry, DEXMetrics
 from workload.assertions import tx_intentionally_rejected, tx_rejected, tx_submitted, tx_validated
-from workload.ledger_objects import nftoken_id, nftoken_offer_index
+from workload.ledger_objects import check_index, escrow_index, nftoken_id, nftoken_offer_index
 from workload.balances import BalanceTracker
 from workload.sqlite_store import SQLiteStore
 from workload.txn_factory import TxnContext, generate_txn
@@ -216,7 +216,8 @@ class Workload:
 
         self.max_pending_per_account: int = self.config.get("transactions", {}).get("max_pending_per_account", 1)
 
-        self.target_txns_per_ledger: int = 100
+        self.target_tps: float = 0  # 0 = unlimited (firehose)
+        self.submission_set_size: int = self.config.get("transactions", {}).get("submission_set_size", 200)
 
         self._config_disabled_types: frozenset[str] = frozenset(self.config.get("transactions", {}).get("disabled", []))
         self.disabled_txn_types: set[str] = set(self._config_disabled_types)
@@ -231,6 +232,9 @@ class Workload:
         self._domains: list[dict] = []  # [{domain_id, owner}]
         self._nfts: dict[str, str] = {}  # {nft_id: owner_address}
         self._offers: dict[str, dict] = {}  # {offer_key: {type, owner, sequence, ...}}
+        self._tickets: dict[str, set[int]] = {}  # {account: {ticket_seq, ...}}
+        self._checks: dict[str, dict] = {}  # {check_id: {sender, destination, send_max}}
+        self._escrows: dict[str, dict] = {}  # {escrow_id: {owner, sequence, destination, finish_after, cancel_after}}
 
         self.amm = AMMPoolRegistry()
         self.dex_metrics = DEXMetrics()
@@ -301,6 +305,9 @@ class Workload:
         ctx.domains = self._domains
         ctx.nfts = self._nfts
         ctx.offers = self._offers
+        ctx.tickets = self._tickets
+        ctx.checks = self._checks
+        ctx.escrows = self._escrows
         return ctx
 
     def update_txn_context(self):
@@ -628,6 +635,43 @@ class Workload:
                     f"Cannot release sequence {seq} for {addr} - next_seq is {rec.next_seq} (gap would be created)"
                 )
 
+    async def warm_sequences(self, addresses: list[str]) -> int:
+        """Pre-fetch and cache sequence numbers for accounts in parallel.
+
+        Warms the alloc_seq cache so the build loop doesn't pay RPC latency.
+        Accounts that already have cached sequences are skipped.
+        Returns the number of accounts warmed.
+        """
+        cold = [addr for addr in addresses if self._record_for(addr).next_seq is None]
+        if not cold:
+            return 0
+        start = time.time()
+        warmed = 0
+        async with asyncio.TaskGroup() as tg:
+            for addr in cold:
+
+                async def _warm(a: str = addr) -> None:
+                    nonlocal warmed
+                    try:
+                        rec = self._record_for(a)
+                        async with rec.lock:
+                            if rec.next_seq is not None:
+                                return  # Already warmed by another path
+                            ai = await self._rpc(
+                                AccountInfo(account=a, ledger_index="validated", strict=True)
+                            )
+                            acct = ai.result.get("account_data")
+                            if acct:
+                                rec.next_seq = acct["Sequence"]
+                                warmed += 1
+                    except Exception as e:
+                        log.debug("warm_sequences: failed for %s: %s", a, e)
+
+                tg.create_task(_warm())
+        elapsed_ms = (time.time() - start) * 1000
+        log.info("Warmed %d/%d account sequences in %.0fms", warmed, len(cold), elapsed_ms)
+        return warmed
+
     async def _open_ledger_fee(self) -> int:
         """Get the fee required to submit a transaction.
 
@@ -757,10 +801,14 @@ class Workload:
         if p_live and p_live.transaction_type and not was_already_validated:
             tt = p_live.transaction_type
             tx_validated(
-                tt, meta_result or "unknown",
+                tt,
+                meta_result or "unknown",
                 details={
-                    "hash": rec.txn, "ledger_index": rec.seq, "account": p_live.account,
-                    "source": rec.src, "tx_json": p_live.tx_json,
+                    "hash": rec.txn,
+                    "ledger_index": rec.seq,
+                    "account": p_live.account,
+                    "source": rec.src,
+                    "tx_json": p_live.tx_json,
                 },
             )
             self._type_validated[tt] = self._type_validated.get(tt, 0) + 1
@@ -784,6 +832,14 @@ class Workload:
         self._on_offer_cancelled(p_live)
         self._on_nft_offer_created(p_live)
         self._on_nft_offer_accepted(p_live)
+        self._on_ticket_created(p_live)
+        self._on_ticket_consumed(p_live)
+        self._on_check_created(p_live)
+        self._on_check_cashed(p_live)
+        self._on_check_cancelled(p_live)
+        self._on_escrow_created(p_live)
+        self._on_escrow_finished(p_live)
+        self._on_escrow_cancelled(p_live)
         log.debug("txn %s validated at ledger %s via %s", rec.txn, rec.seq, rec.src)
         return {"tx_hash": rec.txn, "ledger_index": rec.seq, "source": rec.src, "meta_result": meta_result}
 
@@ -822,6 +878,8 @@ class Workload:
             self.users.append(w)
             self.save_wallet_to_store(w, is_user=True, funded_ledger_index=rec.seq)
             self.update_txn_context()
+            # Fire-and-forget sequence warmup so it's cached before next build iteration
+            asyncio.create_task(self.warm_sequences([w.address]))
             log.debug("Adopted new account %s (funded: %d drops)", w.address, funded_drops)
         else:
             log.debug(
@@ -1150,6 +1208,135 @@ class Workload:
                         self._nfts[nft_id_upper] = p_live.account
         if changed:
             self.update_txn_context()
+
+    def _on_ticket_created(self, p_live: PendingTx | None) -> None:
+        """Track tickets created by a validated TicketCreate transaction.
+
+        TicketCreate with Sequence=S and TicketCount=N creates ticket sequences
+        S+1 through S+N.
+        """
+        if not (p_live and p_live.transaction_type == C.TxType.TICKET_CREATE):
+            return
+        tx_json = p_live.tx_json or {}
+        sequence = tx_json.get("Sequence")
+        ticket_count = tx_json.get("TicketCount")
+        if sequence is None or ticket_count is None:
+            return
+        account = p_live.account
+        new_tickets = {sequence + 1 + i for i in range(ticket_count)}
+        if account not in self._tickets:
+            self._tickets[account] = new_tickets
+        else:
+            self._tickets[account] |= new_tickets
+        self.update_txn_context()
+        log.debug("Tracked %d tickets for %s: seqs %s", ticket_count, account, sorted(new_tickets))
+
+    def _on_ticket_consumed(self, p_live: PendingTx | None) -> None:
+        """Remove a consumed ticket when a txn using TicketSequence validates."""
+        if not p_live:
+            return
+        tx_json = p_live.tx_json or {}
+        ticket_seq = tx_json.get("TicketSequence")
+        if ticket_seq is None:
+            return
+        account = p_live.account
+        acct_tickets = self._tickets.get(account)
+        if acct_tickets and ticket_seq in acct_tickets:
+            acct_tickets.discard(ticket_seq)
+            if not acct_tickets:
+                del self._tickets[account]
+            self.update_txn_context()
+            log.debug("Consumed ticket %d for %s", ticket_seq, account)
+
+    # ------------------------------------------------------------------
+    # Check hooks
+    # ------------------------------------------------------------------
+    def _on_check_created(self, p_live: PendingTx | None) -> None:
+        """Track a newly created Check — ID computed deterministically."""
+        if not (p_live and p_live.transaction_type == C.TxType.CHECK_CREATE):
+            return
+        tx_json = p_live.tx_json or {}
+        sequence = tx_json.get("Sequence")
+        if sequence is None:
+            return
+        cid = check_index(p_live.account, sequence)
+        self._checks[cid] = {
+            "sender": p_live.account,
+            "destination": tx_json.get("Destination"),
+            "send_max": tx_json.get("SendMax"),
+        }
+        self.update_txn_context()
+        log.debug("Tracked Check: %s sender=%s dst=%s", cid, p_live.account, tx_json.get("Destination"))
+
+    def _on_check_cashed(self, p_live: PendingTx | None) -> None:
+        """Remove a cashed Check from tracking."""
+        if not (p_live and p_live.transaction_type == C.TxType.CHECK_CASH):
+            return
+        check_id = (p_live.tx_json or {}).get("CheckID")
+        if check_id and check_id in self._checks:
+            del self._checks[check_id]
+            self.update_txn_context()
+            log.debug("Removed cashed Check: %s", check_id)
+
+    def _on_check_cancelled(self, p_live: PendingTx | None) -> None:
+        """Remove a cancelled Check from tracking."""
+        if not (p_live and p_live.transaction_type == C.TxType.CHECK_CANCEL):
+            return
+        check_id = (p_live.tx_json or {}).get("CheckID")
+        if check_id and check_id in self._checks:
+            del self._checks[check_id]
+            self.update_txn_context()
+            log.debug("Removed cancelled Check: %s", check_id)
+
+    # ------------------------------------------------------------------
+    # Escrow hooks
+    # ------------------------------------------------------------------
+    def _on_escrow_created(self, p_live: PendingTx | None) -> None:
+        """Track a newly created Escrow — ID computed deterministically."""
+        if not (p_live and p_live.transaction_type == C.TxType.ESCROW_CREATE):
+            return
+        tx_json = p_live.tx_json or {}
+        sequence = tx_json.get("Sequence")
+        if sequence is None:
+            return
+        eid = escrow_index(p_live.account, sequence)
+        self._escrows[eid] = {
+            "owner": p_live.account,
+            "sequence": sequence,
+            "destination": tx_json.get("Destination"),
+            "finish_after": tx_json.get("FinishAfter", 0),
+            "cancel_after": tx_json.get("CancelAfter", 0),
+        }
+        self.update_txn_context()
+        log.debug("Tracked Escrow: %s owner=%s dst=%s", eid, p_live.account, tx_json.get("Destination"))
+
+    def _on_escrow_finished(self, p_live: PendingTx | None) -> None:
+        """Remove a finished Escrow from tracking."""
+        if not (p_live and p_live.transaction_type == C.TxType.ESCROW_FINISH):
+            return
+        tx_json = p_live.tx_json or {}
+        owner = tx_json.get("Owner")
+        offer_seq = tx_json.get("OfferSequence")
+        if owner and offer_seq is not None:
+            eid = escrow_index(owner, offer_seq)
+            if eid in self._escrows:
+                del self._escrows[eid]
+                self.update_txn_context()
+                log.debug("Removed finished Escrow: %s", eid)
+
+    def _on_escrow_cancelled(self, p_live: PendingTx | None) -> None:
+        """Remove a cancelled Escrow from tracking."""
+        if not (p_live and p_live.transaction_type == C.TxType.ESCROW_CANCEL):
+            return
+        tx_json = p_live.tx_json or {}
+        owner = tx_json.get("Owner")
+        offer_seq = tx_json.get("OfferSequence")
+        if owner and offer_seq is not None:
+            eid = escrow_index(owner, offer_seq)
+            if eid in self._escrows:
+                del self._escrows[eid]
+                self.update_txn_context()
+                log.debug("Removed cancelled Escrow: %s", eid)
 
     async def _cascade_expire_account(
         self, account: str, failed_seq: int, exclude_hash: str | None = None, fetch_seq_from_ledger: bool = False
@@ -1519,7 +1706,8 @@ class Workload:
                 _reject_fn = tx_intentionally_rejected if p.expect_rejection else tx_rejected
                 if p.transaction_type:
                     _reject_fn(
-                        p.transaction_type, er,
+                        p.transaction_type,
+                        er,
                         details={"hash": p.tx_hash, "account": p.account, "sequence": p.sequence, "tx_json": p.tx_json},
                     )
                 self.pending[p.tx_hash] = p
@@ -1584,7 +1772,8 @@ class Workload:
                 _reject_fn = tx_intentionally_rejected if p.expect_rejection else tx_rejected
                 if p.transaction_type:
                     _reject_fn(
-                        p.transaction_type, er,
+                        p.transaction_type,
+                        er,
                         details={"hash": p.tx_hash, "account": p.account, "sequence": p.sequence, "tx_json": p.tx_json},
                     )
                 self.pending[p.tx_hash] = p
@@ -1602,7 +1791,9 @@ class Workload:
                 elif er == "temDISABLED":
                     log.debug(f"REJECTED: {er} - {p.transaction_type} from {p.account} (amendment not enabled)")
                 else:
-                    log.warning(f"REJECTED: {er} - {p.transaction_type} from {p.account} seq={p.sequence} hash={p.tx_hash}")
+                    log.warning(
+                        f"REJECTED: {er} - {p.transaction_type} from {p.account} seq={p.sequence} hash={p.tx_hash}"
+                    )
 
                 if p.transaction_type == C.TxType.BATCH and p.account:
                     try:
@@ -1611,9 +1802,7 @@ class Workload:
                         async with rec_acct.lock:
                             old_seq = rec_acct.next_seq
                             rec_acct.next_seq = ai.result["account_data"]["Sequence"]
-                            log.debug(
-                                f"Batch rejected: synced {p.account} sequence {old_seq} -> {rec_acct.next_seq}"
-                            )
+                            log.debug(f"Batch rejected: synced {p.account} sequence {old_seq} -> {rec_acct.next_seq}")
                     except Exception as e:
                         log.warning(f"Failed to sync sequence after Batch rejection: {e}")
 

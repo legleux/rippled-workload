@@ -9,9 +9,11 @@ import time
 from dataclasses import replace
 from time import perf_counter
 
+from xrpl.models import Transaction
+from xrpl.wallet import Wallet
+
 import workload.constants as C
 from workload.constants import TxIntent
-from workload.randoms import random
 from workload.txn_factory import build_txn_dict, compose_submission_set, txn_model_cls
 from workload.txn_factory.taint import taint_txn
 from workload.workload_core import PendingTx, Workload
@@ -34,20 +36,21 @@ def _log_task_exception(task: asyncio.Task) -> None:
 
 # ── Core loop ────────────────────────────────────────────────────────────────
 
+
 async def continuous_workload(wl: Workload) -> None:
-    """Continuously build and submit transactions as fast as possible.
+    """Continuously build and submit transactions, rate-limited by a token bucket.
 
-    No queue, no producer-consumer split. Single loop that:
-    1. Finds free accounts (no in-flight txns)
-    2. Builds + signs txns for up to `target_txns_per_ledger` accounts
-    3. Submits them all in parallel via TaskGroup
-    4. Immediately loops back — no waiting for ledger close
+    Single loop that:
+    1. Finds free accounts (pending_count < max_pending_per_account)
+    2. Splits into clean (0 pending, eligible for any intent) and partial pools
+    3. Applies token-bucket rate limiting if target_tps > 0
+    4. Builds + signs txns for up to submission_set_size accounts
+    5. Submits them all in parallel via TaskGroup
+    6. Loops back — sleeps only if rate-limited or no free accounts
 
-    The ledger close is the tick for *validation tracking*, not for submission.
-    Real-world users submit whenever they want; so do we.
-
-    Sequence safety: an account is only picked when pending_count == 0.
-    record_created() marks it pending at build time, preventing double-allocation.
+    Rate control: target_tps=0 means unlimited (firehose). Any positive value
+    uses a token bucket that accumulates tokens at target_tps/sec, capped at
+    2 seconds of burst.
     """
     global stats
 
@@ -55,7 +58,10 @@ async def continuous_workload(wl: Workload) -> None:
     stats["started_at"] = perf_counter()
 
     consecutive_empty = 0
-    last_account_create_ledger = 0
+
+    # Token bucket state
+    token_budget: float = 0.0
+    last_tick = perf_counter()
 
     # Fetch fee once, then rely on WS ledgerClosed updates (or re-fetch on telINSUF_FEE_P)
     if wl._cached_fee is None:
@@ -86,11 +92,28 @@ async def continuous_workload(wl: Workload) -> None:
                         pass
                 batch_fee = wl._cached_fee or 10
 
-                # Find free accounts
-                pending_counts = wl.get_pending_txn_counts_by_account()
-                free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
+                # ── Token bucket rate limiting ──────────────────────────
+                now = perf_counter()
+                elapsed = now - last_tick
+                last_tick = now
+                tps = wl.target_tps
 
+                if tps > 0:
+                    token_budget = min(token_budget + elapsed * tps, tps * 2)  # cap burst at 2s
+                    if token_budget < 1:
+                        await asyncio.sleep(0.05)
+                        continue
+
+                # ── Find free accounts ──────────────────────────────────
+                max_p = wl.max_pending_per_account
+                pending_counts = wl.get_pending_txn_counts_by_account()
+                # Clean accounts (0 pending) can receive any intent including INVALID
+                clean_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
+                # Partial accounts (>0 but below max) can only receive VALID intent
+                partial_accounts = [addr for addr in wl.wallets if 0 < pending_counts.get(addr, 0) < max_p]
+                free_accounts = clean_accounts + partial_accounts
                 n_free = len(free_accounts)
+
                 if n_free == 0:
                     consecutive_empty += 1
                     if consecutive_empty == 1 or consecutive_empty % 5 == 0:
@@ -104,16 +127,22 @@ async def continuous_workload(wl: Workload) -> None:
                     if consecutive_empty >= 3:
                         expired = wl.expire_past_lls(batch_ledger)
                         if expired:
-                            log.warning("workload: self-heal expired %d stale txns at ledger %d", expired, batch_ledger)
+                            log.warning(
+                                "workload: self-heal expired %d stale txns at ledger %d",
+                                expired,
+                                batch_ledger,
+                            )
                             pending_counts = wl.get_pending_txn_counts_by_account()
-                            free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
+                            clean_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
+                            partial_accounts = [addr for addr in wl.wallets if 0 < pending_counts.get(addr, 0) < max_p]
+                            free_accounts = clean_accounts + partial_accounts
                             n_free = len(free_accounts)
                             if n_free > 0:
                                 log.info("workload: self-heal freed %d accounts", n_free)
                         elif consecutive_empty % 10 == 0:
                             diag = wl.diagnostics_snapshot()
                             log.warning(
-                                "workload: STUCK for %d iterations — blocked=%d free=%d pending_by_state=%s oldest_age=%d",
+                                "workload: STUCK %d iterations — blocked=%d free=%d states=%s age=%d",
                                 consecutive_empty,
                                 diag["blocked_accounts"],
                                 diag["free_accounts"],
@@ -126,45 +155,31 @@ async def continuous_workload(wl: Workload) -> None:
                 else:
                     if consecutive_empty >= 3:
                         log.info(
-                            "workload: recovered — %d free accounts after %d empty iterations", n_free, consecutive_empty
+                            "workload: recovered — %d free accounts after %d empty iterations",
+                            n_free,
+                            consecutive_empty,
                         )
                     consecutive_empty = 0
 
-                # Occasionally grow the account pool (once per ledger)
-                current_ledger = wl.latest_ledger_index
-                if (
-                    current_ledger > last_account_create_ledger
-                    and random() < 0.50
-                    and "Payment" not in wl.disabled_txn_types
-                ):
-                    funding_pending = pending_counts.get(wl.funding_wallet.address, 0)
-                    if funding_pending == 0:
-                        try:
-                            default_balance = wl.config["users"]["default_balance"]
-                            large_balance = str(int(default_balance) * 10)
-                            await wl.create_account(initial_xrp_drops=large_balance)
-                            stats["submitted"] += 1
-                            last_account_create_ledger = current_ledger
-                        except Exception as e:
-                            log.debug("Failed to create new account: %s", e)
-                            stats["failed"] += 1
+                # ── Determine target for this iteration ─────────────────
+                if tps > 0:
+                    target = min(int(token_budget), wl.submission_set_size, n_free)
+                else:
+                    target = min(wl.submission_set_size, n_free)
 
-                # Build + sign txns — type-first composition
-                # TODO: Parallelize this loop — alloc_seq RPCs and signing are sequential.
-                # With 400 accounts, build phase takes 2-3s. Use TaskGroup for alloc_seq,
-                # then sign concurrently. This is the main throughput bottleneck.
-                target = wl.target_txns_per_ledger
+                # Two-phase build: compose dicts (sync), then parallel alloc_seq + sign
                 build_start = perf_counter()
 
                 # Type-first: roll types, assign eligible accounts, determine intent
-                assignments = compose_submission_set(free_accounts, target, wl.ctx, wl.config)
+                assignments = compose_submission_set(
+                    free_accounts, clean_accounts, target, wl.ctx, wl.config
+                )
 
-                submission_set: list[PendingTx] = []
+                # Phase 1: Build txn dicts (sync, no RPC)
+                built: list[tuple[Wallet, Transaction, bool]] = []
                 for addr, txn_type, intent in assignments:
                     wallet = wl.wallets[addr]
-
                     is_invalid = intent == TxIntent.INVALID
-
                     try:
                         ctx = replace(wl.ctx, forced_account=wallet)
                         composed = build_txn_dict(txn_type, ctx, intent)
@@ -173,31 +188,51 @@ async def continuous_workload(wl: Workload) -> None:
                         if is_invalid:
                             composed = taint_txn(composed, txn_type)
                         txn = txn_model_cls(txn_type).from_xrpl(composed)
+                        built.append((wallet, txn, is_invalid))
                     except Exception as e:
                         log.debug("build %s/%s: %s", addr, txn_type, e)
-                        continue
 
+                if not built:
+                    await asyncio.sleep(0)
+                    continue
+
+                # Phase 2: Parallel alloc_seq + sign (concurrent RPC + crypto)
+                async def _alloc_and_sign(
+                    w: Wallet,
+                    t: Transaction,
+                    inv: bool,
+                    _fee: int = batch_fee,
+                    _ledger: int = batch_ledger,
+                    _lls: int = batch_lls,
+                ) -> PendingTx | None:
                     try:
-                        seq = await wl.alloc_seq(wallet.address)
+                        seq = await wl.alloc_seq(w.address)
                     except Exception as e:
-                        log.debug("alloc_seq %s: %s", addr, e)
-                        continue
-
+                        log.debug("alloc_seq %s: %s", w.address, e)
+                        return None
                     try:
-                        pending = await wl.build_sign_and_track(
-                            txn,
-                            wallet,
-                            fee_drops=batch_fee,
-                            created_ledger=batch_ledger,
-                            last_ledger_seq=batch_lls,
+                        return await wl.build_sign_and_track(
+                            t,
+                            w,
+                            fee_drops=_fee,
+                            created_ledger=_ledger,
+                            last_ledger_seq=_lls,
                             preallocated_seq=seq,
-                            expect_rejection=is_invalid,
+                            expect_rejection=inv,
                         )
-                        submission_set.append(pending)
                     except Exception as e:
-                        await wl.release_seq(wallet.address, seq)
-                        log.debug("sign %s/%s: %s", addr, txn_type, e)
-                        continue
+                        await wl.release_seq(w.address, seq)
+                        log.debug("sign %s: %s", w.address, e)
+                        return None
+
+                async with asyncio.TaskGroup() as tg:
+                    sign_tasks = [
+                        tg.create_task(_alloc_and_sign(w, t, inv))
+                        for w, t, inv in built
+                    ]
+                submission_set: list[PendingTx] = [
+                    t.result() for t in sign_tasks if t.result() is not None
+                ]
 
                 if not submission_set:
                     await asyncio.sleep(0)
@@ -206,7 +241,10 @@ async def continuous_workload(wl: Workload) -> None:
                 build_ms = (perf_counter() - build_start) * 1000
                 log.info(
                     "Submission set: %d txns, ledger=%d, wallets=%d, build=%.0fms",
-                    len(submission_set), batch_ledger, len(wl.wallets), build_ms,
+                    len(submission_set),
+                    batch_ledger,
+                    len(wl.wallets),
+                    build_ms,
                 )
 
                 # Submit all in parallel — no waiting, fire immediately
@@ -243,6 +281,10 @@ async def continuous_workload(wl: Workload) -> None:
                         log.error("Submit error: %s: %s", type(exc).__name__, exc)
                     stats["failed"] += len(submission_set)
 
+                # Deduct from token bucket after submission
+                if tps > 0:
+                    token_budget -= len(submission_set)
+
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -257,6 +299,7 @@ async def continuous_workload(wl: Workload) -> None:
 
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
+
 
 async def start(wl: Workload) -> dict:
     """Start continuous random transaction workload."""
@@ -276,7 +319,7 @@ async def start(wl: Workload) -> dict:
 
     return {
         "status": "started",
-        "message": "Continuous workload started - submitting random transactions at expected_ledger_size + 1 per ledger (max 200)",
+        "message": "Continuous workload started",
     }
 
 

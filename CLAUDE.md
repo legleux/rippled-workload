@@ -91,7 +91,9 @@ txn_factory/
 │   ├── vault.py    # Vault*
 │   ├── credential.py # Credential*, DelegateSet
 │   ├── domain.py   # PermissionedDomain*
-│   └── batch.py    # Batch, TicketCreate
+│   ├── batch.py    # Batch, TicketCreate, TicketUse
+│   ├── check.py    # CheckCreate, CheckCash, CheckCancel
+│   └── escrow.py   # EscrowCreate, EscrowFinish, EscrowCancel
 ```
 
 Each builder module exports:
@@ -102,12 +104,12 @@ Each builder module exports:
 **Submission set composition** (`compose_submission_set()` in registry.py):
 1. Type-first: rolls N types from weighted config distribution
 2. Per-type intent: rolls VALID/INVALID per txn using configurable ratio
-3. Account matching: finds eligible accounts for each (type, intent) pair
+3. Account matching: INVALID intent → clean accounts only (0 pending); VALID → any free account
 4. Tainting: applies `taint_txn()` to INVALID-intent txns before model construction
 
 **Note**: Groups of transactions submitted together are called **submission sets**, not "batches" (overloaded with the Batch transaction type).
 
-Supported transaction types (31): Payment, OfferCreate, OfferCancel, TrustSet, AccountSet, AMMCreate, AMMDeposit, AMMWithdraw, NFTokenMint, NFTokenBurn, NFTokenCreateOffer/CancelOffer/AcceptOffer, MPTokenIssuanceCreate/Set/Authorize/Destroy, TicketCreate, Batch, DelegateSet, CredentialCreate/Accept/Delete, PermissionedDomainSet/Delete, VaultCreate/Set/Delete/Deposit/Withdraw/Clawback
+Supported transaction types (38): Payment, OfferCreate, OfferCancel, TrustSet, AccountSet, AMMCreate, AMMDeposit, AMMWithdraw, NFTokenMint, NFTokenBurn, NFTokenCreateOffer/CancelOffer/AcceptOffer, MPTokenIssuanceCreate/Set/Authorize/Destroy, TicketCreate, TicketUse, Batch, DelegateSet, CredentialCreate/Accept/Delete, PermissionedDomainSet/Delete, VaultCreate/Set/Delete/Deposit/Withdraw/Clawback, CheckCreate/Cash/Cancel, EscrowCreate/Finish/Cancel
 
 ### Validation Tracking
 
@@ -122,7 +124,7 @@ Both paths deduplicate by `(tx_hash, ledger_index)`. See `workload/ws-architectu
 
 ### Submission Architecture
 
-Single unified loop in `continuous_workload()` (workload_runner.py): compose submission set → build → taint (if invalid) → sign → submit → repeat. No queue, no producer-consumer split. Submissions are not gated on ledger close — txns go to rippled's internal queue immediately. `target_txns_per_ledger` controls submission set size per iteration. Self-healing via `expire_past_lls()` when all accounts are blocked.
+Single unified loop in `continuous_workload()` (workload_runner.py). Two-phase build: sync compose, then parallel alloc_seq + sign via TaskGroup. Token-bucket rate limiter (`target_tps`, 0=unlimited). No queue, no producer-consumer split. Submissions are not gated on ledger close — txns go to rippled's internal queue immediately. `submission_set_size` caps txns built per iteration; `max_pending_per_account` controls how many in-flight txns an account can have (default 1). Self-healing via `expire_past_lls()` when all accounts are blocked. Account sequences are pre-warmed in parallel on startup via `warm_sequences()`.
 
 ### Intentionally Invalid Transactions
 
@@ -242,7 +244,9 @@ Key settings:
 - **users**: Number (1000) and balance
 - **amm**: Trading fee, pool counts (12 gateway + 100 user), deposit/withdraw amounts
 - **currencies**: 20 currency codes with rates
-- **transactions.disabled**: Transaction types to skip (currently: Batch, DelegateSet)
+- **transactions.disabled**: Transaction types to skip (currently: Batch)
+- **transactions.max_pending_per_account**: Max in-flight txns per account (default 1, runtime-adjustable)
+- **transactions.submission_set_size**: Max txns built per loop iteration (default 200)
 - **transactions.percentages**: Weight distribution (Payment=0.25, OfferCreate=0.20, AMMDeposit=0.15, AMMWithdraw=0.10)
 - **genesis**: Path to accounts.json, gateway/user counts, currencies per gateway
 - **rippled**: Connection settings (docker hostname, local IP, ports)
@@ -260,7 +264,7 @@ Key settings:
 
 ### Sequence Number Management
 
-Per-account sequence allocation uses asyncio locks to prevent double-spending. `alloc_seq()` fetches from ledger once, then increments locally. `release_seq()` rolls back on local errors (tel* codes).
+Per-account sequence allocation uses asyncio locks to prevent double-spending. `alloc_seq()` fetches from ledger once, then increments locally. `release_seq()` rolls back on local errors (tel* codes). `warm_sequences()` pre-fetches all account sequences in parallel on startup so the build loop doesn't pay RPC latency on first use.
 
 ### Transaction Hash Handling
 
@@ -293,16 +297,18 @@ AMM pools are tracked in `_amm_pool_registry` (list of pool dicts) with deduplic
 ### Adding a New Transaction Type
 
 1. Add to `TxType` enum in constants.py
-2. Create builder function in the appropriate `txn_factory/builders/*.py` module (sync, returns dict or None)
+2. Create builder function in the appropriate `txn_factory/builders/*.py` module (sync, returns dict or None). Respect `ctx.forced_account`.
 3. Add entry to the module's `BUILDERS` dict: `"MyNewTxn": (build_mynew_txn, MyNewTxn)`
 4. If per-account eligibility needed: add predicate to module's `ELIGIBILITY` dict
 5. Add tainting strategies to module's `TAINTERS` dict
-6. If stateful: add tracking in workload_core.py (`self._things`), wire into `configure_txn_context()`, add `TxnContext` field, add validation hook in `record_validated()`. Use `ledger_objects.py` for deterministic ID computation.
-7. Add global capability filter in `registry.py:global_eligible_types()` if needed
-8. Add tunable params in config.toml under `[transactions.mynew_txn]`, read via `ctx.config`
-9. Optionally add percentage weight in `[transactions.percentages]`
-10. Add POST endpoint in app.py and test_composer script
-11. If creates a ledger object: add to owner_reserve fee path in `build_sign_and_track()`
+6. Register the builder module in both `registry.py` (`_MODULES` list) AND `taint.py` (module list)
+7. If stateful: add `TxnContext` field, tracking dict in `Workload.__init__`, wire into `configure_txn_context()`, add validation hooks in `record_validated()`. Use `ledger_objects.py` for deterministic ID computation.
+8. Add global capability filter in `registry.py:global_eligible_types()` if needed
+9. Add tunable params in config.toml under `[transactions.mynew_txn]`, read via `ctx.config`
+10. Optionally add percentage weight in `[transactions.percentages]`
+11. Add POST endpoint in app.py and test_composer script
+12. Add to dashboard: `TXN_TYPE_GROUPS` and `TXN_COLORS` in app.py
+13. If creates a ledger object: add to owner_reserve fee path in `build_sign_and_track()`
 
 ### Working with Accounts
 

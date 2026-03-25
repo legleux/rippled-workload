@@ -24,7 +24,7 @@ from xrpl.transaction import transaction_json_to_binary_codec_form
 from xrpl.wallet import Wallet
 
 from workload.constants import TxIntent
-from workload.txn_factory.builders import batch, credential, dex, domain, mptoken, nft, payment, vault
+from workload.txn_factory.builders import batch, check, credential, dex, domain, escrow, mptoken, nft, payment, vault
 from workload.txn_factory.context import TxnContext, deep_update
 
 log = logging.getLogger("workload.txn")
@@ -38,7 +38,7 @@ BuilderFn = Callable[[TxnContext, TxIntent], dict | None]
 _BUILDERS: dict[str, tuple[BuilderFn, type[Transaction]]] = {}
 _ELIGIBILITY: dict[str, Callable[[Wallet, TxnContext], bool]] = {}
 
-_MODULES = [payment, dex, nft, mptoken, vault, credential, domain, batch]
+_MODULES = [payment, dex, nft, mptoken, vault, credential, domain, batch, check, escrow]
 
 for _mod in _MODULES:
     _BUILDERS.update(_mod.BUILDERS)
@@ -101,6 +101,15 @@ def global_eligible_types(ctx: TxnContext) -> list[str]:
         vault_ops = {"VaultSet", "VaultDelete", "VaultDeposit", "VaultWithdraw", "VaultClawback"}
         candidates = [t for t in candidates if t not in vault_ops]
 
+    if not ctx.tickets:
+        candidates = [t for t in candidates if t != "TicketUse"]
+
+    if not ctx.checks:
+        candidates = [t for t in candidates if t not in {"CheckCash", "CheckCancel"}]
+
+    if not ctx.escrows:
+        candidates = [t for t in candidates if t not in {"EscrowFinish", "EscrowCancel"}]
+
     # Batch uses async builder with multi-seq allocation — not supported in sync path
     candidates = [t for t in candidates if t != "Batch"]
 
@@ -131,6 +140,7 @@ def _compute_weights(eligible_types: list[str], config: dict) -> list[float]:
 
 def compose_submission_set(
     free_accounts: list[str],
+    clean_accounts: list[str],
     target: int,
     ctx: TxnContext,
     config: dict,
@@ -140,7 +150,13 @@ def compose_submission_set(
     1. Determine set size = min(target, len(free_accounts))
     2. Roll N types from weighted distribution (global filters applied)
     3. For each type, roll intent using per-type invalid ratio
-    4. Match accounts: INVALID → any free account; VALID → eligible account
+    4. Match accounts: INVALID → clean account only (0 pending); VALID → any free account
+
+    Args:
+        free_accounts: All accounts below max_pending threshold (clean + partial).
+        clean_accounts: Accounts with 0 pending txns. Only these can receive
+            INVALID-intent txns — tainted txns must not queue behind in-flight
+            txns or they cause tefPAST_SEQ cascades.
 
     Returns list of (account_address, txn_type, intent) assignments.
     """
@@ -162,6 +178,8 @@ def compose_submission_set(
 
     available = list(free_accounts)
     shuffle(available)
+    # Clean pool for INVALID intent — accounts with 0 pending txns only
+    clean_set = set(clean_accounts)
     assignments: list[tuple[str, str, TxIntent]] = []
 
     for txn_type in rolled_types:
@@ -172,8 +190,16 @@ def compose_submission_set(
         intent = TxIntent.INVALID if random() < invalid_ratio else TxIntent.VALID
 
         if intent == TxIntent.INVALID:
-            # Any account works for invalid txns — per-account filters skipped
-            assignments.append((available.pop(), txn_type, intent))
+            # Only clean accounts (0 pending) for invalid txns — prevents tefPAST_SEQ cascade
+            picked = None
+            for i, addr in enumerate(available):
+                if addr in clean_set:
+                    picked = available.pop(i)
+                    clean_set.discard(picked)
+                    break
+            if picked:
+                assignments.append((picked, txn_type, intent))
+            # If no clean account available, skip this invalid roll (don't downgrade to valid)
         else:
             # Find account eligible for this type
             for i, addr in enumerate(available):

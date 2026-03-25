@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 
 @dataclass(slots=True)
 class LedgerClose:
+
     """Data from a single ledger close event."""
 
     index: int
@@ -63,8 +64,8 @@ async def listen_ledgers(ws_url: str, *, reconnect: bool = True) -> AsyncIterato
                         {
                             "command": "subscribe",
                             "streams": ["ledger"],
-                        }
-                    )
+                        },
+                    ),
                 )
                 resp = json.loads(await ws.recv())
                 if "error" in resp:
@@ -90,6 +91,7 @@ async def listen_ledgers(ws_url: str, *, reconnect: bool = True) -> AsyncIterato
 
 @dataclass
 class CadenceStats:
+
     """Rolling statistics for ledger cadence monitoring."""
 
     window: deque[int] = field(default_factory=lambda: deque(maxlen=50))

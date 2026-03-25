@@ -71,6 +71,8 @@ class TxnContext:
     nfts: dict[str, str] | None = None
     offers: dict[str, dict] | None = None
     tickets: dict[str, set[int]] | None = None
+    checks: dict[str, dict] | None = None  # {check_id: {sender, destination, send_max}}
+    escrows: dict[str, dict] | None = None  # {escrow_id: {owner, sequence, destination, finish_after, cancel_after}}
     balances: dict[str, dict[str | tuple[str, str], float]] | None = None
     disabled_types: set[str] | None = None
     forced_account: Wallet | None = None

@@ -4,7 +4,6 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-import time
 
 import httpx
 from fastapi import APIRouter, FastAPI, HTTPException
@@ -136,9 +135,7 @@ async def wait_for_ledgers(url: str, count: int, timeout: float = 120.0, retry_d
                     "========================================================"
                 )
                 raise SystemExit(1)
-            log.info(
-                f"WebSocket not ready (attempt {attempt}): {e.__class__.__name__} - retrying in {retry_delay}s..."
-            )
+            log.info(f"WebSocket not ready (attempt {attempt}): {e.__class__.__name__} - retrying in {retry_delay}s...")
             await asyncio.sleep(retry_delay)
 
 
@@ -270,6 +267,10 @@ async def lifespan(app: FastAPI):
         )
         log.info("[4/4] Initialization complete at ledger %d. Starting workload.", init_ledger)
         await asyncio.sleep(5)
+
+        # Pre-warm account sequences so the first build iteration doesn't pay RPC latency
+        await app.state.workload.warm_sequences(list(app.state.workload.wallets.keys()))
+
         await workload_runner.start(app.state.workload)
         try:
             yield
@@ -726,7 +727,7 @@ async def state_dashboard():
                 border-radius: 4px; padding: 4px 8px;
             }}
             .stream-filters label.checked {{
-                border-color: #58a6ff; color: #58a6ff;
+                /* colors set via inline styles from TXN_COLORS */
             }}
             .stream-filters input {{ display: none; }}
             #ws-output {{
@@ -745,63 +746,7 @@ async def state_dashboard():
             .ws-line.peer {{ color: #f0883e; }}
             .ws-line.error {{ color: #f85149; }}
             .ws-line.info {{ color: #8b949e; font-style: italic; }}
-            .ws-line.txn-Payment {{ color: #3fb950; }}
-            .ws-line.txn-OfferCreate {{ color: #58a6ff; }}
-            .ws-line.txn-OfferCancel {{ color: #6cb6ff; }}
-            .ws-line.txn-TrustSet {{ color: #d29922; }}
-            .ws-line.txn-AccountSet {{ color: #8b949e; }}
-            .ws-line.txn-NFTokenMint {{ color: #bc8cff; }}
-            .ws-line.txn-NFTokenBurn {{ color: #986ee2; }}
-            .ws-line.txn-NFTokenCreateOffer {{ color: #a371f7; }}
-            .ws-line.txn-NFTokenCancelOffer {{ color: #8957e5; }}
-            .ws-line.txn-NFTokenAcceptOffer {{ color: #c297ff; }}
-            .ws-line.txn-TicketCreate {{ color: #7ee787; }}
-            .ws-line.txn-MPTokenIssuanceCreate {{ color: #f0883e; }}
-            .ws-line.txn-MPTokenIssuanceSet {{ color: #d4762c; }}
-            .ws-line.txn-MPTokenAuthorize {{ color: #e09b4f; }}
-            .ws-line.txn-MPTokenIssuanceDestroy {{ color: #c45e1a; }}
-            .ws-line.txn-AMMCreate {{ color: #f778ba; }}
-            .ws-line.txn-AMMDeposit {{ color: #da70d6; }}
-            .ws-line.txn-AMMWithdraw {{ color: #b8527a; }}
-            .ws-line.txn-Batch {{ color: #79c0ff; }}
-            .stream-filters label.txn-Payment {{ border-color: #3fb95066; }}
-            .stream-filters label.txn-Payment.checked {{ border-color: #3fb950; color: #3fb950; }}
-            .stream-filters label.txn-OfferCreate {{ border-color: #58a6ff66; }}
-            .stream-filters label.txn-OfferCreate.checked {{ border-color: #58a6ff; color: #58a6ff; }}
-            .stream-filters label.txn-OfferCancel {{ border-color: #6cb6ff66; }}
-            .stream-filters label.txn-OfferCancel.checked {{ border-color: #6cb6ff; color: #6cb6ff; }}
-            .stream-filters label.txn-TrustSet {{ border-color: #d2992266; }}
-            .stream-filters label.txn-TrustSet.checked {{ border-color: #d29922; color: #d29922; }}
-            .stream-filters label.txn-AccountSet {{ border-color: #8b949e66; }}
-            .stream-filters label.txn-AccountSet.checked {{ border-color: #8b949e; color: #8b949e; }}
-            .stream-filters label.txn-NFTokenMint {{ border-color: #bc8cff66; }}
-            .stream-filters label.txn-NFTokenMint.checked {{ border-color: #bc8cff; color: #bc8cff; }}
-            .stream-filters label.txn-NFTokenBurn {{ border-color: #986ee266; }}
-            .stream-filters label.txn-NFTokenBurn.checked {{ border-color: #986ee2; color: #986ee2; }}
-            .stream-filters label.txn-NFTokenCreateOffer {{ border-color: #a371f766; }}
-            .stream-filters label.txn-NFTokenCreateOffer.checked {{ border-color: #a371f7; color: #a371f7; }}
-            .stream-filters label.txn-NFTokenCancelOffer {{ border-color: #8957e566; }}
-            .stream-filters label.txn-NFTokenCancelOffer.checked {{ border-color: #8957e5; color: #8957e5; }}
-            .stream-filters label.txn-NFTokenAcceptOffer {{ border-color: #c297ff66; }}
-            .stream-filters label.txn-NFTokenAcceptOffer.checked {{ border-color: #c297ff; color: #c297ff; }}
-            .stream-filters label.txn-TicketCreate {{ border-color: #7ee78766; }}
-            .stream-filters label.txn-TicketCreate.checked {{ border-color: #7ee787; color: #7ee787; }}
-            .stream-filters label.txn-MPTokenIssuanceCreate {{ border-color: #f0883e66; }}
-            .stream-filters label.txn-MPTokenIssuanceCreate.checked {{ border-color: #f0883e; color: #f0883e; }}
-            .stream-filters label.txn-MPTokenIssuanceSet {{ border-color: #d4762c66; }}
-            .stream-filters label.txn-MPTokenIssuanceSet.checked {{ border-color: #d4762c; color: #d4762c; }}
-            .stream-filters label.txn-MPTokenAuthorize {{ border-color: #e09b4f66; }}
-            .stream-filters label.txn-MPTokenAuthorize.checked {{ border-color: #e09b4f; color: #e09b4f; }}
-            .stream-filters label.txn-MPTokenIssuanceDestroy {{ border-color: #c45e1a66; }}
-            .stream-filters label.txn-MPTokenIssuanceDestroy.checked {{ border-color: #c45e1a; color: #c45e1a; }}
-            .stream-filters label.txn-AMMCreate {{ border-color: #f778ba66; }}
-            .stream-filters label.txn-AMMCreate.checked {{ border-color: #f778ba; color: #f778ba; }}
-            .stream-filters label.txn-AMMDeposit {{ border-color: #da70d666; }}
-            .stream-filters label.txn-AMMDeposit.checked {{ border-color: #da70d6; color: #da70d6; }}
-            .stream-filters label.txn-AMMWithdraw {{ border-color: #b8527a66; }}
-            .stream-filters label.txn-AMMWithdraw.checked {{ border-color: #b8527a; color: #b8527a; }}
-            .stream-filters label.txn-Batch {{ border-color: #79c0ff66; }}
-            .stream-filters label.txn-Batch.checked {{ border-color: #79c0ff; color: #79c0ff; }}
+            /* Per-type colors driven by TXN_COLORS JS object via inline styles */
             /* Grouped txn type layout */
             .txn-type-groups {{ display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }}
             .txn-type-group {{ display: flex; flex-direction: column; gap: 4px; }}
@@ -845,13 +790,21 @@ async def state_dashboard():
                 <h2>Transaction Control</h2>
                 <div style="display:flex;align-items:center;gap:20px;margin-bottom:12px;flex-wrap:wrap">
                     <div class="fill-control" style="flex:1;min-width:280px">
-                        <label>Target txns/ledger: <span id="target-txns-value" style="font-weight:700;color:#58a6ff">0</span></label>
-                        <input type="range" id="target-txns-input" min="0" max="1000" step="10" value="100"
+                        <label>Target TPS: <span id="target-tps-value" style="font-weight:700;color:#58a6ff">0</span> <span style="color:#8b949e;font-size:11px">(0 = unlimited)</span></label>
+                        <input type="range" id="target-tps-input" min="0" max="500" step="5" value="0"
                                style="width:100%;accent-color:#58a6ff;cursor:pointer"
-                               oninput="document.getElementById('target-txns-value').textContent=this.value"
-                               onchange="fetch('/workload/target-txns',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{target_txns:parseInt(this.value)}})}})" >
+                               oninput="document.getElementById('target-tps-value').textContent=this.value"
+                               onchange="fetch('/workload/target-tps',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{target_tps:parseFloat(this.value)}})}})">
+                    </div>
+                    <div class="fill-control" style="flex:1;min-width:280px">
+                        <label>Max pending/account: <span id="max-pending-value" style="font-weight:700;color:#d29922">1</span></label>
+                        <input type="range" id="max-pending-input" min="1" max="10" step="1" value="1"
+                               style="width:100%;accent-color:#d29922;cursor:pointer"
+                               oninput="document.getElementById('max-pending-value').textContent=this.value"
+                               onchange="fetch('/workload/max-pending',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{max_pending:parseInt(this.value)}})}})">
                     </div>
                 </div>
+                <div id="effective-rate" style="color:#8b949e;font-size:12px;margin-bottom:12px"></div>
                 <div class="txn-control-grid" id="txn-control-pane"></div>
             </div>
 
@@ -931,23 +884,35 @@ async def state_dashboard():
 
         // Shared txn type definitions
         const TXN_TYPE_GROUPS = [
-            {{label: 'Core', types: ['Payment','TrustSet','AccountSet','TicketCreate']}},
+            {{label: 'Core', types: ['Payment','TrustSet','AccountSet','TicketCreate','TicketUse']}},
             {{label: 'DEX', types: ['OfferCreate','OfferCancel']}},
             {{label: 'AMM', types: ['AMMCreate','AMMDeposit','AMMWithdraw']}},
             {{label: 'NFT', types: ['NFTokenMint','NFTokenBurn','NFTokenCreateOffer','NFTokenCancelOffer','NFTokenAcceptOffer']}},
             {{label: 'MPT', types: ['MPTokenIssuanceCreate','MPTokenIssuanceSet','MPTokenAuthorize','MPTokenIssuanceDestroy']}},
-            {{label: 'Other', types: ['Batch']}},
+            {{label: 'Check', types: ['CheckCreate','CheckCash','CheckCancel']}},
+            {{label: 'Escrow', types: ['EscrowCreate','EscrowFinish','EscrowCancel']}},
+            {{label: 'Credential', types: ['CredentialCreate','CredentialAccept','CredentialDelete']}},
+            {{label: 'Domain', types: ['PermissionedDomainSet','PermissionedDomainDelete']}},
+            {{label: 'Vault', types: ['VaultCreate','VaultSet','VaultDelete','VaultDeposit','VaultWithdraw','VaultClawback']}},
+            {{label: 'Other', types: ['DelegateSet']}},
         ];
         const TXN_TYPES = TXN_TYPE_GROUPS.flatMap(g => g.types);
         const TXN_COLORS = {{
-            Payment:'#3fb950', TrustSet:'#d29922', AccountSet:'#8b949e', TicketCreate:'#7ee787',
+            Payment:'#3fb950', TrustSet:'#d29922', AccountSet:'#8b949e',
+            TicketCreate:'#7ee787', TicketUse:'#56d364',
             OfferCreate:'#58a6ff', OfferCancel:'#6cb6ff',
             AMMCreate:'#f778ba', AMMDeposit:'#da70d6', AMMWithdraw:'#b8527a',
             NFTokenMint:'#bc8cff', NFTokenBurn:'#986ee2', NFTokenCreateOffer:'#a371f7',
             NFTokenCancelOffer:'#8957e5', NFTokenAcceptOffer:'#c297ff',
             MPTokenIssuanceCreate:'#f0883e', MPTokenIssuanceSet:'#d4762c',
             MPTokenAuthorize:'#e09b4f', MPTokenIssuanceDestroy:'#c45e1a',
-            Batch:'#79c0ff',
+            CheckCreate:'#79c0ff', CheckCash:'#58a6ff', CheckCancel:'#388bfd',
+            EscrowCreate:'#f0883e', EscrowFinish:'#d29922', EscrowCancel:'#c45e1a',
+            CredentialCreate:'#a5d6ff', CredentialAccept:'#79c0ff', CredentialDelete:'#388bfd',
+            PermissionedDomainSet:'#d2a8ff', PermissionedDomainDelete:'#a371f7',
+            VaultCreate:'#7ee787', VaultSet:'#56d364', VaultDelete:'#3fb950',
+            VaultDeposit:'#2ea043', VaultWithdraw:'#238636', VaultClawback:'#196c2e',
+            DelegateSet:'#8b949e',
         }};
 
         // WS terminal display filters (client-side only)
@@ -962,14 +927,19 @@ async def state_dashboard():
             groupDiv.appendChild(groupLabel);
             group.types.forEach(tt => {{
                 const lbl = document.createElement('label');
-                lbl.className = 'checked txn-' + tt;
+                const color = TXN_COLORS[tt] || '#8b949e';
+                lbl.className = 'checked';
+                lbl.style.borderColor = color;
+                lbl.style.color = color;
                 const cb = document.createElement('input');
                 cb.type = 'checkbox';
                 cb.checked = true;
                 cb.onchange = function() {{
                     if (this.checked) activeTxnTypes.add(tt);
                     else activeTxnTypes.delete(tt);
-                    lbl.className = (this.checked ? 'checked ' : '') + 'txn-' + tt;
+                    lbl.className = this.checked ? 'checked' : '';
+                    lbl.style.borderColor = this.checked ? color : '#30363d';
+                    lbl.style.color = this.checked ? color : '#8b949e';
                 }};
                 lbl.appendChild(cb);
                 lbl.appendChild(document.createTextNode(tt));
@@ -1059,6 +1029,10 @@ async def state_dashboard():
             const out = document.getElementById('ws-output');
             const line = document.createElement('div');
             line.className = 'ws-line ' + (cls || '');
+            if (cls && cls.startsWith('txn-')) {{
+                const tt = cls.slice(4);
+                if (TXN_COLORS[tt]) line.style.color = TXN_COLORS[tt];
+            }}
             const ts = new Date().toLocaleTimeString('en-US', {{hour12:false}});
             line.textContent = ts + '  ' + text;
             out.appendChild(line);
@@ -1182,10 +1156,10 @@ async def state_dashboard():
 
         async function refreshStats() {{
             try {{
-                const [statsRes, feeRes, ttRes, failedRes] = await Promise.all([
+                const [statsRes, feeRes, rateRes, failedRes] = await Promise.all([
                     fetch('/state/summary').then(r=>r.json()),
                     fetch('/state/fees').then(r=>r.json()),
-                    fetch('/workload/target-txns').then(r=>r.json()),
+                    fetch('/workload/rate-controls').then(r=>r.json()),
                     fetch('/state/failed').then(r=>r.json()),
                 ]);
                 const s = statsRes;
@@ -1204,12 +1178,24 @@ async def state_dashboard():
                     'Live monitoring &bull; Ledger ' + f.ledger_current_index + ' @ {hostname}' +
                     ' &bull; ' + fmt(s.ledgers_elapsed) + ' ledgers (' + fmtUptime(s.uptime_seconds) + ')';
 
-                // Target txns slider (don't overwrite while user is dragging)
-                const ttInput = document.getElementById('target-txns-input');
-                if (document.activeElement !== ttInput) {{
-                    ttInput.value = ttRes.target_txns_per_ledger;
+                // Rate control sliders (don't overwrite while user is dragging)
+                const tpsInput = document.getElementById('target-tps-input');
+                if (document.activeElement !== tpsInput) {{
+                    tpsInput.value = rateRes.target_tps;
                 }}
-                document.getElementById('target-txns-value').textContent = ttRes.target_txns_per_ledger;
+                document.getElementById('target-tps-value').textContent = rateRes.target_tps;
+
+                const mpInput = document.getElementById('max-pending-input');
+                if (document.activeElement !== mpInput) {{
+                    mpInput.value = rateRes.max_pending_per_account;
+                }}
+                document.getElementById('max-pending-value').textContent = rateRes.max_pending_per_account;
+
+                // Effective rate display
+                const actualTpl = s.ledgers_elapsed > 0 ? (validated / s.ledgers_elapsed).toFixed(1) : '—';
+                const actualTps = s.uptime_seconds > 0 ? (validated / s.uptime_seconds).toFixed(1) : '—';
+                document.getElementById('effective-rate').innerHTML =
+                    'Actual: <b>' + actualTps + '</b> txns/sec &bull; <b>' + actualTpl + '</b> validated/ledger';
 
                 // Fee stats
                 const feeWarn = f.minimum_fee > f.base_fee ? 'warning' : 'success';
@@ -1749,47 +1735,59 @@ async def workload_status():
     return workload_runner.status(app.state.workload)
 
 
-class TargetTxnsReq(BaseModel):
-    target_txns: int
+class TargetTPSReq(BaseModel):
+    target_tps: float
 
 
-@r_workload.get("/target-txns")
-async def get_target_txns():
-    """Get current target transactions per ledger for continuous workload.
+class MaxPendingReq(BaseModel):
+    max_pending: int
 
-    Returns the hard cap on transactions submitted per ledger.
-    """
+
+@r_workload.get("/rate-controls")
+async def get_rate_controls():
+    """Get all rate control settings."""
+    wl = app.state.workload
     return {
-        "target_txns_per_ledger": app.state.workload.target_txns_per_ledger,
-        "description": "Hard cap on transactions per ledger",
+        "target_tps": wl.target_tps,
+        "max_pending_per_account": wl.max_pending_per_account,
+        "submission_set_size": wl.submission_set_size,
     }
 
 
-@r_workload.post("/target-txns")
-async def set_target_txns(req: TargetTxnsReq):
-    """Set target transactions per ledger for continuous workload.
+@r_workload.get("/target-tps")
+async def get_target_tps():
+    """Get current target TPS. 0 = unlimited."""
+    return {"target_tps": app.state.workload.target_tps}
 
-    Controls how many transactions to submit per ledger.
-    - Lower (10-20): Very conservative, smooth, low throughput
-    - Medium (30-50): Balanced approach
-    - Higher (80-100): Aggressive, high throughput
 
-    Takes effect immediately on next batch.
-    """
-    if req.target_txns < 0 or req.target_txns > 1000:
-        raise HTTPException(status_code=400, detail="target_txns must be between 0 and 1000")
+@r_workload.post("/target-tps")
+async def set_target_tps(req: TargetTPSReq):
+    """Set target transactions per second. 0 = unlimited (firehose)."""
+    if req.target_tps < 0 or req.target_tps > 10000:
+        raise HTTPException(status_code=400, detail="target_tps must be between 0 and 10000")
 
-    old_value = app.state.workload.target_txns_per_ledger
-    app.state.workload.target_txns_per_ledger = req.target_txns
+    old_value = app.state.workload.target_tps
+    app.state.workload.target_tps = req.target_tps
+    log.info(f"target_tps changed: {old_value} -> {req.target_tps}")
+    return {"old_value": old_value, "new_value": req.target_tps, "status": "updated"}
 
-    log.info(f"target_txns_per_ledger changed: {old_value} -> {app.state.workload.target_txns_per_ledger}")
 
-    return {
-        "old_value": old_value,
-        "new_value": app.state.workload.target_txns_per_ledger,
-        "status": "updated",
-        "note": "Change takes effect on next workload batch",
-    }
+@r_workload.get("/max-pending")
+async def get_max_pending():
+    """Get max pending transactions per account."""
+    return {"max_pending_per_account": app.state.workload.max_pending_per_account}
+
+
+@r_workload.post("/max-pending")
+async def set_max_pending(req: MaxPendingReq):
+    """Set max pending transactions per account. Range: 1-10."""
+    if req.max_pending < 1 or req.max_pending > 10:
+        raise HTTPException(status_code=400, detail="max_pending must be between 1 and 10")
+
+    old_value = app.state.workload.max_pending_per_account
+    app.state.workload.max_pending_per_account = req.max_pending
+    log.info(f"max_pending_per_account changed: {old_value} -> {req.max_pending}")
+    return {"old_value": old_value, "new_value": req.max_pending, "status": "updated"}
 
 
 @r_workload.get("/intent")
@@ -1834,7 +1832,10 @@ async def set_intent_ratio(req: IntentReq) -> dict:
 
     log.info(
         "Intent ratio changed: valid=%.2f->%.2f invalid=%.2f->%.2f",
-        old_valid, intent_cfg["valid"], old_invalid, intent_cfg["invalid"],
+        old_valid,
+        intent_cfg["valid"],
+        old_invalid,
+        intent_cfg["invalid"],
     )
     return {
         "old": {"valid": old_valid, "invalid": old_invalid},

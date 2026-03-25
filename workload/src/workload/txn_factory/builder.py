@@ -46,7 +46,6 @@ from xrpl.models.transactions import (
     VaultWithdraw,
 )
 from xrpl.models.transactions.delegate_set import GranularPermission
-from xrpl.models.transactions.deposit_preauth import Credential as XRPLCredential
 from xrpl.transaction import transaction_json_to_binary_codec_form
 from xrpl.wallet import Wallet
 
@@ -786,7 +785,7 @@ def _build_amm_withdraw(ctx: TxnContext, intent: TxIntent) -> dict | None:  # TO
     Only picks pools where src holds LP tokens — returns None if no eligible pool found.
     """
     lp_holders: set[str] = set()
-    for p in (ctx.amm_pool_registry or []):
+    for p in ctx.amm_pool_registry or []:
         for addr in p.get("lp_holders", [p.get("creator", "")]):
             lp_holders.add(addr)
     if not lp_holders:
@@ -1337,7 +1336,8 @@ def pick_eligible_txn_type(wallet: "Wallet", ctx: TxnContext, intent: TxIntent =
                 )
                 or (
                     has_balance_data
-                    and "issuer" in p["asset1"] and "issuer" in p["asset2"]
+                    and "issuer" in p["asset1"]
+                    and "issuer" in p["asset2"]
                     and (p["asset1"]["currency"], p["asset1"]["issuer"]) in account_currencies
                     and (p["asset2"]["currency"], p["asset2"]["issuer"]) in account_currencies
                 )
