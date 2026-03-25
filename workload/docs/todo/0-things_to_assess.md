@@ -1,3 +1,12 @@
+## Dashboard
+
+1. Node WebSocket Connection dropdown broken
+2. TPS slider doesn't work
+3. "Top Failures" list aging out? Also, clicking on "Top Failures" should bring you to "Full Failures" of similar form
+4. Put "Ledger Stream" _above_ "Transaction Control"
+5. Start Stop broken
+6. Full HTML/CSS assessment/critique/refactor
+
 find how many calls and assess if they are necessary
     1. sleep
     2. time methods we are using
