@@ -69,9 +69,16 @@ Top priority. The codebase works but has accumulated dead code, debug artifacts,
 - [x] ~~workload_started, ws.py typos, dashboard import guard, logging config~~
 
 ### Modularization
+- [x] ~~Split `app.py` (2,220 lines) into 14 files: routers/, bootstrap.py, schemas.py, dependencies.py~~ (2026-03-25)
+- [x] ~~Extract 27 validation hooks from `workload_core.py` to `validation_hooks.py`~~ (2026-03-26)
+- [x] ~~Remove dead `init_participants` + 4 helpers (~930 lines) from `workload_core.py`~~ (2026-03-26)
+- [x] ~~Add `/version` endpoint using `importlib.metadata` (matches generate_ledger pattern)~~ (2026-03-26)
+- [ ] **P0: Reimplement `init_participants`** — organic genesis init for non-pre-genesis environments. See `workload/docs/todo/reimplement_init_participants.md`
+- [ ] **Next refactor target: submission pipeline** — `submit_pending` (CC D/28, cognitive 51) + `build_sign_and_track` (CC C/15, cognitive 19)
 - [ ] Move `workload_running`, `workload_stop_event`, `workload_task`, `workload_stats` from module-level globals onto `app.state`
 - [ ] Extract constants: hardcoded WS port (6006)
 - [ ] `sqlite_store.by_type` always returns `{}` — implement or remove
+- [ ] Delete old `builder.py` (orphaned, no imports reference it)
 
 ### New Transaction Type Follow-ups
 - [ ] Enable DelegateSet when `PermissionDelegationV1_1` is marked `Supported::yes` in rippled (currently `no`)
@@ -146,7 +153,8 @@ Options to investigate for faster/more reliable finality signaling:
 Long-term goal: a single, reliable event source that tells us definitively "tx X is terminal" so accounts can be freed immediately without waiting for LLS expiry as a safety margin.
 
 ### Submission Throughput
-- [ ] Parallelize build loop (alloc_seq + signing) — sequential RPC + signing is the main bottleneck. TODO marker in app.py.
+- [x] ~~Parallelize build loop~~ DONE (2026-03-24)
+- [ ] Simplify `submit_pending` (CC D/28, cognitive 51) — worst remaining function in workload_core.py
 - [ ] Re-implement heartbeat — periodic signal that the workload is alive and submitting
 - [x] ~~Unified build-submit loop~~
 
@@ -217,7 +225,7 @@ Long-term goal: a single, reliable event source that tells us definitively "tx X
 - [ ] Document the transaction lifecycle end-to-end (context → pre-flight → in-flight → terminal state)
 - [ ] Explain zero-sum property: no txn can be lost
 - [ ] Document running on a pre-production feature branch (e.g. smart-escrow)
-- [ ] Deprecate (don't remove) the init_participants setup stages — genesis load is the default path now
+- [x] ~~Deprecate init_participants~~ — removed entirely (2026-03-26), design doc at `reimplement_init_participants.md`
 
 ---
 
