@@ -234,15 +234,12 @@ async def lifespan(app: FastAPI):
                     len(app.state.workload.amm.pools),
                 )
             else:
-                gw, u = cfg["gateways"], cfg["users"]
-                log.info("No persisted/genesis state. Initializing participants (gateways=%s, users=%s)...", gw, u)
-                init_result = await app.state.workload.init_participants(gateway_cfg=gw, user_cfg=u)
-                app.state.workload.update_txn_context()
-                log.info(
-                    "Accounts initialized: %s gateways, %s users.",
-                    len(init_result["gateways"]),
-                    len(init_result["users"]),
+                log.error(
+                    "No genesis accounts found and no persisted state.\n"
+                    "Use 'gen' to create a testnet with pre-provisioned accounts:\n"
+                    "  uv run gen --amendment-profile develop -o testnet"
                 )
+                raise SystemExit(1)
 
         init_ledger = await app.state.workload._current_ledger_index()
         app.state.workload.first_ledger_index = init_ledger
