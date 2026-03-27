@@ -190,6 +190,7 @@ Long-term goal: a single, reliable event source that tells us definitively "tx X
 - [ ] Interactive txn buttons — click to submit, tag and track the specific txn
 - [ ] Book depth visualization for asset pairs
 - [x] ~~Target slider, success rate table, side-by-side layout, clickable types/errors, disabled labels, cumulative counters, diagnostics endpoint, ledger utilization from WS, explorer embed~~
+- [x] ~~WS dropdown fallback, TPS slider cooldown, cumulative failure codes, Ledger Stream reorder, temDISABLED accuracy~~ (2026-03-26)
 
 ---
 

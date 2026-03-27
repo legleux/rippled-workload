@@ -37,6 +37,14 @@ async def state_failed_by_code(error_code: str, request: Request):
     return {"error_code": error_code, "count": len(filtered), "transactions": filtered}
 
 
+@router.get("/failure-codes")
+async def state_failure_codes(request: Request):
+    """Cumulative failure code counts (survives pending cleanup)."""
+    codes = request.app.state.workload.snapshot_failure_codes()
+    sorted_codes = sorted(codes.items(), key=lambda x: x[1], reverse=True)
+    return {"failure_codes": sorted_codes, "total": sum(codes.values())}
+
+
 @router.get("/expired")
 async def state_expired(request: Request):
     """Get transactions that expired without validating."""

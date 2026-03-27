@@ -31,6 +31,7 @@ async def state_dashboard(request: Request) -> HTMLResponse:
     hostname = RPC.split("//")[1].split(":")[0] if "//" in RPC else RPC.split(":")[0]
 
     # Build node list from compose config for the WS terminal dropdown
+    ws_port = cfg["rippled"]["ws_port"]
     nodes = []
     try:
         from gl.config import ComposeConfig
@@ -44,8 +45,10 @@ async def state_dashboard(request: Request) -> HTMLResponse:
             name = cc.hub_name if cc.num_hubs == 1 else f"{cc.hub_name}{i}"
             ws = cc.ws_port + i
             nodes.append({"name": name, "ws": ws})
-    except ImportError:
-        log.debug("gl (generate_ledger) not installed, WS terminal node list will be empty")
+    except (ImportError, Exception) as e:
+        log.debug("gl (generate_ledger) not available (%s), using default WS node", e)
+    if not nodes:
+        nodes.append({"name": hostname, "ws": ws_port})
     nodes_json = json.dumps(nodes)
 
     html_content = f"""
@@ -242,6 +245,14 @@ async def state_dashboard(request: Request) -> HTMLResponse:
             <div class="stats-grid" id="fee-stats"></div>
             <div class="stats-grid" id="txn-stats"></div>
 
+            <!-- Explorer embed -->
+            <div class="panel">
+                <h2>Ledger Stream</h2>
+                <div class="explorer-viewport">
+                    <iframe src="https://custom.xrpl.org/localhost:6006" id="explorer-frame"></iframe>
+                </div>
+            </div>
+
             <!-- Transaction Control -->
             <div class="panel">
                 <h2>Transaction Control</h2>
@@ -251,14 +262,14 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                         <input type="range" id="target-tps-input" min="0" max="500" step="5" value="0"
                                style="width:100%;accent-color:#58a6ff;cursor:pointer"
                                oninput="document.getElementById('target-tps-value').textContent=this.value"
-                               onchange="fetch('/workload/target-tps',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{target_tps:parseFloat(this.value)}})}})">
+                               onchange="sliderCooldown=Date.now()+4000;fetch('/workload/target-tps',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{target_tps:parseFloat(this.value)}})}})">
                     </div>
                     <div class="fill-control" style="flex:1;min-width:280px">
                         <label>Max pending/account: <span id="max-pending-value" style="font-weight:700;color:#d29922">1</span></label>
                         <input type="range" id="max-pending-input" min="1" max="10" step="1" value="1"
                                style="width:100%;accent-color:#d29922;cursor:pointer"
                                oninput="document.getElementById('max-pending-value').textContent=this.value"
-                               onchange="fetch('/workload/max-pending',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{max_pending:parseInt(this.value)}})}})">
+                               onchange="sliderCooldown=Date.now()+4000;fetch('/workload/max-pending',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{max_pending:parseInt(this.value)}})}})">
                     </div>
                 </div>
                 <div id="effective-rate" style="color:#8b949e;font-size:12px;margin-bottom:12px"></div>
@@ -267,14 +278,6 @@ async def state_dashboard(request: Request) -> HTMLResponse:
 
             <!-- Transaction types + failures side by side -->
             <div id="tables-container" style="display:flex;gap:20px;flex-wrap:wrap"></div>
-
-            <!-- Explorer embed -->
-            <div class="panel">
-                <h2>Ledger Stream</h2>
-                <div class="explorer-viewport">
-                    <iframe src="https://custom.xrpl.org/localhost:6006" id="explorer-frame"></iframe>
-                </div>
-            </div>
 
             <!-- WS Terminal -->
             <div class="panel">
@@ -307,6 +310,7 @@ async def state_dashboard(request: Request) -> HTMLResponse:
         ];
         let ws = null;
         let msgCount = 0;
+        let sliderCooldown = 0;  // timestamp: skip slider overwrites until this time
         let activeStreams = new Set(STREAMS.filter(s=>s.on).map(s=>s.name));
         const MAX_LINES = 500;
 
@@ -613,11 +617,11 @@ async def state_dashboard(request: Request) -> HTMLResponse:
 
         async function refreshStats() {{
             try {{
-                const [statsRes, feeRes, rateRes, failedRes] = await Promise.all([
+                const [statsRes, feeRes, rateRes, failCodesRes] = await Promise.all([
                     fetch('/state/summary').then(r=>r.json()),
                     fetch('/state/fees').then(r=>r.json()),
                     fetch('/workload/rate-controls').then(r=>r.json()),
-                    fetch('/state/failed').then(r=>r.json()),
+                    fetch('/state/failure-codes').then(r=>r.json()),
                 ]);
                 const s = statsRes;
                 const f = feeRes;
@@ -635,18 +639,19 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                     'Live monitoring &bull; Ledger ' + f.ledger_current_index + ' @ {hostname}' +
                     ' &bull; ' + fmt(s.ledgers_elapsed) + ' ledgers (' + fmtUptime(s.uptime_seconds) + ')';
 
-                // Rate control sliders (don't overwrite while user is dragging)
+                // Rate control sliders (don't overwrite while user is dragging or during cooldown)
+                const cool = Date.now() < sliderCooldown;
                 const tpsInput = document.getElementById('target-tps-input');
-                if (document.activeElement !== tpsInput) {{
+                if (!cool && document.activeElement !== tpsInput) {{
                     tpsInput.value = rateRes.target_tps;
+                    document.getElementById('target-tps-value').textContent = rateRes.target_tps;
                 }}
-                document.getElementById('target-tps-value').textContent = rateRes.target_tps;
 
                 const mpInput = document.getElementById('max-pending-input');
-                if (document.activeElement !== mpInput) {{
+                if (!cool && document.activeElement !== mpInput) {{
                     mpInput.value = rateRes.max_pending_per_account;
+                    document.getElementById('max-pending-value').textContent = rateRes.max_pending_per_account;
                 }}
-                document.getElementById('max-pending-value').textContent = rateRes.max_pending_per_account;
 
                 // Effective rate display
                 const actualTpl = s.ledgers_elapsed > 0 ? (validated / s.ledgers_elapsed).toFixed(1) : '—';
@@ -678,6 +683,7 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                 // Transaction type breakdown (left)
                 const byTypeTotal = s.by_type_total || {{}};
                 const byTypeValidated = s.by_type_validated || {{}};
+                const temDisabledTypes = new Set(s.tem_disabled_types || []);
                 const typePct = (e) => e[1] > 0 ? (byTypeValidated[e[0]]||0)/e[1] : -1;
                 const sortedTypes = Object.entries(byTypeTotal).sort((a,b) => typePct(b)-typePct(a) || b[1]-a[1]);
                 if (sortedTypes.length) {{
@@ -687,7 +693,7 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                         const pct = total > 0 ? Math.round(validated/total*100) : 0;
                         const color = pct >= 80 ? '#3fb950' : pct >= 50 ? '#d29922' : '#f85149';
                         const disabled = configDisabledTypes.has(t);
-                        const amendmentDisabled = !disabled && total > 0 && validated === 0;
+                        const amendmentDisabled = temDisabledTypes.has(t);
                         const link = '<a href="/state/type/'+t+'/page" target="_blank" style="text-decoration:none;color:inherit">'+t+'</a>';
                         const nameHtml = disabled
                             ? '<s style="color:#484f58">'+link+'</s> <span style="color:#484f58;font-size:11px">disabled</span>'
@@ -699,16 +705,10 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                     tablesHtml += '</tbody></table></div>';
                 }}
 
-                // Top failures (right)
-                const INTERNAL = new Set(['CASCADE_EXPIRED','unknown','']);
-                const failMap = {{}};
-                (failedRes.failed||[]).forEach(f => {{
-                    const r = f.engine_result_final || f.engine_result_first || 'unknown';
-                    if (!INTERNAL.has(r) && !r.startsWith('tes')) failMap[r] = (failMap[r]||0) + 1;
-                }});
-                const topFail = Object.entries(failMap).sort((a,b)=>b[1]-a[1]).slice(0,10);
+                // Top failures (right) — uses cumulative counters (survives pending cleanup)
+                const topFail = (failCodesRes.failure_codes || []).slice(0, 10);
                 if (topFail.length) {{
-                    tablesHtml += '<div class="failures-table"><h2>Top Failures</h2><table><thead><tr><th>Error Code</th><th>Count</th></tr></thead><tbody>';
+                    tablesHtml += '<div class="failures-table"><h2><a href="/state/failed/page" target="_blank" style="text-decoration:none;color:inherit;cursor:pointer">Top Failures &#8599;</a></h2><table><thead><tr><th>Error Code</th><th>Count</th></tr></thead><tbody>';
                     topFail.forEach(([r,c]) => {{
                         tablesHtml += '<tr><td><a href="/state/failed/'+r+'/page" target="_blank" style="text-decoration:none"><span class="badge error" style="cursor:pointer">'+r+'</span></a></td><td>'+fmt(c)+'</td></tr>';
                     }});
@@ -732,6 +732,49 @@ async def state_dashboard(request: Request) -> HTMLResponse:
     """
 
     return HTMLResponse(content=html_content)
+
+
+@router.get("/failed/page")
+async def state_all_failures_page(request: Request) -> HTMLResponse:
+    """HTML page showing all failure codes with cumulative counts."""
+    failure_codes = request.app.state.workload.snapshot_failure_codes()
+    sorted_codes = sorted(failure_codes.items(), key=lambda x: x[1], reverse=True)
+    total = sum(failure_codes.values())
+
+    rows = ""
+    for code, count in sorted_codes:
+        rows += (
+            f"<tr>"
+            f'<td><a href="/state/failed/{code}/page" style="text-decoration:none">'
+            f'<span class="badge">{code}</span></a></td>'
+            f"<td>{count:,}</td>"
+            f"</tr>"
+        )
+
+    html = f"""<!DOCTYPE html>
+    <html><head>
+    <title>All Failures</title>
+    <style>
+        body {{ background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; padding: 20px; }}
+        h1 {{ color: #f85149; }}
+        a {{ color: #58a6ff; }}
+        table {{ border-collapse: collapse; width: 100%; max-width: 600px; margin-top: 16px; }}
+        th, td {{ padding: 8px 12px; border: 1px solid #30363d; text-align: left; font-size: 13px; }}
+        th {{ background: #161b22; color: #8b949e; text-transform: uppercase; font-size: 11px; }}
+        tr:hover {{ background: #161b22; }}
+        .badge {{ padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; background: #3d1f1f; color: #f85149; }}
+        .count {{ color: #8b949e; font-size: 14px; }}
+    </style>
+    </head><body>
+    <a href="/state/dashboard">&larr; Dashboard</a>
+    <h1>All Failures <span class="count">{total:,} total across {len(sorted_codes)} codes</span></h1>
+    <table>
+        <thead><tr><th>Error Code</th><th>Count</th></tr></thead>
+        <tbody>{rows if rows else '<tr><td colspan="2" style="text-align:center;color:#8b949e">No failures recorded</td></tr>'}</tbody>
+    </table>
+    <p style="margin-top:16px;color:#8b949e">JSON: <a href="/state/failure-codes">/state/failure-codes</a></p>
+    </body></html>"""
+    return HTMLResponse(content=html)
 
 
 @router.get("/failed/{error_code}/page")

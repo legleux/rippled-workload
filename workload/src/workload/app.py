@@ -71,7 +71,9 @@ app.include_router(accounts.router)
 app.include_router(payments.router)
 app.include_router(payments.router, prefix="/pay", include_in_schema=False)  # alias /pay/ for convenience
 app.include_router(transactions.router, prefix="/transaction")
-app.include_router(transactions.router, prefix="/txn", include_in_schema=False)  # alias /txn/ because I'm sick of typing...
+app.include_router(
+    transactions.router, prefix="/txn", include_in_schema=False
+)  # alias /txn/ because I'm sick of typing...
 app.include_router(state_api.router)
 app.include_router(state_pages.router)
 app.include_router(workload.router)

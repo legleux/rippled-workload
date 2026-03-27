@@ -23,7 +23,6 @@ from xrpl.wallet import Wallet
 import workload.constants as C
 from workload.amm import AMMPoolRegistry, DEXMetrics
 from workload.assertions import tx_intentionally_rejected, tx_rejected, tx_submitted, tx_validated
-from workload.ledger_objects import check_index, escrow_index, nftoken_id, nftoken_offer_index
 from workload.balances import BalanceTracker
 from workload.sqlite_store import SQLiteStore
 from workload.txn_factory import TxnContext, generate_txn
@@ -259,6 +258,8 @@ class Workload:
         self._total_validated: int = 0
         self._total_rejected: int = 0
         self._total_expired: int = 0
+        self._failure_codes: dict[str, int] = {}  # engine_result -> count (cumulative)
+        self._tem_disabled_types: set[str] = set()  # txn types that got temDISABLED
 
         self.ctx = self.configure_txn_context(
             wallets=self.wallets,
@@ -646,9 +647,7 @@ class Workload:
                         async with rec.lock:
                             if rec.next_seq is not None:
                                 return  # Already warmed by another path
-                            ai = await self._rpc(
-                                AccountInfo(account=a, ledger_index="validated", strict=True)
-                            )
+                            ai = await self._rpc(AccountInfo(account=a, ledger_index="validated", strict=True))
                             acct = ai.result.get("account_data")
                             if acct:
                                 rec.next_seq = acct["Sequence"]
@@ -813,6 +812,8 @@ class Workload:
             p_live.state = C.TxState.VALIDATED
             p_live.validated_ledger = rec.seq
             p_live.meta_txn_result = meta_result
+            if meta_result and meta_result.startswith("tec"):
+                self._failure_codes[meta_result] = self._failure_codes.get(meta_result, 0) + 1
         else:
             log.debug("record_validated: tx not in pending (race or already finalized): %s", rec.txn)
         await self.store.mark(
@@ -1154,6 +1155,7 @@ class Workload:
                 # See also the general tem/tef handler below (~20 lines down).
                 p.state = C.TxState.REJECTED
                 self._total_rejected += 1
+                self._failure_codes[er] = self._failure_codes.get(er, 0) + 1
                 _reject_fn = tx_intentionally_rejected if p.expect_rejection else tx_rejected
                 if p.transaction_type:
                     _reject_fn(
@@ -1220,6 +1222,9 @@ class Workload:
                 # carefully — a suppressed warning here is invisible in production.
                 p.state = C.TxState.REJECTED
                 self._total_rejected += 1
+                self._failure_codes[er] = self._failure_codes.get(er, 0) + 1
+                if er == "temDISABLED" and p.transaction_type:
+                    self._tem_disabled_types.add(p.transaction_type)
                 _reject_fn = tx_intentionally_rejected if p.expect_rejection else tx_rejected
                 if p.transaction_type:
                     _reject_fn(
@@ -1434,6 +1439,10 @@ class Workload:
                 results.append(r)
         return results
 
+    def snapshot_failure_codes(self) -> dict[str, int]:
+        """Cumulative failure code counts (survives cleanup_terminal)."""
+        return dict(self._failure_codes)
+
     def snapshot_stats(self) -> dict[str, Any]:
         # In-flight counts from pending dict (for "In-Flight" and "Created" cards)
         by_state: dict[str, int] = {}
@@ -1470,6 +1479,7 @@ class Workload:
         result["by_type"] = dict(self.store.count_by_type)
         result["by_type_validated"] = dict(self._type_validated)
         result["by_type_total"] = dict(self._type_submitted)
+        result["tem_disabled_types"] = sorted(self._tem_disabled_types)
 
         result["dex"] = self.snapshot_dex_metrics()
 

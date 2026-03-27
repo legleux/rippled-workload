@@ -171,9 +171,7 @@ async def continuous_workload(wl: Workload) -> None:
                 build_start = perf_counter()
 
                 # Type-first: roll types, assign eligible accounts, determine intent
-                assignments = compose_submission_set(
-                    free_accounts, clean_accounts, target, wl.ctx, wl.config
-                )
+                assignments = compose_submission_set(free_accounts, clean_accounts, target, wl.ctx, wl.config)
 
                 # Phase 1: Build txn dicts (sync, no RPC)
                 built: list[tuple[Wallet, Transaction, bool]] = []
@@ -226,13 +224,8 @@ async def continuous_workload(wl: Workload) -> None:
                         return None
 
                 async with asyncio.TaskGroup() as tg:
-                    sign_tasks = [
-                        tg.create_task(_alloc_and_sign(w, t, inv))
-                        for w, t, inv in built
-                    ]
-                submission_set: list[PendingTx] = [
-                    t.result() for t in sign_tasks if t.result() is not None
-                ]
+                    sign_tasks = [tg.create_task(_alloc_and_sign(w, t, inv)) for w, t, inv in built]
+                submission_set: list[PendingTx] = [t.result() for t in sign_tasks if t.result() is not None]
 
                 if not submission_set:
                     await asyncio.sleep(0)

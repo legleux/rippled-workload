@@ -166,5 +166,3 @@ async def create_vaultwithdraw(request: Request):
 async def create_vaultclawback(request: Request):
     """Create and submit a VaultClawback transaction."""
     return await create("VaultClawback", request)
-
-

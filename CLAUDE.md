@@ -146,6 +146,7 @@ Configurable ratio of valid/invalid transactions via `[transactions.intent]` in 
 
 - **SQLiteStore** (opt-in via `WORKLOAD_PERSIST=1`): Persistent storage for accounts, transactions, validations, balances. Survives restarts.
 - **InMemoryStore**: In-process metrics, recent validations deque, validation-by-source counters.
+- **Cumulative counters** on `Workload`: `_failure_codes` (engine_result → count), `_tem_disabled_types` (set of types that got temDISABLED). Survive `_cleanup_terminal()`.
 
 ### Startup Modes
 

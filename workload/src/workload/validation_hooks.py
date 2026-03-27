@@ -29,8 +29,12 @@ log = logging.getLogger("workload")
 # Dispatch
 # ---------------------------------------------------------------------------
 
+
 async def dispatch_validation_hooks(
-    wl: Workload, p_live: PendingTx | None, rec: ValidationRecord, meta_result: str | None,
+    wl: Workload,
+    p_live: PendingTx | None,
+    rec: ValidationRecord,
+    meta_result: str | None,
 ) -> None:
     """Run all post-validation hooks. Called from Workload.record_validated()."""
     on_account_adopted(wl, p_live, rec)
@@ -65,6 +69,7 @@ async def dispatch_validation_hooks(
 # ---------------------------------------------------------------------------
 # Account adoption
 # ---------------------------------------------------------------------------
+
 
 def _is_viable_for_pool(wl: Workload, balances: dict) -> bool:
     """Return True if an account has enough balance to send at least one transaction.
@@ -138,6 +143,7 @@ def on_account_adopted(wl: Workload, p_live: PendingTx | None, rec: ValidationRe
 # Payment
 # ---------------------------------------------------------------------------
 
+
 def on_payment_validated(wl: Workload, p_live: PendingTx | None, meta_result: str | None) -> None:
     """Update in-memory balances for a successful Payment."""
     if not (p_live and meta_result == "tesSUCCESS" and p_live.transaction_type == C.TxType.PAYMENT):
@@ -173,6 +179,7 @@ def on_payment_validated(wl: Workload, p_live: PendingTx | None, meta_result: st
 # MPToken
 # ---------------------------------------------------------------------------
 
+
 async def on_mptoken_created(wl: Workload, p_live: PendingTx | None, rec: ValidationRecord) -> None:
     """Track the new MPToken issuance ID after a successful MPTokenIssuanceCreate."""
     if not (p_live and p_live.transaction_type == C.TxType.MPTOKEN_ISSUANCE_CREATE):
@@ -192,6 +199,7 @@ async def on_mptoken_created(wl: Workload, p_live: PendingTx | None, rec: Valida
 # Batch
 # ---------------------------------------------------------------------------
 
+
 async def on_batch_validated(wl: Workload, p_live: PendingTx | None) -> None:
     """Sync account sequence from ledger after a Batch transaction validates."""
     if not (p_live and p_live.transaction_type == C.TxType.BATCH and p_live.account):
@@ -210,6 +218,7 @@ async def on_batch_validated(wl: Workload, p_live: PendingTx | None) -> None:
 # ---------------------------------------------------------------------------
 # AMM / DEX
 # ---------------------------------------------------------------------------
+
 
 def on_amm_created(wl: Workload, p_live: PendingTx | None, meta_result: str | None) -> None:
     """Register a new AMM pool after a successful AMMCreate."""
@@ -258,6 +267,7 @@ def on_dex_activity(wl: Workload, p_live: PendingTx | None, meta_result: str | N
 # ---------------------------------------------------------------------------
 # Credentials
 # ---------------------------------------------------------------------------
+
 
 def on_credential_created(wl: Workload, p_live: PendingTx | None) -> None:
     if not (p_live and p_live.transaction_type == C.TxType.CREDENTIAL_CREATE):
@@ -308,6 +318,7 @@ def on_credential_deleted(wl: Workload, p_live: PendingTx | None) -> None:
 # Vaults
 # ---------------------------------------------------------------------------
 
+
 async def on_vault_created(wl: Workload, p_live: PendingTx | None, rec: ValidationRecord) -> None:
     if not (p_live and p_live.transaction_type == C.TxType.VAULT_CREATE):
         return
@@ -347,6 +358,7 @@ def on_vault_deleted(wl: Workload, p_live: PendingTx | None) -> None:
 # Permissioned Domains
 # ---------------------------------------------------------------------------
 
+
 async def on_domain_created(wl: Workload, p_live: PendingTx | None, rec: ValidationRecord) -> None:
     if not (p_live and p_live.transaction_type == C.TxType.PERMISSIONED_DOMAIN_SET):
         return
@@ -384,6 +396,7 @@ def on_domain_deleted(wl: Workload, p_live: PendingTx | None) -> None:
 # NFTokens
 # ---------------------------------------------------------------------------
 
+
 def on_nftoken_minted(wl: Workload, p_live: PendingTx | None) -> None:
     """Track a newly minted NFToken — ID is deterministic, no RPC needed."""
     if not (p_live and p_live.transaction_type == C.TxType.NFTOKEN_MINT):
@@ -418,6 +431,7 @@ def on_nftoken_burned(wl: Workload, p_live: PendingTx | None) -> None:
 # DEX Offers
 # ---------------------------------------------------------------------------
 
+
 def on_offer_created(wl: Workload, p_live: PendingTx | None) -> None:
     """Track a new DEX offer — index computed from account + sequence."""
     if not (p_live and p_live.transaction_type == C.TxType.OFFER_CREATE):
@@ -451,6 +465,7 @@ def on_offer_cancelled(wl: Workload, p_live: PendingTx | None) -> None:
 # ---------------------------------------------------------------------------
 # NFToken Offers
 # ---------------------------------------------------------------------------
+
 
 def on_nft_offer_created(wl: Workload, p_live: PendingTx | None) -> None:
     """Track a new NFToken offer — ledger index computed locally."""
@@ -497,6 +512,7 @@ def on_nft_offer_accepted(wl: Workload, p_live: PendingTx | None) -> None:
 # Tickets
 # ---------------------------------------------------------------------------
 
+
 def on_ticket_created(wl: Workload, p_live: PendingTx | None) -> None:
     """Track tickets created by a validated TicketCreate transaction.
 
@@ -542,6 +558,7 @@ def on_ticket_consumed(wl: Workload, p_live: PendingTx | None) -> None:
 # Checks
 # ---------------------------------------------------------------------------
 
+
 def on_check_created(wl: Workload, p_live: PendingTx | None) -> None:
     """Track a newly created Check — ID computed deterministically."""
     if not (p_live and p_live.transaction_type == C.TxType.CHECK_CREATE):
@@ -585,6 +602,7 @@ def on_check_cancelled(wl: Workload, p_live: PendingTx | None) -> None:
 # ---------------------------------------------------------------------------
 # Escrows
 # ---------------------------------------------------------------------------
+
 
 def on_escrow_created(wl: Workload, p_live: PendingTx | None) -> None:
     """Track a newly created Escrow — ID computed deterministically."""

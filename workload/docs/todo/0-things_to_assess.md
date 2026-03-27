@@ -1,11 +1,12 @@
 ## Dashboard
 
-1. Node WebSocket Connection dropdown broken
-2. TPS slider doesn't work
-3. "Top Failures" list aging out? Also, clicking on "Top Failures" should bring you to "Full Failures" of similar form
-4. Put "Ledger Stream" _above_ "Transaction Control"
+1. ~~Node WebSocket Connection dropdown broken~~ DONE (2026-03-26) — fallback node from config when gl unavailable
+2. ~~TPS slider doesn't work~~ DONE (2026-03-26) — slider cooldown prevents refreshStats from overwriting during interaction
+3. ~~"Top Failures" list aging out~~ DONE (2026-03-26) — cumulative `_failure_codes` counter, `/state/failure-codes` endpoint, clickable header links to `/state/failed/page`
+4. ~~Put "Ledger Stream" above "Transaction Control"~~ DONE (2026-03-26)
 5. Start Stop broken
 6. Full HTML/CSS assessment/critique/refactor
+7. ~~temDISABLED label only for types that actually got temDISABLED~~ DONE (2026-03-26) — `_tem_disabled_types` tracking
 
 find how many calls and assess if they are necessary
     1. sleep
