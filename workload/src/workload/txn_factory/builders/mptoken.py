@@ -26,14 +26,24 @@ def build_mptoken_issuance_create(ctx: TxnContext, intent: TxIntent) -> dict:  #
 
 
 def build_mptoken_issuance_set(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
-    """Build an MPTokenIssuanceSet transaction to modify MPToken properties."""
-    src = ctx.rand_account()
-    mpt_id = ctx.rand_mptoken_id()
+    """Build an MPTokenIssuanceSet transaction to modify MPToken properties.
 
+    Only the issuer can call MPTokenIssuanceSet — eligibility predicate ensures
+    forced_account is an issuer, so we pick one of their issuances.
+    """
+    src = ctx.forced_account or ctx.rand_account()
+    own_ids = [mid for mid, iss in ctx.mptoken_issuance_ids.items() if iss == src.address]
+    if not own_ids:
+        return None
+    mpt_id = choice(own_ids)
+
+    # Must set at least one flag — alternate between lock (0x01) and unlock (0x02)
+    flag = choice([0x00000001, 0x00000002])  # tfMPTLock / tfMPTUnlock
     return {
         "TransactionType": "MPTokenIssuanceSet",
         "Account": src.address,
         "MPTokenIssuanceID": mpt_id,
+        "Flags": flag,
     }
 
 
@@ -50,9 +60,15 @@ def build_mptoken_authorize(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO:
 
 
 def build_mptoken_issuance_destroy(ctx: TxnContext, intent: TxIntent) -> dict:  # TODO: handle TxIntent.INVALID
-    """Build an MPTokenIssuanceDestroy transaction to destroy an MPToken issuance."""
-    src = ctx.rand_account()
-    mpt_id = ctx.rand_mptoken_id()
+    """Build an MPTokenIssuanceDestroy transaction to destroy an MPToken issuance.
+
+    Only the issuer can destroy — eligibility predicate ensures forced_account is an issuer.
+    """
+    src = ctx.forced_account or ctx.rand_account()
+    own_ids = [mid for mid, iss in ctx.mptoken_issuance_ids.items() if iss == src.address]
+    if not own_ids:
+        return None
+    mpt_id = choice(own_ids)
 
     return {
         "TransactionType": "MPTokenIssuanceDestroy",
@@ -60,6 +76,16 @@ def build_mptoken_issuance_destroy(ctx: TxnContext, intent: TxIntent) -> dict:  
         "MPTokenIssuanceID": mpt_id,
     }
 
+
+def _is_mpt_issuer(wallet, ctx: TxnContext) -> bool:
+    """Account has at least one MPToken issuance."""
+    return any(iss == wallet.address for iss in (ctx.mptoken_issuance_ids or {}).values())
+
+
+ELIGIBILITY = {
+    "MPTokenIssuanceSet": _is_mpt_issuer,
+    "MPTokenIssuanceDestroy": _is_mpt_issuer,
+}
 
 BUILDERS = {
     "MPTokenIssuanceCreate": (build_mptoken_issuance_create, MPTokenIssuanceCreate),

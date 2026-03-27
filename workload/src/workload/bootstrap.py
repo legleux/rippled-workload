@@ -256,10 +256,6 @@ async def lifespan(app: FastAPI):
             }
         )
         log.info("[4/4] Initialization complete at ledger %d. Starting workload.", init_ledger)
-        await asyncio.sleep(5)
-
-        # Pre-warm account sequences so the first build iteration doesn't pay RPC latency
-        await app.state.workload.warm_sequences(list(app.state.workload.wallets.keys()))
 
         await workload_runner.start(app.state.workload)
         try:

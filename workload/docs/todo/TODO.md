@@ -39,7 +39,9 @@
 ## Mostly Resolved: tefPAST_SEQ Large Deltas
 Still occurs on first 2-3 batches (~10% rate), then self-heals via cascade. Not blocking.
 Root causes found and fixed: consumer cascade RPC flood, AMMDeposit KeyError, consumer dedup.
-- [ ] Consider updating `next_seq` in `record_validated` to `max(next_seq, validated_seq + 1)`
+- [x] ~~`next_seq` sync in `record_validated`~~ DONE (2026-03-27) — `max(next_seq, validated_seq + 1)`
+- [x] ~~`tem` sequence leak~~ DONE (2026-03-27) — `release_seq` for `tem` rejections (malformed txns don't consume sequences)
+- [x] ~~Aggressive `expire_past_lls`~~ DONE (2026-03-27) — removed per-ledger-close call; was expiring txns before validation events arrived
 
 
 

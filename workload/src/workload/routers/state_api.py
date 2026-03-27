@@ -167,7 +167,7 @@ def get_currencies(request: Request):
 def get_mptokens(request: Request):
     """Get all tracked MPToken issuance IDs."""
     wl = request.app.state.workload
-    mptoken_ids = getattr(wl, "_mptoken_issuance_ids", [])
+    mptoken_ids = getattr(wl, "_mptoken_issuance_ids", {})
     return {
         "count": len(mptoken_ids),
         "mptoken_issuance_ids": mptoken_ids,

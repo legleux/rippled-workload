@@ -65,7 +65,7 @@ class TxnContext:
     config: dict
     base_fee_drops: AwaitInt
     next_sequence: AwaitSeq
-    mptoken_issuance_ids: list[str] | None = None
+    mptoken_issuance_ids: dict[str, str] | None = None  # {mpt_id: issuer_address}
     amm_pools: set[frozenset[str]] | None = None
     amm_pool_registry: list[dict] | None = None
     nfts: dict[str, str] | None = None
@@ -143,7 +143,14 @@ class TxnContext:
         """Get a random MPToken issuance ID from tracked IDs."""
         if not self.mptoken_issuance_ids:
             raise RuntimeError("No MPToken issuance IDs available")
-        return choice(self.mptoken_issuance_ids)
+        return choice(list(self.mptoken_issuance_ids.keys()))
+
+    def rand_mptoken_with_issuer(self) -> tuple[str, str]:
+        """Get a random (mpt_id, issuer_address) pair."""
+        if not self.mptoken_issuance_ids:
+            raise RuntimeError("No MPToken issuance IDs available")
+        mpt_id = choice(list(self.mptoken_issuance_ids.keys()))
+        return mpt_id, self.mptoken_issuance_ids[mpt_id]
 
     def _asset_id(self, amount: str | dict) -> str:
         """Convert an Amount (XRP drops or IOU) to a unique asset identifier."""

@@ -1052,11 +1052,11 @@ async def state_type_page(request: Request, txn_type: str) -> HTMLResponse:
 async def state_mptokens_page(request: Request) -> HTMLResponse:
     """HTML page listing all tracked MPToken issuance IDs."""
     wl = request.app.state.workload
-    mptoken_ids = getattr(wl, "_mptoken_issuance_ids", [])
+    mptoken_ids = getattr(wl, "_mptoken_issuance_ids", {})
 
     rows = ""
-    for i, mpt_id in enumerate(mptoken_ids):
-        rows += f'<tr><td>{i}</td><td><code>{mpt_id}</code></td></tr>'
+    for i, (mpt_id, issuer) in enumerate(mptoken_ids.items()):
+        rows += f'<tr><td>{i}</td><td><code>{mpt_id}</code></td><td><code>{issuer}</code></td></tr>'
 
     html = f"""<!DOCTYPE html>
     <html><head>
@@ -1076,8 +1076,8 @@ async def state_mptokens_page(request: Request) -> HTMLResponse:
     <a href="/state/dashboard">&larr; Dashboard</a>
     <h1>MPToken Issuances <span class="count">{len(mptoken_ids)} issuances</span></h1>
     <table>
-        <thead><tr><th>#</th><th>MPToken Issuance ID</th></tr></thead>
-        <tbody>{rows if rows else '<tr><td colspan="2" style="text-align:center;color:#8b949e">No MPToken issuances tracked</td></tr>'}</tbody>
+        <thead><tr><th>#</th><th>MPToken Issuance ID</th><th>Issuer</th></tr></thead>
+        <tbody>{rows if rows else '<tr><td colspan="3" style="text-align:center;color:#8b949e">No MPToken issuances tracked</td></tr>'}</tbody>
     </table>
     <p style="margin-top:16px;color:#8b949e">JSON: <a href="/state/mptokens">/state/mptokens</a></p>
     </body></html>"""

@@ -189,9 +189,9 @@ def on_mptoken_created(wl: Workload, p_live: PendingTx | None) -> None:
         return
     mpt_id = mptid(p_live.account, p_live.sequence)
     if mpt_id not in wl._mptoken_issuance_ids:
-        wl._mptoken_issuance_ids.append(mpt_id)
+        wl._mptoken_issuance_ids[mpt_id] = p_live.account
         wl.update_txn_context()
-        log.info("Tracked MPToken issuance: %s (account=%s seq=%d)", mpt_id, p_live.account, p_live.sequence)
+        log.info("Tracked MPToken issuance: %s (issuer=%s seq=%d)", mpt_id, p_live.account, p_live.sequence)
 
 
 # ---------------------------------------------------------------------------

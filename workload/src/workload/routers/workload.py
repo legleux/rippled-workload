@@ -84,7 +84,7 @@ async def set_max_pending(req: MaxPendingReq, request: Request):
 
 
 @router.get("/intent")
-async def get_intent_ratio(request) -> dict:
+async def get_intent_ratio(request: Request) -> dict:
     """Get current valid/invalid intent ratio for transaction generation."""
     intent_cfg = request.app.state.workload.config.get("transactions", {}).get("intent", {})
     return {
@@ -95,7 +95,7 @@ async def get_intent_ratio(request) -> dict:
 
 
 @router.post("/intent")
-async def set_intent_ratio(req: IntentReq, request) -> dict:
+async def set_intent_ratio(req: IntentReq, request: Request) -> dict:
     """Set valid/invalid intent ratio. Takes effect immediately.
 
     Provide either valid or invalid (the other is computed as 1 - value).

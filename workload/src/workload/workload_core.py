@@ -214,7 +214,7 @@ class Workload:
 
         self._currencies: list[IssuedCurrency] = []
 
-        self._mptoken_issuance_ids: list[str] = []
+        self._mptoken_issuance_ids: dict[str, str] = {}  # {mpt_id: issuer_address}
         self._credentials: list[dict] = []  # [{issuer, subject, credential_type, accepted}]
         self._vaults: list[dict] = []  # [{vault_id, owner, asset}]
         self._domains: list[dict] = []  # [{domain_id, owner}]
@@ -625,37 +625,60 @@ class Workload:
                     f"Cannot release sequence {seq} for {addr} - next_seq is {rec.next_seq} (gap would be created)"
                 )
 
-    async def warm_sequences(self, addresses: list[str]) -> int:
-        """Pre-fetch and cache sequence numbers for accounts in parallel.
+    async def warm_sequences(self, addresses: list[str], *, batch_size: int = 50) -> int:
+        """Pre-fetch and cache sequence numbers for accounts in batches.
 
         Warms the alloc_seq cache so the build loop doesn't pay RPC latency.
-        Accounts that already have cached sequences are skipped.
-        Returns the number of accounts warmed.
+        Processes accounts in chunks of `batch_size` to avoid overwhelming rippled.
+        Retries failed accounts once. Returns the number of accounts warmed.
         """
         cold = [addr for addr in addresses if self._record_for(addr).next_seq is None]
         if not cold:
             return 0
         start = time.time()
         warmed = 0
-        async with asyncio.TaskGroup() as tg:
-            for addr in cold:
+        failed: list[str] = []
 
-                async def _warm(a: str = addr) -> None:
-                    nonlocal warmed
-                    try:
-                        rec = self._record_for(a)
-                        async with rec.lock:
-                            if rec.next_seq is not None:
-                                return  # Already warmed by another path
-                            ai = await self._rpc(AccountInfo(account=a, ledger_index="validated", strict=True))
-                            acct = ai.result.get("account_data")
-                            if acct:
-                                rec.next_seq = acct["Sequence"]
-                                warmed += 1
-                    except Exception as e:
-                        log.debug("warm_sequences: failed for %s: %s", a, e)
+        for i in range(0, len(cold), batch_size):
+            batch = cold[i : i + batch_size]
 
-                tg.create_task(_warm())
+            async def _warm(a: str) -> bool:
+                try:
+                    rec = self._record_for(a)
+                    async with rec.lock:
+                        if rec.next_seq is not None:
+                            return True
+                        ai = await self._rpc(AccountInfo(account=a, ledger_index="validated", strict=True))
+                        acct = ai.result.get("account_data")
+                        if acct:
+                            rec.next_seq = acct["Sequence"]
+                            return True
+                except Exception as e:
+                    log.debug("warm_sequences: failed for %s: %s", a, e)
+                return False
+
+            async with asyncio.TaskGroup() as tg:
+                tasks = [tg.create_task(_warm(a)) for a in batch]
+            for a, t in zip(batch, tasks):
+                if t.result():
+                    warmed += 1
+                else:
+                    failed.append(a)
+
+            if (i + batch_size) % 200 == 0 or i + batch_size >= len(cold):
+                log.info("warm_sequences: %d/%d done, %d failed so far", warmed, len(cold), len(failed))
+
+        # Retry failures once
+        if failed:
+            log.info("warm_sequences: retrying %d failed accounts", len(failed))
+            for i in range(0, len(failed), batch_size):
+                batch = failed[i : i + batch_size]
+                async with asyncio.TaskGroup() as tg:
+                    tasks = [tg.create_task(_warm(a)) for a in batch]
+                for t in tasks:
+                    if t.result():
+                        warmed += 1
+
         elapsed_ms = (time.time() - start) * 1000
         log.info("Warmed %d/%d account sequences in %.0fms", warmed, len(cold), elapsed_ms)
         return warmed
@@ -801,6 +824,13 @@ class Workload:
             )
             self._type_validated[tt] = self._type_validated.get(tt, 0) + 1
             self._total_validated += 1
+        # Keep next_seq in sync: validated txn consumed this sequence, so next must be at least seq+1
+        if p_live and p_live.account and p_live.sequence is not None:
+            rec_acct = self._record_for(p_live.account)
+            expected = p_live.sequence + 1
+            if rec_acct.next_seq is None or rec_acct.next_seq < expected:
+                rec_acct.next_seq = expected
+
         await dispatch_validation_hooks(self, p_live, rec, meta_result)
         log.debug("txn %s validated at ledger %s via %s", rec.txn, rec.seq, rec.src)
         return {"tx_hash": rec.txn, "ledger_index": rec.seq, "source": rec.src, "meta_result": meta_result}
@@ -1187,30 +1217,14 @@ class Workload:
                     _actual = _ai.result["account_data"]["Sequence"]
                     log.debug(
                         "tefPAST_SEQ detail: %s %s submitted_seq=%d current_ledger_seq=%d delta=%d next_seq_before=%s",
-                        p.transaction_type,
-                        p.account,
-                        p.sequence,
-                        _actual,
-                        _actual - p.sequence,
-                        rec.next_seq,
+                        p.transaction_type, p.account, p.sequence, _actual, _actual - p.sequence, rec.next_seq,
                     )
                 except Exception as _e:
                     log.debug("tefPAST_SEQ detail: fetch failed: %s", _e)
 
-                if rec.next_seq is not None and rec.next_seq > p.sequence:
-                    log.debug(
-                        f"tefPAST_SEQ (cascade victim): {p.transaction_type} account={p.account} seq={p.sequence} - next_seq={rec.next_seq}, forcing ledger resync"
-                    )
-                    await self._cascade_expire_account(
-                        p.account, p.sequence, exclude_hash=p.tx_hash, fetch_seq_from_ledger=True
-                    )
-                else:
-                    log.debug(
-                        f"tefPAST_SEQ: {p.transaction_type} account={p.account} seq={p.sequence} - resetting from ledger"
-                    )
-                    await self._cascade_expire_account(
-                        p.account, p.sequence, exclude_hash=p.tx_hash, fetch_seq_from_ledger=True
-                    )
+                await self._cascade_expire_account(
+                    p.account, p.sequence, exclude_hash=p.tx_hash, fetch_seq_from_ledger=True
+                )
                 return res
 
             if isinstance(er, str) and er.startswith(("tem", "tef")):
@@ -1242,6 +1256,11 @@ class Workload:
                     engine_result_first=p.engine_result_first,
                     engine_result_final=er,
                 )
+                # tem codes are malformed — never submitted to network, sequence NOT consumed.
+                # Release the sequence so the account isn't blocked.
+                if er.startswith("tem") and p.account and p.sequence is not None:
+                    await self.release_seq(p.account, p.sequence)
+
                 if p.expect_rejection:
                     log.debug(f"REJECTED (expected): {er} - {p.transaction_type} from {p.account}")
                 elif er == "temDISABLED":
