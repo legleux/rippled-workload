@@ -13,7 +13,7 @@ services:
     init: true
     restart: on-failure
     depends_on:
-      rippled:
+      xrpld:
         condition: service_started
     networks:
       xrpl_net: {}
