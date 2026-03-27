@@ -68,7 +68,7 @@ async def state_dashboard(request: Request) -> HTMLResponse:
             except Exception as e2:
                 log.debug("compose file scan failed: %s", e2)
     if not nodes:
-        nodes.append({"name": "rippled", "ws": ws_port})
+        nodes.append({"name": hostname, "ws": ws_port})
     nodes_json = json.dumps(nodes)
 
     html_content = f"""
