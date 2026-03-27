@@ -142,6 +142,37 @@ def permissioned_domain_index(account: str, sequence: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# MPToken: MPTID = sequence(big-endian u32) + account_id(20 bytes)
+#
+# The MPTID is a 192-bit (24-byte, 48-hex-char) packed value used as the
+# MPTokenIssuanceID field in Set/Authorize/Destroy transactions.
+# The ledger object index is SHA512Half(0x00 + '~' + MPTID).
+#
+# From rippled: makeMptID() in Indexes.cpp, keylet::mptIssuance() in Indexes.cpp
+# ---------------------------------------------------------------------------
+
+_MPTOKEN_ISSUANCE = 0x7E  # '~'
+
+
+def mptid(account: str, sequence: int) -> str:
+    """Compute MPToken Issuance ID (192-bit packed value, 48 hex chars).
+
+    This is the value used in the MPTokenIssuanceID transaction field,
+    NOT the ledger object index. Structure: sequence(big-endian u32) + AccountID(20 bytes).
+    """
+    return (struct.pack(">I", sequence) + _account_id(account)).hex().upper()
+
+
+def mptoken_issuance_index(account: str, sequence: int) -> str:
+    """Compute MPTokenIssuance ledger object index (256-bit hash, 64 hex chars).
+
+    From rippled keylet::mptIssuance(MPTID) = indexHash(MPTOKEN_ISSUANCE, MPTID).
+    """
+    mpt = struct.pack(">I", sequence) + _account_id(account)
+    return _compute_index(_MPTOKEN_ISSUANCE, mpt)
+
+
+# ---------------------------------------------------------------------------
 # Credential: SHA512Half(namespace + Subject(20) + Issuer(20) + CredType(var))
 # ---------------------------------------------------------------------------
 

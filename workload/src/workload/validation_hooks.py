@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from xrpl.models.requests import AccountInfo, Tx
 
 import workload.constants as C
-from workload.ledger_objects import check_index, escrow_index, nftoken_id, nftoken_offer_index
+from workload.ledger_objects import check_index, escrow_index, mptid, nftoken_id, nftoken_offer_index
 from workload.validation import ValidationRecord
 
 if TYPE_CHECKING:
@@ -39,7 +39,7 @@ async def dispatch_validation_hooks(
     """Run all post-validation hooks. Called from Workload.record_validated()."""
     on_account_adopted(wl, p_live, rec)
     on_payment_validated(wl, p_live, meta_result)
-    await on_mptoken_created(wl, p_live, rec)
+    on_mptoken_created(wl, p_live)
     await on_batch_validated(wl, p_live)
     on_amm_created(wl, p_live, meta_result)
     on_dex_activity(wl, p_live, meta_result)
@@ -180,19 +180,18 @@ def on_payment_validated(wl: Workload, p_live: PendingTx | None, meta_result: st
 # ---------------------------------------------------------------------------
 
 
-async def on_mptoken_created(wl: Workload, p_live: PendingTx | None, rec: ValidationRecord) -> None:
-    """Track the new MPToken issuance ID after a successful MPTokenIssuanceCreate."""
+def on_mptoken_created(wl: Workload, p_live: PendingTx | None) -> None:
+    """Track new MPToken issuance ID — computed deterministically, no RPC needed."""
     if not (p_live and p_live.transaction_type == C.TxType.MPTOKEN_ISSUANCE_CREATE):
         return
-    try:
-        tx_result = await wl._rpc(Tx(transaction=rec.txn))
-        mpt_id = tx_result.result.get("mpt_issuance_id")
-        if mpt_id and mpt_id not in wl._mptoken_issuance_ids:
-            wl._mptoken_issuance_ids.append(mpt_id)
-            wl.update_txn_context()
-            log.debug("Tracked new MPToken issuance ID: %s", mpt_id)
-    except Exception as e:
-        log.warning("Failed to extract MPToken issuance ID from %s: %s", rec.txn, e)
+    if not (p_live.account and p_live.sequence is not None):
+        log.warning("MPTokenIssuanceCreate missing account/sequence: %s", p_live.tx_hash)
+        return
+    mpt_id = mptid(p_live.account, p_live.sequence)
+    if mpt_id not in wl._mptoken_issuance_ids:
+        wl._mptoken_issuance_ids.append(mpt_id)
+        wl.update_txn_context()
+        log.info("Tracked MPToken issuance: %s (account=%s seq=%d)", mpt_id, p_live.account, p_live.sequence)
 
 
 # ---------------------------------------------------------------------------
