@@ -55,6 +55,15 @@ Top priority. The codebase works but has accumulated dead code, debug artifacts,
 
 
 ## Features
+- [ ] Query endpoints for tracked objects (all have internal tracking, none have GET endpoints):
+  - `GET /state/nfts` — NFTs (id → owner)
+  - `GET /state/offers` — DEX offers
+  - `GET /state/tickets` — tickets (account → set of seqs)
+  - `GET /state/checks` — checks
+  - `GET /state/escrows` — escrows
+  - `GET /state/credentials` — credentials
+  - `GET /state/vaults` — vaults
+  - `GET /state/domains` — permissioned domains
 - [ ] Text box/field/separate page that allows us to just submit arbitrary txn JSON data.
 - [ ] Ability to send a txn to a _specific_ host — for when we have more than one p2p node defined or just to submit txns directly to the validators.
 - [ ] Standalone mode functionality

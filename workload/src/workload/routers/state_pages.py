@@ -46,9 +46,29 @@ async def state_dashboard(request: Request) -> HTMLResponse:
             ws = cc.ws_port + i
             nodes.append({"name": name, "ws": ws})
     except (ImportError, Exception) as e:
-        log.debug("gl (generate_ledger) not available (%s), using default WS node", e)
+        log.debug("gl (generate_ledger) not available (%s), scanning compose file", e)
+        # Fallback: scan testnet compose file for services with WS port mappings
+        compose_path = Path("testnet/docker-compose.yml")
+        if compose_path.exists():
+            try:
+                import re
+
+                text = compose_path.read_text()
+                # Match services with port mappings like "6006:6006" or "6007:6006"
+                current_name = None
+                for line in text.splitlines():
+                    m = re.match(r"\s+container_name:\s*(\S+)", line)
+                    if m:
+                        current_name = m.group(1)
+                    m = re.match(r"\s+-\s+(\d+):(\d+)", line)
+                    if m and current_name:
+                        host_port, container_port = int(m.group(1)), int(m.group(2))
+                        if container_port == ws_port:
+                            nodes.append({"name": current_name, "ws": host_port})
+            except Exception as e2:
+                log.debug("compose file scan failed: %s", e2)
     if not nodes:
-        nodes.append({"name": hostname, "ws": ws_port})
+        nodes.append({"name": "rippled", "ws": ws_port})
     nodes_json = json.dumps(nodes)
 
     html_content = f"""
@@ -236,7 +256,9 @@ async def state_dashboard(request: Request) -> HTMLResponse:
             <div class="controls">
                 <button class="btn btn-start" onclick="fetch('/workload/start', {{method:'POST'}})">Start</button>
                 <button class="btn btn-stop" onclick="fetch('/workload/stop', {{method:'POST'}})">Stop</button>
-                <a class="link-btn" href="https://custom.xrpl.org/localhost:6006" target="_blank">XRPL Explorer</a>
+                <a class="link-btn" id="explorer-link" href="#" target="_blank">XRPL Explorer</a>
+                <a class="link-btn" href="/dex/amm-pools" target="_blank">AMM Pools</a>
+                <a class="link-btn" href="/state/mpt-issuances" target="_blank">MPTokens</a>
                 <a class="link-btn" href="/logs/page" target="_blank">Logs</a>
                 <a class="link-btn" href="/docs" target="_blank">API Docs</a>
             </div>
@@ -249,7 +271,7 @@ async def state_dashboard(request: Request) -> HTMLResponse:
             <div class="panel">
                 <h2>Ledger Stream</h2>
                 <div class="explorer-viewport">
-                    <iframe src="https://custom.xrpl.org/localhost:6006" id="explorer-frame"></iframe>
+                    <iframe src="" id="explorer-frame"></iframe>
                 </div>
             </div>
 
@@ -270,6 +292,13 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                                style="width:100%;accent-color:#d29922;cursor:pointer"
                                oninput="document.getElementById('max-pending-value').textContent=this.value"
                                onchange="sliderCooldown=Date.now()+4000;fetch('/workload/max-pending',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{max_pending:parseInt(this.value)}})}})">
+                    </div>
+                    <div class="fill-control" style="flex:1;min-width:280px">
+                        <label>Invalid intent: <span id="invalid-intent-value" style="font-weight:700;color:#f85149">10</span>% <span style="color:#8b949e;font-size:11px">(0 = all valid)</span></label>
+                        <input type="range" id="invalid-intent-input" min="0" max="100" step="5" value="10"
+                               style="width:100%;accent-color:#f85149;cursor:pointer"
+                               oninput="document.getElementById('invalid-intent-value').textContent=this.value"
+                               onchange="sliderCooldown=Date.now()+4000;fetch('/workload/intent',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{invalid:parseFloat(this.value)/100}})}})">
                     </div>
                 </div>
                 <div id="effective-rate" style="color:#8b949e;font-size:12px;margin-bottom:12px"></div>
@@ -298,6 +327,12 @@ async def state_dashboard(request: Request) -> HTMLResponse:
         </div>
 
         <script>
+        // --- Explorer + WS use browser hostname so dashboard works from remote machines ---
+        const _h = location.hostname;
+        const _explorerBase = 'http://custom.xrpl.org/' + _h + ':6006';
+        document.getElementById('explorer-frame').src = _explorerBase;
+        document.getElementById('explorer-link').href = _explorerBase;
+
         // --- Nodes ---
         const NODES = {nodes_json};
         const STREAMS = [
@@ -560,7 +595,7 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                 return;
             }}
             const port = nodeSelect.value;
-            const url = 'ws://{hostname}:' + port;
+            const url = 'ws://' + location.hostname + ':' + port;
             wsLog('Connecting to ' + url + '...', 'info');
             ws = new WebSocket(url);
             ws.onopen = () => {{
@@ -617,11 +652,12 @@ async def state_dashboard(request: Request) -> HTMLResponse:
 
         async function refreshStats() {{
             try {{
-                const [statsRes, feeRes, rateRes, failCodesRes] = await Promise.all([
+                const [statsRes, feeRes, rateRes, failCodesRes, intentRes] = await Promise.all([
                     fetch('/state/summary').then(r=>r.json()),
                     fetch('/state/fees').then(r=>r.json()),
                     fetch('/workload/rate-controls').then(r=>r.json()),
                     fetch('/state/failure-codes').then(r=>r.json()),
+                    fetch('/workload/intent').then(r=>r.json()),
                 ]);
                 const s = statsRes;
                 const f = feeRes;
@@ -651,6 +687,13 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                 if (!cool && document.activeElement !== mpInput) {{
                     mpInput.value = rateRes.max_pending_per_account;
                     document.getElementById('max-pending-value').textContent = rateRes.max_pending_per_account;
+                }}
+
+                const intentInput = document.getElementById('invalid-intent-input');
+                const intentPct = Math.round((intentRes.invalid || 0) * 100);
+                if (!cool && document.activeElement !== intentInput) {{
+                    intentInput.value = intentPct;
+                    document.getElementById('invalid-intent-value').textContent = intentPct;
                 }}
 
                 // Effective rate display
@@ -694,7 +737,7 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                         const color = pct >= 80 ? '#3fb950' : pct >= 50 ? '#d29922' : '#f85149';
                         const disabled = configDisabledTypes.has(t);
                         const amendmentDisabled = temDisabledTypes.has(t);
-                        const link = '<a href="/state/type/'+t+'/page" target="_blank" style="text-decoration:none;color:inherit">'+t+'</a>';
+                        const link = '<a href="/state/types/'+t+'" target="_blank" style="text-decoration:none;color:inherit">'+t+'</a>';
                         const nameHtml = disabled
                             ? '<s style="color:#484f58">'+link+'</s> <span style="color:#484f58;font-size:11px">disabled</span>'
                             : amendmentDisabled
@@ -708,9 +751,9 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                 // Top failures (right) — uses cumulative counters (survives pending cleanup)
                 const topFail = (failCodesRes.failure_codes || []).slice(0, 10);
                 if (topFail.length) {{
-                    tablesHtml += '<div class="failures-table"><h2><a href="/state/failed/page" target="_blank" style="text-decoration:none;color:inherit;cursor:pointer">Top Failures &#8599;</a></h2><table><thead><tr><th>Error Code</th><th>Count</th></tr></thead><tbody>';
+                    tablesHtml += '<div class="failures-table"><h2><a href="/state/failures" target="_blank" style="text-decoration:none;color:inherit;cursor:pointer">Top Failures &#8599;</a></h2><table><thead><tr><th>Error Code</th><th>Count</th></tr></thead><tbody>';
                     topFail.forEach(([r,c]) => {{
-                        tablesHtml += '<tr><td><a href="/state/failed/'+r+'/page" target="_blank" style="text-decoration:none"><span class="badge error" style="cursor:pointer">'+r+'</span></a></td><td>'+fmt(c)+'</td></tr>';
+                        tablesHtml += '<tr><td><a href="/state/failures/'+r+'" target="_blank" style="text-decoration:none"><span class="badge error" style="cursor:pointer">'+r+'</span></a></td><td>'+fmt(c)+'</td></tr>';
                     }});
                     tablesHtml += '</tbody></table></div>';
                 }}
@@ -734,7 +777,7 @@ async def state_dashboard(request: Request) -> HTMLResponse:
     return HTMLResponse(content=html_content)
 
 
-@router.get("/failed/page")
+@router.get("/failures")
 async def state_all_failures_page(request: Request) -> HTMLResponse:
     """HTML page showing all failure codes with cumulative counts."""
     failure_codes = request.app.state.workload.snapshot_failure_codes()
@@ -745,7 +788,7 @@ async def state_all_failures_page(request: Request) -> HTMLResponse:
     for code, count in sorted_codes:
         rows += (
             f"<tr>"
-            f'<td><a href="/state/failed/{code}/page" style="text-decoration:none">'
+            f'<td><a href="/state/failures/{code}" style="text-decoration:none">'
             f'<span class="badge">{code}</span></a></td>'
             f"<td>{count:,}</td>"
             f"</tr>"
@@ -777,7 +820,7 @@ async def state_all_failures_page(request: Request) -> HTMLResponse:
     return HTMLResponse(content=html)
 
 
-@router.get("/failed/{error_code}/page")
+@router.get("/failures/{error_code}")
 async def state_failed_page(request: Request, error_code: str) -> HTMLResponse:
     """HTML page showing failed transactions for a specific error code."""
     all_failed = request.app.state.workload.snapshot_failed()
@@ -788,7 +831,7 @@ async def state_failed_page(request: Request, error_code: str) -> HTMLResponse:
     ]
 
     hostname = RPC.split("//")[1].split(":")[0] if "//" in RPC else RPC.split(":")[0]
-    explorer_base = f"https://custom.xrpl.org/{hostname}:6006"
+    explorer_base = f"http://custom.xrpl.org/{hostname}:6006"
     # tec codes are applied to the ledger and have an on-chain hash
     on_ledger = error_code.startswith("tec") or error_code.startswith("tes")
     rows = ""
@@ -891,14 +934,14 @@ async def state_failed_page(request: Request, error_code: str) -> HTMLResponse:
     return HTMLResponse(content=html)
 
 
-@router.get("/type/{txn_type}/page")
+@router.get("/types/{txn_type}")
 async def state_type_page(request: Request, txn_type: str) -> HTMLResponse:
     """HTML page showing transactions for a specific type."""
     wl = request.app.state.workload
     filtered = [r for r in wl.snapshot_pending(open_only=False) if r.get("transaction_type") == txn_type]
 
     hostname = RPC.split("//")[1].split(":")[0] if "//" in RPC else RPC.split(":")[0]
-    explorer_base = f"https://custom.xrpl.org/{hostname}:6006"
+    explorer_base = f"http://custom.xrpl.org/{hostname}:6006"
     rows = ""
     for f in filtered:
         account = f.get("account", "")
@@ -1001,5 +1044,41 @@ async def state_type_page(request: Request, txn_type: str) -> HTMLResponse:
         }}}});
     }}}})();
     </script>
+    </body></html>"""
+    return HTMLResponse(content=html)
+
+
+@router.get("/mpt-issuances", response_class=HTMLResponse)
+async def state_mptokens_page(request: Request) -> HTMLResponse:
+    """HTML page listing all tracked MPToken issuance IDs."""
+    wl = request.app.state.workload
+    mptoken_ids = getattr(wl, "_mptoken_issuance_ids", [])
+
+    rows = ""
+    for i, mpt_id in enumerate(mptoken_ids):
+        rows += f'<tr><td>{i}</td><td><code>{mpt_id}</code></td></tr>'
+
+    html = f"""<!DOCTYPE html>
+    <html><head>
+    <title>MPToken Issuances</title>
+    <style>
+        body {{ background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; padding: 20px; }}
+        h1 {{ color: #f0883e; }}
+        a {{ color: #58a6ff; }}
+        table {{ border-collapse: collapse; width: 100%; margin-top: 16px; }}
+        th, td {{ padding: 8px 12px; border: 1px solid #30363d; text-align: left; font-size: 13px; }}
+        th {{ background: #161b22; color: #8b949e; text-transform: uppercase; font-size: 11px; }}
+        tr:hover {{ background: #161b22; }}
+        code {{ color: #f0883e; }}
+        .count {{ color: #8b949e; font-size: 14px; }}
+    </style>
+    </head><body>
+    <a href="/state/dashboard">&larr; Dashboard</a>
+    <h1>MPToken Issuances <span class="count">{len(mptoken_ids)} issuances</span></h1>
+    <table>
+        <thead><tr><th>#</th><th>MPToken Issuance ID</th></tr></thead>
+        <tbody>{rows if rows else '<tr><td colspan="2" style="text-align:center;color:#8b949e">No MPToken issuances tracked</td></tr>'}</tbody>
+    </table>
+    <p style="margin-top:16px;color:#8b949e">JSON: <a href="/state/mptokens">/state/mptokens</a></p>
     </body></html>"""
     return HTMLResponse(content=html)
