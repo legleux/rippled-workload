@@ -36,12 +36,20 @@
 - [x] **File logging** — `workload.log` at DEBUG, console at INFO, rotating 50MB × 5
 - [x] **Invariants doc** — `workload/docs/invariants.md` with 12 invariants
 
-## Mostly Resolved: tefPAST_SEQ Large Deltas
-Still occurs on first 2-3 batches (~10% rate), then self-heals via cascade. Not blocking.
-Root causes found and fixed: consumer cascade RPC flood, AMMDeposit KeyError, consumer dedup.
-- [x] ~~`next_seq` sync in `record_validated`~~ DONE (2026-03-27) — `max(next_seq, validated_seq + 1)`
-- [x] ~~`tem` sequence leak~~ DONE (2026-03-27) — `release_seq` for `tem` rejections (malformed txns don't consume sequences)
-- [x] ~~Aggressive `expire_past_lls`~~ DONE (2026-03-27) — removed per-ledger-close call; was expiring txns before validation events arrived
+## P0: Sequence Management & Submission Fix
+**Full plan:** `workload/docs/todo/seq-management-fix-plan.md` (2026-03-31)
+
+Four root causes identified for persistent tefPAST_SEQ failures:
+- [ ] **Phase 1 (Critical):** `expire_past_lls()` doesn't reset sequences — freed accounts immediately tefPAST_SEQ
+- [ ] **Phase 2:** `account_generation` captured but never checked — stale txns submitted after cascade
+- [ ] **Phase 3:** Remove `max_pending_per_account` knob (lock to 1), simplify clean/partial pools
+- [ ] **Phase 4:** `record_validated()` updates `next_seq` without lock — defensive fix
+- [ ] **Phase 5 (needs re-review):** Fee strategy — cache-and-react vs. WS-derived escalated fee
+
+Previously fixed (still valid):
+- [x] ~~`next_seq` sync in `record_validated`~~ DONE (2026-03-27)
+- [x] ~~`tem` sequence leak~~ DONE (2026-03-27)
+- [x] ~~Aggressive `expire_past_lls`~~ DONE (2026-03-27)
 
 
 
@@ -85,7 +93,7 @@ Top priority. The codebase works but has accumulated dead code, debug artifacts,
 - [x] ~~Remove dead `init_participants` + 4 helpers (~930 lines) from `workload_core.py`~~ (2026-03-26)
 - [x] ~~Add `/version` endpoint using `importlib.metadata` (matches generate_ledger pattern)~~ (2026-03-26)
 - [ ] **P0: Reimplement `init_participants`** — organic genesis init for non-pre-genesis environments. See `workload/docs/todo/reimplement_init_participants.md`
-- [ ] **Next refactor target: submission pipeline** — `submit_pending` (CC D/28, cognitive 51) + `build_sign_and_track` (CC C/15, cognitive 19)
+- [ ] **Next refactor target: submission pipeline** — `submit_pending` (CC D/28, cognitive 51) + `build_sign_and_track` (CC C/15, cognitive 19). Seq fix plan phases 1-2 will simplify these.
 - [ ] Move `workload_running`, `workload_stop_event`, `workload_task`, `workload_stats` from module-level globals onto `app.state`
 - [ ] Extract constants: hardcoded WS port (6006)
 - [ ] `sqlite_store.by_type` always returns `{}` — implement or remove
