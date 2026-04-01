@@ -130,8 +130,12 @@ Top priority. The codebase works but has accumulated dead code, debug artifacts,
 
 ### Python 3.13+ Modernization
 - [ ] Audit for opportunities: type parameter syntax, match statements, StrEnum patterns
-- [ ] Package & CI pipeline
+- [x] ~~Package & CI pipeline~~ DONE (2026-04-01) — tests.yml (lint → complexity → test matrix → build → docker), publish.yml (v* tags)
 - [x] ~~Pre-commit linting and formatting with ruff~~
+- [x] ~~Conventional commits + pre-push tests in pre-commit~~ DONE (2026-04-01)
+- [x] ~~`--version` CLI flag~~ DONE (2026-04-01)
+- [x] ~~Complexity reporting (complexipy + radon) in CI~~ DONE (2026-04-01)
+- [ ] Configure OIDC trusted publishing on TestPyPI/PyPI and uncomment publish job
 
 ---
 

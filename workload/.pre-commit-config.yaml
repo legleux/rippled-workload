@@ -1,6 +1,6 @@
 repos:
--   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
     hooks:
       - id: check-added-large-files
       - id: check-executables-have-shebangs
@@ -12,11 +12,26 @@ repos:
       - id: end-of-file-fixer
       - id: trailing-whitespace
 
--   repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: 3b4bc031619cde2e0a9f3c4441ac7cc8227245a4  # frozen: v0.14.1
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: 3b4bc031619cde2e0a9f3c4441ac7cc8227245a4 # frozen: v0.14.1
     hooks:
-      # Run the linter.
       - id: ruff-check
-        args: [ --fix ]
-      # Run the formatter.
+        args: [--fix]
       - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: conventional-pre-commit
+        name: Conventional Commit
+        language: system
+        entry: sh -c 'case "$(git branch --show-current)" in main|develop) uvx conventional-pre-commit "$@";; *) exit 0;; esac' --
+        stages: [commit-msg]
+        always_run: true
+
+      - id: pytest
+        name: pytest
+        language: system
+        entry: uv run --group test pytest tests/ -x -q --no-header
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]

@@ -1,0 +1,102 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, develop, "ci/*"]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    container: ghcr.io/astral-sh/uv:python3.14-trixie
+    defaults:
+      run:
+        working-directory: workload
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv sync --group lint
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  complexity:
+    name: Complexity
+    runs-on: ubuntu-latest
+    container: ghcr.io/astral-sh/uv:python3.14-trixie
+    defaults:
+      run:
+        working-directory: workload
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv sync --group dev
+      - name: Cognitive complexity (complexipy)
+        run: |
+          uv run complexipy src/workload/ --max-complexity 15 --output-csv complexity.csv || true
+          echo "### Cognitive Complexity" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          uv run complexipy src/workload/ --max-complexity 15 2>&1 | tail -30 >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+      - name: Cyclomatic complexity (radon)
+        run: |
+          echo "### Cyclomatic Complexity" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          uv run radon cc src/workload/ -a -nc >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+      - name: Upload complexity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: complexity-report
+          path: workload/complexity.csv
+
+  test:
+    name: Test (Python ${{ matrix.python }})
+    needs: lint
+    runs-on: ubuntu-latest
+    container: ghcr.io/astral-sh/uv:python${{ matrix.python }}-trixie
+    defaults:
+      run:
+        working-directory: workload
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv sync --group test
+      - name: Run tests
+        run: uv run pytest tests/ -x --tb=short -m "not mutating and not reset" --junitxml=results.xml
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.python }}
+          path: workload/results.xml
+
+  build:
+    name: Build
+    needs: test
+    runs-on: ubuntu-latest
+    container: ghcr.io/astral-sh/uv:python3.14-trixie
+    defaults:
+      run:
+        working-directory: workload
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: workload/dist/
+
+  docker:
+    name: Docker Build
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build workload image
+        run: docker build -f workload/Dockerfile -t workload:test workload/
+      - name: Verify image runs
+        run: docker run --rm workload:test python -c "from workload import __version__; print(__version__)"

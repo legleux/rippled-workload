@@ -367,7 +367,8 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 ## Important Notes
 
 - The workload uses Python 3.14 (requires 3.13+) and the `uv` package manager
-- `generate-ledger` is a local editable dependency (`../../generate_ledger`). Importable as both `generate_ledger` and `gl` (alias package).
+- `generate-ledger` is an optional dependency (`uv sync --group gen`). Local editable path in `[tool.uv.sources]`. Importable as both `generate_ledger` and `gl`.
+- `antithesis` SDK is an optional dependency (`uv sync --group antithesis`). Both `assertions.py` and `randoms.py` fall back gracefully when it's absent.
 - SQLite persistence is **opt-in** via `WORKLOAD_PERSIST=1`. Default: fresh genesis load every restart.
 - All timestamps are in seconds since epoch (time.time())
 - Account initialization happens at startup in `lifespan()` (app.py)

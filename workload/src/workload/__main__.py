@@ -1,8 +1,11 @@
 import argparse
 
+from workload import __version__
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="workload", description="XRPL workload generator")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subs = parser.add_subparsers(dest="command")
 
     # --- run (explicit server start, native) ---

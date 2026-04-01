@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:0.10-python3.13-trixie
+FROM ghcr.io/astral-sh/uv:0.11-python3.14-trixie
 
 ENV PYTHONUNBUFFERED=1
 WORKDIR /workload

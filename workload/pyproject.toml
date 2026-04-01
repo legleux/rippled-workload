@@ -1,13 +1,12 @@
 [project]
 name = "workload"
 version = "0.1.0"
-description = "Add your description here"
+description = "XRPL transaction traffic generator for Antithesis testing of xrpld"
 authors = [
     { name = "Michael Legleux", email = "mlegleux@ripple.com" }
 ]
 dependencies = [
     "xrpl-py",
-    "antithesis>=0.1.17",
     "requests>=2.32.4",
     "anyio>=4.9.0",
     "ruamel-yaml>=0.18.14",
@@ -72,10 +71,17 @@ generate-ledger = { path = "../../generate_ledger", editable = true }
 
 [dependency-groups]
 dev = [
-    "pre-commit>=4.3.0",
+    {include-group = "lint"},
+    {include-group = "test"},
+    "complexipy>=5.2.0",
+    "radon>=6.0.1",
 ]
 lint = [
+    "pre-commit>=4.3.0",
     "ruff>=0.14.1",
+]
+antithesis = [
+    "antithesis>=0.2.0",
 ]
 gen = [
     "generate-ledger",

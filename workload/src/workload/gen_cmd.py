@@ -70,14 +70,13 @@ def run_gen(
     # --- Write ledger.json + accounts.json ---
     write_ledger_file(config=ledger_cfg)
 
-    # --- Rippled configs ---
+    # --- xrpld configs ---
     xrpld_cfg = XrpldConfigSpec(
         num_validators=num_validators,
         base_dir=base_dir / "volumes",
         reference_fee=ledger_cfg.fee_cfg.base_fee_drops,
         account_reserve=ledger_cfg.fee_cfg.reserve_base_drops,
         owner_reserve=ledger_cfg.fee_cfg.reserve_increment_drops,
-        peer_port=2459,  # Must match the template's [port_peer] port
     )
     xrpld_cfg.write()
 
