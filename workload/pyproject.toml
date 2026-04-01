@@ -37,6 +37,14 @@ include = [
   "README.md",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-rP --tb=short -m 'not mutating and not reset'"
+markers = [
+    "mutating: tests that submit transactions or toggle workload state (deselected by default)",
+    "reset: tests that reset the network (deselected by default, very destructive)",
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py313"
@@ -71,4 +79,9 @@ lint = [
 ]
 gen = [
     "generate-ledger",
+]
+test = [
+    "pytest>=8.4",
+    "pytest-cov>=6.0",
+    "httpx>=0.28",
 ]

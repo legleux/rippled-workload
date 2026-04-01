@@ -81,6 +81,7 @@ Top priority. The codebase works but has accumulated dead code, debug artifacts,
 **Target**: Modern Python 3.13+ only. No backwards compatibility. Use StrEnum, match statements, type parameter syntax (`type Foo = ...`), `asyncio.TaskGroup`, etc. wherever appropriate.
 
 **Flesh out test framework**
+- [ ] Backport tests for `test_cmd.py` — written before TDD was adopted, needs unit tests for step functions, report generation, snapshot logic, and implication chain (`--up` → `--gen` → `--clean`)
 - [ ] Test that auto-generated txns can survive fee escalation. Initially it'll be ok to mark as `xfail` until the feature is actually implemented.
 - [ ] Test the txn lifecycle. How to actually do that?
 

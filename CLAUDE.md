@@ -253,15 +253,20 @@ print(f\"state: {i['server_state']}, ledgers: {i['complete_ledgers']}, peers: {i
 
 ### Testing
 
-No formal test suite. Test via API endpoints:
-
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/transaction/random
-curl http://localhost:8000/state/summary
-curl http://localhost:8000/state/dashboard   # HTML dashboard
-curl http://localhost:8000/docs              # Swagger UI
+cd workload
+
+# Default: GET endpoints only (~45 tests, requires running network)
+uv run --group test pytest
+
+# Include mutating tests (submits txns, toggles workload state)
+uv run --group test pytest -m "not reset"
+
+# Everything including network reset (destructive!)
+uv run --group test pytest -m ""
 ```
+
+Tests hit the live API via httpx. Markers: `mutating` (deselected by default), `reset` (deselected by default, tears down network).
 
 Curl-based load scripts in `test_composer/all_transactions/`.
 
