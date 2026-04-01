@@ -9,7 +9,7 @@ cd workload
 
 docker run --rm -it \
     --name workload_test \
-    -e RIPPLED_NAME=rippled \
+    -e XRPLD_IP=xrpld \
     -e VALIDATOR_NAME=val \
     -e NUM_VALIDATORS=5 \
     --network antithesis_net \

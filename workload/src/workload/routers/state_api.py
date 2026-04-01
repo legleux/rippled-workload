@@ -71,7 +71,7 @@ async def state_tx(tx_hash: str, request: Request):
 
 @router.get("/fees")
 async def state_fees(request: Request):
-    """Get current fee escalation state from rippled."""
+    """Get current fee escalation state from xrpld."""
     wl = request.app.state.workload
     fee_info = await wl.get_fee_info()
     return {

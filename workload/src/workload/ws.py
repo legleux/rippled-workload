@@ -1,6 +1,6 @@
 """
 WebSocket listener that:
-1. Maintains persistent connection to rippled WS endpoint
+1. Maintains persistent connection to xrpld WS endpoint
 2. Subscribes to account streams for validated + proposed txns
 3. Publishes events to a queue for workload processing
 4. Handles reconnection with exponential backoff
@@ -56,14 +56,14 @@ async def ws_listener(
     accounts_ready: asyncio.Event | None = None,
 ) -> None:
     """
-    Connect to rippled WebSocket, subscribe to streams, and publish events to queue.
+    Connect to xrpld WebSocket, subscribe to streams, and publish events to queue.
 
     Parameters
     ----------
     stop:
         Event to signal graceful shutdown
     ws_url:
-        WebSocket URL (e.g., "ws://rippled:6006")
+        WebSocket URL (e.g., "ws://xrpld:6006")
     event_queue:
         Queue to publish parsed events for workload consumption
     accounts_provider:

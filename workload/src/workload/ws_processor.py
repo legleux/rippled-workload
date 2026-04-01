@@ -133,7 +133,7 @@ async def _handle_tx_validated(workload: "Workload", msg: dict) -> None:
         "ledger_index": 12345
     }
     """
-    # Hash fallback: try top-level "hash" first (newer rippled), then nested "transaction.hash"
+    # Hash fallback: try top-level "hash" first (newer xrpld), then nested "transaction.hash"
     tx_hash = msg.get("hash") or msg.get("transaction", {}).get("hash")
 
     if not tx_hash:
@@ -241,7 +241,7 @@ async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
 async def _handle_tx_proposed(workload: "Workload", msg: dict) -> None:
     """Handle a proposed (unvalidated) transaction from accounts_proposed subscription.
 
-    This gives us early feedback when rippled processes our txn — we see engine_result
+    This gives us early feedback when xrpld processes our txn — we see engine_result
     (e.g. tesSUCCESS, tefPAST_SEQ) immediately via WS, before waiting for validation.
     """
     tx_hash = msg.get("hash") or msg.get("transaction", {}).get("hash")

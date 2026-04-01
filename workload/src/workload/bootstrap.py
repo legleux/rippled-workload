@@ -31,16 +31,16 @@ def _log_task_exception(task: asyncio.Task) -> None:
 
 
 if Path("/.dockerenv").is_file():
-    rippled = cfg["rippled"]["docker"]
+    xrpld = cfg["xrpld"]["docker"]
 else:
-    rippled = cfg["rippled"]["local"]
+    xrpld = cfg["xrpld"]["local"]
 
-rpc_port = cfg["rippled"]["rpc_port"]
-ws_port = cfg["rippled"]["ws_port"]
-rippled_ip = os.getenv("RIPPLED_IP", rippled)
+rpc_port = cfg["xrpld"]["rpc_port"]
+ws_port = cfg["xrpld"]["ws_port"]
+xrpld_ip = os.getenv("XRPLD_IP", os.getenv("RIPPLED_IP", xrpld))
 
-RPC = os.getenv("RPC_URL", f"http://{rippled_ip}:{rpc_port}")
-WS = os.getenv("WS_URL", f"ws://{rippled_ip}:{ws_port}")
+RPC = os.getenv("RPC_URL", f"http://{xrpld_ip}:{rpc_port}")
+WS = os.getenv("WS_URL", f"ws://{xrpld_ip}:{ws_port}")
 
 to = cfg["timeout"]
 TIMEOUT = 3.0
@@ -49,8 +49,8 @@ OVERALL_STARTUP_TIMEOUT = to["startup"]
 LEDGERS_TO_WAIT = to["initial_ledgers"]
 
 
-async def _probe_rippled(url: str, max_retries: int = 30, retry_delay: float = 2.0) -> None:
-    """Probe rippled RPC endpoint with retries until it responds.
+async def _probe_xrpld(url: str, max_retries: int = 30, retry_delay: float = 2.0) -> None:
+    """Probe xrpld RPC endpoint with retries until it responds.
 
 
     Args:
@@ -77,7 +77,7 @@ async def _probe_rippled(url: str, max_retries: int = 30, retry_delay: float = 2
                 log.error(
                     "\n"
                     "========================================================\n"
-                    f"  Cannot reach rippled at {url}\n"
+                    f"  Cannot reach xrpld at {url}\n"
                     f"  Failed after {max_retries} attempts ({e.__class__.__name__})\n"
                     "\n"
                     "  Is the network running? Start it with:\n"
@@ -91,7 +91,7 @@ async def _probe_rippled(url: str, max_retries: int = 30, retry_delay: float = 2
 
 
 async def wait_for_ledgers(url: str, count: int, timeout: float = 120.0, retry_delay: float = 5.0) -> None:
-    """Connect to the rippled WebSocket and wait for *count* ledger closes.
+    """Connect to the xrpld WebSocket and wait for *count* ledger closes.
 
     Retries the WS connection on failure (the hub may not be ready yet).
     The overall *timeout* caps total wall-clock time across all attempts.
@@ -122,7 +122,7 @@ async def wait_for_ledgers(url: str, count: int, timeout: float = 120.0, retry_d
                 log.error(
                     "\n"
                     "========================================================\n"
-                    f"  Cannot connect to rippled WebSocket at {url}\n"
+                    f"  Cannot connect to xrpld WebSocket at {url}\n"
                     f"  {e.__class__.__name__}: {e}\n"
                     "\n"
                     "  The RPC endpoint responded but the WebSocket is not\n"
@@ -147,7 +147,7 @@ async def lifespan(app: FastAPI):
 
     async with asyncio.timeout(OVERALL_STARTUP_TIMEOUT):
         log.info("[1/4] Probing RPC endpoint...")
-        await _probe_rippled(RPC)
+        await _probe_xrpld(RPC)
         log.info("[2/4] Waiting for ledger progress (%d closes)...", LEDGERS_TO_WAIT)
         await wait_for_ledgers(WS, LEDGERS_TO_WAIT)
 

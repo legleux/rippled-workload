@@ -629,7 +629,7 @@ class Workload:
         """Pre-fetch and cache sequence numbers for accounts in batches.
 
         Warms the alloc_seq cache so the build loop doesn't pay RPC latency.
-        Processes accounts in chunks of `batch_size` to avoid overwhelming rippled.
+        Processes accounts in chunks of `batch_size` to avoid overwhelming xrpld.
         Retries failed accounts once. Returns the number of accounts warmed.
         """
         cold = [addr for addr in addresses if self._record_for(addr).next_seq is None]
@@ -731,14 +731,14 @@ class Workload:
         return ss.result["state"]["validated_ledger"]["seq"]
 
     async def server_info(self) -> dict:
-        """Get current server info from rippled. Result structure changes, see XRPL docs."""
+        """Get current server info from xrpld. Result structure changes, see XRPL docs."""
         from xrpl.models.requests import ServerInfo
 
         r = await self.client.request(ServerInfo())
         return r.result
 
     async def get_fee_info(self) -> "FeeInfo":
-        """Get current fee escalation state from rippled using the fee command.
+        """Get current fee escalation state from xrpld using the fee command.
 
         Returns FeeInfo with:
         - expected_ledger_size: Dynamic limit for base fee transactions
@@ -1397,7 +1397,7 @@ class Workload:
             await self.record_expired(p.tx_hash)
             return p.state, None
 
-        # Don't transition FAILED_NET → RETRYABLE: the tx may still be queued in rippled.
+        # Don't transition FAILED_NET → RETRYABLE: the tx may still be queued in xrpld.
         # Keep it locked (pending) until LLS expires or WS confirms validation.
         if p.state not in (C.TxState.SUBMITTED, C.TxState.FAILED_NET):
             p.state = C.TxState.RETRYABLE
@@ -1656,7 +1656,7 @@ class Workload:
 
     def snapshot_tx(self, tx_hash: str) -> dict[str, Any]:
         p = self.pending.get(tx_hash)
-        ws_port = self.config.get("rippled", {}).get("ws_port", 6006)
+        ws_port = self.config.get("xrpld", {}).get("ws_port", 6006)
         if not p:
             return {}
         return {

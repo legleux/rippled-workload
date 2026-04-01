@@ -61,9 +61,9 @@ FROM ubuntu:${CODENAME}
 
 COPY --from=build /opt/ripple /opt/ripple
 COPY --from=build /usr/lib/libvoidstar.so /usr/lib/libvoidstar.so
-COPY --from=build /root/rippled.txt /opt/ripple/bin/rippled.git-commit.txt
+COPY --from=build /root/rippled.txt /opt/ripple/bin/xrpld.git-commit.txt
 
-RUN ln -s /opt/ripple/bin/rippled /usr/local/bin/rippled
+RUN ln -s /opt/ripple/bin/xrpld /usr/local/bin/xrpld
 RUN mkdir -p /etc/opt && ln -s /opt/ripple/etc/ /etc/opt/ripple
 
 ENV DEBIAN_FRONTEND=noninteractive

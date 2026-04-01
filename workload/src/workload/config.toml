@@ -132,7 +132,7 @@ initial_ledgers = 1
 accounts_json = "testnet/accounts.json"
 currencies = ["USD", "CNY", "BTC", "ETH"]  # Currencies per gateway
 
-[rippled]
+[xrpld]
 docker = "xrpld"
 local = "localhost"
 rpc_port = 5005

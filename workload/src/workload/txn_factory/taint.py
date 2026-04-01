@@ -2,7 +2,7 @@
 
 Applies random semantic mutations to valid transaction dicts. The tainted dicts
 remain structurally valid (pass xrpl-py model validation and binary codec encoding)
-but are semantically wrong — rippled rejects them with tem/tef/tec codes.
+but are semantically wrong — xrpld rejects them with tem/tef/tec codes.
 
 Tainting strategies are collected from builder modules (TAINTERS dicts) and
 supplemented with a generic fallback.

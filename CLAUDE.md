@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the **rippled-workload** repository for Antithesis testing of the XRPL (XRP Ledger) rippled node. The main component is a **FastAPI-based workload generator** that creates and submits XRPL transactions against a local testnet, tracking their lifecycle through the consensus process.
+This is the **rippled-workload** repository for Antithesis testing of the XRPL (XRP Ledger) xrpld node. The main component is a **FastAPI-based workload generator** that creates and submits XRPL transactions against a local testnet, tracking their lifecycle through the consensus process.
 
 A separate **sidecar** container provides passive monitoring and Antithesis assertions.
 
@@ -52,7 +52,7 @@ The ledger close is the tick for **validation tracking and lifecycle management*
 - DON'T: Gate submission on ledger close events
 - DON'T: Use wall-clock time for submission pacing
 
-**Rationale**: XRPL consensus operates on discrete ledger closes (~3-4 seconds). Validation, sequence numbers, and queue behavior are tied to ledger boundaries. But submission should be immediate — txns sit in rippled's internal queue until applied. The workload submits continuously (build → sign → submit → repeat) like a real-world client.
+**Rationale**: XRPL consensus operates on discrete ledger closes (~3-4 seconds). Validation, sequence numbers, and queue behavior are tied to ledger boundaries. But submission should be immediate — txns sit in xrpld's internal queue until applied. The workload submits continuously (build → sign → submit → repeat) like a real-world client.
 
 ### Domain Model
 
@@ -68,7 +68,7 @@ The workload follows a layered architecture:
 Transactions move through these states (constants.py):
 
 1. `CREATED` - Transaction built and signed locally
-2. `SUBMITTED` - Sent to rippled node
+2. `SUBMITTED` - Sent to xrpld node
 3. `RETRYABLE` - Temporary failure, can retry
 4. `VALIDATED` - Confirmed in a validated ledger
 5. `REJECTED` - Terminal rejection (tem/tef codes)
@@ -128,15 +128,15 @@ Both paths deduplicate by `(tx_hash, ledger_index)`. See `workload/ws-architectu
 
 **Known issue (2026-03-31):** `_subscribe_accounts()` reads the next WS message as the subscription ack. On reconnect, a `ledgerClosed` event can arrive first, causing the subscription to report failure. Needs message-id filtering. See TODO.
 
-**Known issue (2026-04-01):** WS connection drops every 1-2 minutes under 1005-account subscription load. Unknown whether the drop originates from our WS module (websockets lib, asyncio backpressure, read loop stalling) or rippled. Each reconnect gap causes mass LLS expiry (150-515 txns). This is now the dominant failure mode (55% success rate). See P0 in TODO.
+**Known issue (2026-04-01):** WS connection drops every 1-2 minutes under 1005-account subscription load. Unknown whether the drop originates from our WS module (websockets lib, asyncio backpressure, read loop stalling) or xrpld. Each reconnect gap causes mass LLS expiry (150-515 txns). This is now the dominant failure mode (55% success rate). See P0 in TODO.
 
 ### Submission Architecture
 
-Single unified loop in `continuous_workload()` (workload_runner.py). Two-phase build: sync compose, then parallel alloc_seq + sign via TaskGroup. Token-bucket rate limiter (`target_tps`, 0=unlimited). No queue, no producer-consumer split. Submissions are not gated on ledger close — txns go to rippled's internal queue immediately. `submission_set_size` caps txns built per iteration; `max_pending_per_account` is locked to 1 (multi-pending causes cascading tefPAST_SEQ). Self-healing via `expire_past_lls()` when all accounts are blocked — resets `next_seq=None` and bumps `generation` to invalidate pre-signed txns. Generation guard in `submit_pending()` catches stale txns. Account sequences are pre-warmed in parallel on startup via `warm_sequences()`.
+Single unified loop in `continuous_workload()` (workload_runner.py). Two-phase build: sync compose, then parallel alloc_seq + sign via TaskGroup. Token-bucket rate limiter (`target_tps`, 0=unlimited). No queue, no producer-consumer split. Submissions are not gated on ledger close — txns go to xrpld's internal queue immediately. `submission_set_size` caps txns built per iteration; `max_pending_per_account` is locked to 1 (multi-pending causes cascading tefPAST_SEQ). Self-healing via `expire_past_lls()` when all accounts are blocked — resets `next_seq=None` and bumps `generation` to invalidate pre-signed txns. Generation guard in `submit_pending()` catches stale txns. Account sequences are pre-warmed in parallel on startup via `warm_sequences()`.
 
 ### Intentionally Invalid Transactions
 
-Configurable ratio of valid/invalid transactions via `[transactions.intent]` in config.toml or dynamically via `POST /workload/intent`. Invalid txns are semantically tainted (valid structure, wrong values) so they pass xrpl-py model validation and binary codec encoding but get rejected by rippled (tem/tef/tec codes). Signing uses manual `encode_for_signing` + `sign` + `encode` + `SubmitOnly` — no xrpl-py convenience methods that could interfere.
+Configurable ratio of valid/invalid transactions via `[transactions.intent]` in config.toml or dynamically via `POST /workload/intent`. Invalid txns are semantically tainted (valid structure, wrong values) so they pass xrpl-py model validation and binary codec encoding but get rejected by xrpld (tem/tef/tec codes). Signing uses manual `encode_for_signing` + `sign` + `encode` + `SubmitOnly` — no xrpl-py convenience methods that could interfere.
 
 ### Ledger Object ID Computation
 
@@ -234,7 +234,7 @@ Reports are written to `docs/todo/{YYYY-MM-DD-HHMM}-test-results.md`.
 ### Network Setup (via generate_ledger)
 
 ```bash
-# Generate everything: ledger.json, rippled configs, docker-compose.yml
+# Generate everything: ledger.json, xrpld configs, docker-compose.yml
 # Defaults: 1000 accounts, 4 gateways, USD/CNY/BTC/ETH, full trust line coverage
 # Amendment profiles: release (mainnet amendments, default), develop (auto-fetch from GitHub), custom (JSON file)
 gen auto --amendment-profile develop
@@ -246,7 +246,7 @@ cd testnet
 docker compose up -d
 
 # Verify nodes are synced
-docker exec val0 rippled --silent server_info | python3 -c "
+docker exec val0 xrpld --silent server_info | python3 -c "
 import sys,json; i=json.load(sys.stdin)['result']['info']
 print(f\"state: {i['server_state']}, ledgers: {i['complete_ledgers']}, peers: {i['peers']}\")"
 ```
@@ -286,16 +286,16 @@ Key settings:
 - **transactions.submission_set_size**: Max txns built per loop iteration (default 200)
 - **transactions.percentages**: Weight distribution (Payment=0.25, OfferCreate=0.20, AMMDeposit=0.15, AMMWithdraw=0.10)
 - **genesis**: Path to accounts.json, gateway/user counts, currencies per gateway
-- **rippled**: Connection settings (docker hostname, local IP, ports)
+- **xrpld**: Connection settings (docker hostname, local IP, ports)
 - **timeout**: Startup timeout (600s), RPC timeout, initial ledger wait
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RPC_URL` | `http://{rippled_ip}:5005` | RPC endpoint |
-| `WS_URL` | `ws://{rippled_ip}:6006` | WebSocket endpoint |
-| `RIPPLED_IP` | auto-detected | Override rippled host |
+| `RPC_URL` | `http://{xrpld_ip}:5005` | RPC endpoint |
+| `WS_URL` | `ws://{xrpld_ip}:6006` | WebSocket endpoint |
+| `XRPLD_IP` | auto-detected | Override xrpld host (`RIPPLED_IP` also accepted) |
 
 ## Key Implementation Details
 
@@ -360,7 +360,7 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 
 - **workload:latest**: Built from `workload/Dockerfile` (uvicorn FastAPI app). For local development, run natively with `uv run workload` instead.
 - **workload (Antithesis)**: Built from root `Dockerfile` (includes test_composer scripts at `/opt/antithesis/test/`)
-- **rippleci/xrpld:develop**: Default rippled image for testnet (from Docker Hub). Override with `gen auto --image`
+- **rippleci/xrpld:develop**: Default xrpld image for testnet (from Docker Hub). Override with `gen auto --image`
 - **config:latest**: Built from `Dockerfile.config` (network configs)
 - **sidecar:latest**: Built from `sidecar/Dockerfile` (monitoring service)
 
@@ -373,16 +373,16 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 - Account initialization happens at startup in `lifespan()` (app.py)
 - WebSocket listener, WS processor, finality checker, and DEX metrics poller run as concurrent tasks in an asyncio.TaskGroup
 - `prepare-workload/` is legacy — superseded by the `generate_ledger` package (`gen auto` CLI). Do not add new code there.
-- DelegateSet requires `PermissionDelegationV1_1` which is `Supported::no` in rippled develop — disabled in config.toml until rippled enables it.
+- DelegateSet requires `PermissionDelegationV1_1` which is `Supported::no` in xrpld develop — disabled in config.toml until xrpld enables it.
 - Vaults require `SingleAssetVault` (`Supported::yes` in develop) — works if testnet is generated with `--amendment-source` pointing at current features.macro.
 - Amendment profiles: `release` (default, fetches enabled amendments from mainnet RPC), `develop` (auto-fetches features.macro from GitHub), `custom` (local JSON). Use `--amendment-source` to provide a local features.macro instead of GitHub fetch. Per-amendment overrides via `--enable`/`--disable` flags.
-- Default rippled image is now `rippleci/xrpld:develop` (override with `--image`).
+- Default xrpld image is now `rippleci/xrpld:develop` (override with `--image`).
 
 ## Current Priorities
 
 See `workload/docs/todo/TODO.md` for the full list. The P0 items are:
 
-1. **WS connection stability**: WS drops every 1-2 minutes under 1005-account subscription load, causing mass expiry and 55% success rate. Unknown if it's our WS module or rippled — first step is determining which side drops.
+1. **WS connection stability**: WS drops every 1-2 minutes under 1005-account subscription load, causing mass expiry and 55% success rate. Unknown if it's our WS module or xrpld — first step is determining which side drops.
 2. **Code health**: Dead code cleanup, modularization, modern Python 3.13+ conventions. No backwards compatibility — use StrEnum, match, type parameter syntax, TaskGroup, etc.
 3. **Public network support**: The workload must easily target the public XRPL devnet or testnet (faucet-funded), not just local docker networks.
 4. **XRP accounting / fund recovery**: On shutdown or Ctrl-C, sweep all XRP back to the funding source. The only permanently consumed XRP should be transaction fees (burned) and account reserves. Stretch: AccountDelete to reclaim reserves.

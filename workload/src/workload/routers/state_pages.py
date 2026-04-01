@@ -14,13 +14,13 @@ log = logging.getLogger("workload.app")
 
 # Resolve RPC URL (same logic as app.py)
 if Path("/.dockerenv").is_file():
-    _rippled = cfg["rippled"]["docker"]
+    _xrpld = cfg["xrpld"]["docker"]
 else:
-    _rippled = cfg["rippled"]["local"]
+    _xrpld = cfg["xrpld"]["local"]
 
-_rpc_port = cfg["rippled"]["rpc_port"]
-_rippled_ip = os.getenv("RIPPLED_IP", _rippled)
-RPC = os.getenv("RPC_URL", f"http://{_rippled_ip}:{_rpc_port}")
+_rpc_port = cfg["xrpld"]["rpc_port"]
+_xrpld_ip = os.getenv("XRPLD_IP", os.getenv("RIPPLED_IP", _xrpld))
+RPC = os.getenv("RPC_URL", f"http://{_xrpld_ip}:{_rpc_port}")
 
 router = APIRouter(prefix="/state", tags=["State"])
 
@@ -31,7 +31,7 @@ async def state_dashboard(request: Request) -> HTMLResponse:
     hostname = RPC.split("//")[1].split(":")[0] if "//" in RPC else RPC.split(":")[0]
 
     # Build node list from compose config for the WS terminal dropdown
-    ws_port = cfg["rippled"]["ws_port"]
+    ws_port = cfg["xrpld"]["ws_port"]
     nodes = []
     try:
         from gl.config import ComposeConfig

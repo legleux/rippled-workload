@@ -163,7 +163,7 @@ Key settings in `workload/src/workload/config.toml`:
 | `[users]` | `number = 100` — must match user count in `gen auto` |
 | `[genesis]` | `accounts_json`, `gateway_count`, `user_count`, `currencies` — must align with `gen auto` flags |
 | `[transactions]` | `max_pending_per_account = 1` (must not be raised — see Throughput Tuning), `percentages`, `disabled` |
-| `[rippled]` | Connection settings (auto-detected from env vars) |
+| `[xrpld]` | Connection settings (auto-detected from env vars) |
 
 ### Environment Variables
 

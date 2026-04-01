@@ -113,7 +113,7 @@ def tx_submitted(tx_type: str, *, details: dict[str, Any] | None = None) -> None
 
 
 def _check_internal(tx_type: str, code: str, details: dict[str, Any] | None) -> None:
-    """INTERNAL result codes are rippled bugs — assert unreachable."""
+    """INTERNAL result codes are xrpld bugs — assert unreachable."""
     if code.endswith("INTERNAL"):
         unreachable(f"workload::{code}:{tx_type}", {"code": code, **(details or {})})
 

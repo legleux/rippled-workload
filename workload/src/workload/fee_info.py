@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 @dataclass
 class FeeInfo:
-    """Current fee escalation state from rippled fee command.
+    """Current fee escalation state from xrpld fee command.
 
     All fee values are in drops. Sizes and counts reflect current open ledger state.
     Note: current_ledger_size and current_queue_size change rapidly (per transaction).

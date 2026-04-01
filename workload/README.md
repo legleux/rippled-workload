@@ -177,9 +177,9 @@ Edit `src/workload/config.toml`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RPC_URL` | `http://{rippled_ip}:5005` | RPC endpoint |
-| `WS_URL` | `ws://{rippled_ip}:6006` | WebSocket endpoint |
-| `RIPPLED_IP` | auto-detected | Override rippled host |
+| `RPC_URL` | `http://{xrpld_ip}:5005` | RPC endpoint |
+| `WS_URL` | `ws://{xrpld_ip}:6006` | WebSocket endpoint |
+| `XRPLD_IP` | auto-detected | Override xrpld host (`RIPPLED_IP` also accepted) |
 
 ## Architecture
 

@@ -41,13 +41,13 @@
 
 The WS connection drops every 1-2 minutes when subscribed to 1005 accounts. Each reconnect creates a gap where validated txns aren't seen, causing mass LLS expiry (150-515 txns per event) and account blocking. The seq fixes are working; this is now the dominant failure mode.
 
-**Unknown: is this our WS module (websockets library, asyncio backpressure, read loop stalling) or rippled dropping the connection?** Hopefully it's us — rippled's default `websocket_max_connections` is 500 (we only use 1 connection with 1005 subscribed accounts), so rippled should handle this fine.
+**Unknown: is this our WS module (websockets library, asyncio backpressure, read loop stalling) or xrpld dropping the connection?** Hopefully it's us — xrpld's default `websocket_max_connections` is 500 (we only use 1 connection with 1005 subscribed accounts), so xrpld should handle this fine.
 
-- [ ] **Determine which side drops the connection** — check rippled logs for WS close reason. Add close code + reason logging to our `ws.py` reconnect handler. Is our read loop falling behind? Is the websockets library buffering and then disconnecting?
+- [ ] **Determine which side drops the connection** — check xrpld logs for WS close reason. Add close code + reason logging to our `ws.py` reconnect handler. Is our read loop falling behind? Is the websockets library buffering and then disconnecting?
 - [ ] **Add dedicated WS accounts log file** — `workload.ws.accounts` logger exists but writes to shared `workload.log`. Add a file handler in `logging_config.py` for isolated analysis.
 - [ ] **Reduce reconnect gap impact** — faster resubscription, or buffer/replay missed events during reconnect window.
 - [ ] **If it's us**: profile the event loop during high throughput — are we blocking the WS read task? Is `ws_processor` keeping up with the event queue?
-- [ ] **If it's rippled**: consider splitting into multiple WS connections with smaller account sets, or file a rippled issue.
+- [ ] **If it's xrpld**: consider splitting into multiple WS connections with smaller account sets, or file an xrpld issue.
 
 **Evidence from 2026-04-01 run:**
 - 7 WS disconnects in 16 minutes
@@ -102,7 +102,7 @@ Top priority. The codebase works but has accumulated dead code, debug artifacts,
 - [ ] Implement assertions for our project that can *optionally* be overidden as assertions from the
    Antithesis SDK if this project optionally uses it.
 ### Dead Code Removal
-- [ ] Redefine the way we aggregate groups of txns to be submitted to not use the term "batch" in the source (or docs) to avoid confusion with the new Batch txn type and the rippled batch submission feature.
+- [ ] Redefine the way we aggregate groups of txns to be submitted to not use the term "batch" in the source (or docs) to avoid confusion with the new Batch txn type and the xrpld batch submission feature.
 - [x] ~~16 dead methods removed from workload_core.py, app.py, sqlite_store.py, utils.py~~
 
 ### Bug Fixes
@@ -122,7 +122,7 @@ Top priority. The codebase works but has accumulated dead code, debug artifacts,
 - [ ] Delete old `builder.py` (orphaned, no imports reference it)
 
 ### New Transaction Type Follow-ups
-- [ ] Enable DelegateSet when `PermissionDelegationV1_1` is marked `Supported::yes` in rippled (currently `no`)
+- [ ] Enable DelegateSet when `PermissionDelegationV1_1` is marked `Supported::yes` in xrpld (currently `no`)
 - [ ] Consider baking MPToken issuances into genesis via `gl.ledger.LedgerConfig.mpt_issuances` for faster cold start
 - [ ] gen auto metadata sidecar file — write gateway count alongside accounts.json so workload doesn't need config.toml for genesis loading
 - [ ] Intentionally bad txns — configurable knob to submit invalid/malformed transactions for testing rejection paths
@@ -182,12 +182,12 @@ When workload completes (or on Ctrl-C / crash), all XRP should be returned to th
 
 ### Transaction Finality Assurance — When to Stop Waiting
 
-Currently we stop waiting for a tx when either (a) the WS stream reports it validated, or (b) its `LastLedgerSequence` expires and the finality checker marks it `EXPIRED`. `FAILED_NET` txns (submission timeout / connection drop) stay locked until LLS for safety — the tx may have reached rippled's queue even though we got no response.
+Currently we stop waiting for a tx when either (a) the WS stream reports it validated, or (b) its `LastLedgerSequence` expires and the finality checker marks it `EXPIRED`. `FAILED_NET` txns (submission timeout / connection drop) stay locked until LLS for safety — the tx may have reached xrpld's queue even though we got no response.
 
 Options to investigate for faster/more reliable finality signaling:
 
 - **WebSocket tx stream** (already active): `ws_processor` fires `record_validated()` on hash match. Latency = one ledger close after the tx validates. Should be sufficient for most cases.
-- **rippled gRPC stream**: Connect directly to validator nodes for sub-ledger event delivery. Faster than WS for high-throughput scenarios. User has an existing script to connect to the gRPC stream — evaluate whether the latency improvement justifies the added infrastructure.
+- **xrpld gRPC stream**: Connect directly to validator nodes for sub-ledger event delivery. Faster than WS for high-throughput scenarios. User has an existing script to connect to the gRPC stream — evaluate whether the latency improvement justifies the added infrastructure.
 - **Validator log parsing**: Fragile — couples to log format, hard to maintain. Not recommended.
 - **Periodic RPC poll** (`Tx` lookup): Current fallback via `periodic_finality_check`. Works but is ~5s delayed and doesn't scale well at high txn volume.
 
@@ -199,12 +199,12 @@ With intent=0% (all valid), 4,834 tefPAST_SEQ and 14,310 expired txns in ~850 le
 
 **Root cause: `periodic_finality_check` bottleneck.** Every 5s the poller does sequential RPC `Tx` lookups for ~1000 pending txns. This takes much longer than 5s. Meanwhile `check_finality()` expires txns past LLS+2 — but some of those txns DID validate on-chain. The poller just hasn't reached them yet. When we submit the next txn for that account, the ledger has already advanced the sequence → tefPAST_SEQ.
 
-WS `transactions` stream is working (121K `validated_matched`) but misses ~32% of validations (found only by poll). Possible causes: rippled drops WS events under high throughput, or our asyncio event loop can't process them fast enough.
+WS `transactions` stream is working (121K `validated_matched`) but misses ~32% of validations (found only by poll). Possible causes: xrpld drops WS events under high throughput, or our asyncio event loop can't process them fast enough.
 
 **Candidate fixes (ordered by impact):**
 
 1. **Parallelize `periodic_finality_check`** — use `asyncio.TaskGroup` to batch RPC `Tx` lookups instead of sequential iteration. ~1000 parallel lookups should complete in <1s vs current ~30s+.
-2. **Subscribe to `accounts` stream** (not just `accounts_proposed`) — the `accounts` WS subscription delivers validated txns for specific accounts. Currently we rely on the global `transactions` stream for validated events + `accounts_proposed` for early engine_result feedback. Using `accounts` would give us a per-account validated feed.  Downside: 1000 subscribed accounts is fine — rippled handles it. The subscription persists, so no need to resub per-txn.
+2. **Subscribe to `accounts` stream** (not just `accounts_proposed`) — the `accounts` WS subscription delivers validated txns for specific accounts. Currently we rely on the global `transactions` stream for validated events + `accounts_proposed` for early engine_result feedback. Using `accounts` would give us a per-account validated feed.  Downside: 1000 subscribed accounts is fine — xrpld handles it. The subscription persists, so no need to resub per-txn.
 3. **Don't expire in `check_finality` after RPC error** — currently if the `Tx` lookup throws (line 1390), execution falls through to the LLS expiry check (line 1393). A transient RPC error → false expiry. Guard: only expire if the `Tx` lookup succeeded but returned not-validated.
 4. **Increase `HORIZON`** — currently 15 ledgers (~45-60s). A larger horizon gives more time for WS/poll to catch validations, at the cost of slower account recovery on genuine failures.
 
