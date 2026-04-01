@@ -174,10 +174,18 @@ async def lifespan(app: FastAPI):
     app.state.ws_queue = asyncio.Queue(maxsize=1000)  # TODO: Constant
     log.debug("Created WS event queue (maxsize=1000)")
 
+    # WS subscribes to ledger+server immediately but defers account subscription
+    # until accounts are loaded from genesis/db.
+    accounts_ready = asyncio.Event()
+
     async with asyncio.TaskGroup() as tg:
         tg.create_task(
             ws_listener(
-                app.state.stop, WS, app.state.ws_queue, accounts_provider=app.state.workload.get_all_account_addresses
+                app.state.stop,
+                WS,
+                app.state.ws_queue,
+                accounts_provider=app.state.workload.get_all_account_addresses,
+                accounts_ready=accounts_ready,
             ),
             name="ws_listener",
         )
@@ -240,6 +248,10 @@ async def lifespan(app: FastAPI):
                     "  uv run gen --amendment-profile develop -o testnet"
                 )
                 raise SystemExit(1)
+
+        # Signal WS listener that accounts are loaded — triggers account subscription
+        accounts_ready.set()
+        log.info("accounts_ready set — WS will now subscribe to %d accounts", len(app.state.workload.wallets))
 
         init_ledger = await app.state.workload._current_ledger_index()
         app.state.workload.first_ledger_index = init_ledger

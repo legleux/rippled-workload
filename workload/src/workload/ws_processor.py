@@ -186,6 +186,8 @@ async def _handle_ledger_closed(workload: "Workload", msg: dict) -> None:
     # Wake the consumer — this is the tick, no RPC needed
     if ledger_index:
         workload.notify_ledger_closed(ledger_index)
+        # Expire pending txns past their LastLedgerSequence — driven by ledger close, no RPC
+        workload.expire_past_lls(ledger_index)
     ledger_hash = msg.get("ledger_hash")
 
     # txn_count comes directly from the ledgerClosed WS message — zero RPC cost

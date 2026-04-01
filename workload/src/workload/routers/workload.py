@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 
 from workload import workload_runner
-from workload.schemas import IntentReq, MaxPendingReq, TargetTPSReq, ToggleTypeReq
+from workload.schemas import IntentReq, TargetTPSReq, ToggleTypeReq
 
 log = logging.getLogger("workload.app")
 
@@ -72,15 +72,9 @@ async def get_max_pending(request: Request):
 
 
 @router.post("/max-pending")
-async def set_max_pending(req: MaxPendingReq, request: Request):
-    """Set max pending transactions per account. Range: 1-10."""
-    if req.max_pending < 1 or req.max_pending > 10:
-        raise HTTPException(status_code=400, detail="max_pending must be between 1 and 10")
-
-    old_value = request.app.state.workload.max_pending_per_account
-    request.app.state.workload.max_pending_per_account = req.max_pending
-    log.info(f"max_pending_per_account changed: {old_value} -> {req.max_pending}")
-    return {"old_value": old_value, "new_value": req.max_pending, "status": "updated"}
+async def set_max_pending():
+    """Max pending is locked to 1. Multi-pending causes cascading tefPAST_SEQ failures."""
+    raise HTTPException(status_code=400, detail="max_pending_per_account is locked to 1")
 
 
 @router.get("/intent")

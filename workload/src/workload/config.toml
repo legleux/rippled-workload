@@ -51,12 +51,8 @@ BTC = 1_000_000_000
 ########### Transaction context defaults #############
 ######################################################
 [transactions]
-# Max in-flight txns per account. Default 1 is safe — each account waits for
-# its txn to validate before sending another. Higher values (2-3) increase
-# throughput but risk tefPAST_SEQ if any in-flight txn fails without advancing
-# the ledger sequence. Invalid-intent txns are guarded (only sent to accounts
-# with 0 pending), but valid txns can still get tem*/tef* rejections.
-# Runtime-adjustable via dashboard slider or POST /workload/max-pending.
+# Locked to 1. Multi-pending (>1) causes cascading tefPAST_SEQ failures and is
+# disabled. See workload/docs/todo/seq-management-fix-plan.md (Bug 3).
 max_pending_per_account = 1
 
 # Max txns built per submission loop iteration. Not a rate limit — use the

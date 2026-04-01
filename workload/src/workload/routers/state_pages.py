@@ -287,13 +287,6 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                                onchange="sliderCooldown=Date.now()+4000;fetch('/workload/target-tps',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{target_tps:parseFloat(this.value)}})}})">
                     </div>
                     <div class="fill-control" style="flex:1;min-width:280px">
-                        <label>Max pending/account: <span id="max-pending-value" style="font-weight:700;color:#d29922">1</span></label>
-                        <input type="range" id="max-pending-input" min="1" max="10" step="1" value="1"
-                               style="width:100%;accent-color:#d29922;cursor:pointer"
-                               oninput="document.getElementById('max-pending-value').textContent=this.value"
-                               onchange="sliderCooldown=Date.now()+4000;fetch('/workload/max-pending',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{max_pending:parseInt(this.value)}})}})">
-                    </div>
-                    <div class="fill-control" style="flex:1;min-width:280px">
                         <label>Invalid intent: <span id="invalid-intent-value" style="font-weight:700;color:#f85149">10</span>% <span style="color:#8b949e;font-size:11px">(0 = all valid)</span></label>
                         <input type="range" id="invalid-intent-input" min="0" max="100" step="5" value="10"
                                style="width:100%;accent-color:#f85149;cursor:pointer"
@@ -683,11 +676,6 @@ async def state_dashboard(request: Request) -> HTMLResponse:
                     document.getElementById('target-tps-value').textContent = rateRes.target_tps;
                 }}
 
-                const mpInput = document.getElementById('max-pending-input');
-                if (!cool && document.activeElement !== mpInput) {{
-                    mpInput.value = rateRes.max_pending_per_account;
-                    document.getElementById('max-pending-value').textContent = rateRes.max_pending_per_account;
-                }}
 
                 const intentInput = document.getElementById('invalid-intent-input');
                 const intentPct = Math.round((intentRes.invalid || 0) * 100);
@@ -1056,7 +1044,7 @@ async def state_mptokens_page(request: Request) -> HTMLResponse:
 
     rows = ""
     for i, (mpt_id, issuer) in enumerate(mptoken_ids.items()):
-        rows += f'<tr><td>{i}</td><td><code>{mpt_id}</code></td><td><code>{issuer}</code></td></tr>'
+        rows += f"<tr><td>{i}</td><td><code>{mpt_id}</code></td><td><code>{issuer}</code></td></tr>"
 
     html = f"""<!DOCTYPE html>
     <html><head>

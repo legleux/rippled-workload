@@ -40,10 +40,10 @@
 **Full plan:** `workload/docs/todo/seq-management-fix-plan.md` (2026-03-31)
 
 Four root causes identified for persistent tefPAST_SEQ failures:
-- [ ] **Phase 1 (Critical):** `expire_past_lls()` doesn't reset sequences — freed accounts immediately tefPAST_SEQ
-- [ ] **Phase 2:** `account_generation` captured but never checked — stale txns submitted after cascade
-- [ ] **Phase 3:** Remove `max_pending_per_account` knob (lock to 1), simplify clean/partial pools
-- [ ] **Phase 4:** `record_validated()` updates `next_seq` without lock — defensive fix
+- [x] **Phase 1 (Critical):** `expire_past_lls()` resets `next_seq=None` + bumps `generation` on affected accounts (2026-03-31)
+- [x] **Phase 2:** Generation guard in `submit_pending()` — skips stale pre-signed txns (2026-03-31)
+- [x] **Phase 3:** `max_pending_per_account` locked to 1, dashboard slider removed, POST returns 400 (2026-03-31)
+- [x] **Phase 4:** `record_validated()` wraps `next_seq` update in `async with rec.lock` (2026-03-31)
 - [ ] **Phase 5 (needs re-review):** Fee strategy — cache-and-react vs. WS-derived escalated fee
 
 Previously fixed (still valid):
@@ -170,6 +170,21 @@ Options to investigate for faster/more reliable finality signaling:
 - **Periodic RPC poll** (`Tx` lookup): Current fallback via `periodic_finality_check`. Works but is ~5s delayed and doesn't scale well at high txn volume.
 
 Long-term goal: a single, reliable event source that tells us definitively "tx X is terminal" so accounts can be freed immediately without waiting for LLS expiry as a safety margin.
+
+#### Root Cause Analysis (2026-03-31 verification run)
+
+With intent=0% (all valid), 4,834 tefPAST_SEQ and 14,310 expired txns in ~850 ledgers. The self-heal `expire_past_lls` path never triggered (0 times), so the seq-fix Phases 1+2 are defense-in-depth for a scenario that doesn't arise under normal load. The tefPAST_SEQ errors come from the normal submission path.
+
+**Root cause: `periodic_finality_check` bottleneck.** Every 5s the poller does sequential RPC `Tx` lookups for ~1000 pending txns. This takes much longer than 5s. Meanwhile `check_finality()` expires txns past LLS+2 — but some of those txns DID validate on-chain. The poller just hasn't reached them yet. When we submit the next txn for that account, the ledger has already advanced the sequence → tefPAST_SEQ.
+
+WS `transactions` stream is working (121K `validated_matched`) but misses ~32% of validations (found only by poll). Possible causes: rippled drops WS events under high throughput, or our asyncio event loop can't process them fast enough.
+
+**Candidate fixes (ordered by impact):**
+
+1. **Parallelize `periodic_finality_check`** — use `asyncio.TaskGroup` to batch RPC `Tx` lookups instead of sequential iteration. ~1000 parallel lookups should complete in <1s vs current ~30s+.
+2. **Subscribe to `accounts` stream** (not just `accounts_proposed`) — the `accounts` WS subscription delivers validated txns for specific accounts. Currently we rely on the global `transactions` stream for validated events + `accounts_proposed` for early engine_result feedback. Using `accounts` would give us a per-account validated feed.  Downside: 1000 subscribed accounts is fine — rippled handles it. The subscription persists, so no need to resub per-txn.
+3. **Don't expire in `check_finality` after RPC error** — currently if the `Tx` lookup throws (line 1390), execution falls through to the LLS expiry check (line 1393). A transient RPC error → false expiry. Guard: only expire if the `Tx` lookup succeeded but returned not-validated.
+4. **Increase `HORIZON`** — currently 15 ledgers (~45-60s). A larger horizon gives more time for WS/poll to catch validations, at the cost of slower account recovery on genuine failures.
 
 ### Submission Throughput
 - [x] ~~Parallelize build loop~~ DONE (2026-03-24)

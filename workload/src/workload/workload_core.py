@@ -202,7 +202,7 @@ class Workload:
         self.store: InMemoryStore = InMemoryStore()  # Hot-path runtime store
         self.persistent_store: SQLiteStore | None = store  # SQLite for durability (flushed periodically)
 
-        self.max_pending_per_account: int = self.config.get("transactions", {}).get("max_pending_per_account", 1)
+        self.max_pending_per_account: int = 1  # Locked to 1; multi-pending is broken by design
 
         self.target_tps: float = 0  # 0 = unlimited (firehose)
         self.submission_set_size: int = self.config.get("transactions", {}).get("submission_set_size", 200)
@@ -827,9 +827,10 @@ class Workload:
         # Keep next_seq in sync: validated txn consumed this sequence, so next must be at least seq+1
         if p_live and p_live.account and p_live.sequence is not None:
             rec_acct = self._record_for(p_live.account)
-            expected = p_live.sequence + 1
-            if rec_acct.next_seq is None or rec_acct.next_seq < expected:
-                rec_acct.next_seq = expected
+            async with rec_acct.lock:
+                expected = p_live.sequence + 1
+                if rec_acct.next_seq is None or rec_acct.next_seq < expected:
+                    rec_acct.next_seq = expected
 
         await dispatch_validation_hooks(self, p_live, rec, meta_result)
         log.debug("txn %s validated at ledger %s via %s", rec.txn, rec.seq, rec.src)
@@ -971,10 +972,15 @@ class Workload:
         by stale pending txns (e.g. after tefPAST_SEQ cascades), this scans and expires
         them immediately rather than waiting for the 5s periodic_finality_check.
 
+        After expiring, resets affected accounts' sequences to None so the next
+        alloc_seq() call fetches from the validated ledger (cold-start path).
+        Also bumps generation to invalidate any pre-signed txns built before the reset.
+
         Returns count of expired txns.
         """
         expired_count = 0
-        for tx_hash, p in list(self.pending.items()):
+        affected_accounts: set[str] = set()
+        for _hash, p in list(self.pending.items()):
             if p.state in C.PENDING_STATES and p.last_ledger_seq and p.last_ledger_seq < ledger_index:
                 p.state = C.TxState.EXPIRED
                 self._total_expired += 1
@@ -982,11 +988,22 @@ class Workload:
                     p.engine_result_first = "PAST_LLS"
                 p.finalized_at = time.time()
                 expired_count += 1
+                if p.account:
+                    affected_accounts.add(p.account)
+
+        # Reset sequences on affected accounts — forces cold-start fetch in alloc_seq
+        for addr in affected_accounts:
+            rec = self._record_for(addr)
+            rec.next_seq = None
+            rec.generation += 1
+            log.debug("expire_past_lls: reset seq for %s (gen=%d)", addr, rec.generation)
+
         if expired_count:
             log.warning(
-                "expire_past_lls: force-expired %d stale txns (ledger=%d)",
+                "expire_past_lls: force-expired %d stale txns (ledger=%d, accounts_reset=%d)",
                 expired_count,
                 ledger_index,
+                len(affected_accounts),
             )
         return expired_count
 
@@ -1142,6 +1159,25 @@ class Workload:
             log.debug("%s not active txn!", p)
             return None
 
+        # Generation guard: skip txns whose sequence was invalidated by expire/cascade
+        if p.account:
+            rec = self._record_for(p.account)
+            if p.account_generation != rec.generation:
+                p.state = C.TxState.EXPIRED
+                self._total_expired += 1
+                if p.engine_result_first is None:
+                    p.engine_result_first = "STALE_GENERATION"
+                p.finalized_at = time.time()
+                self.pending.pop(p.tx_hash, None)
+                log.debug(
+                    "STALE_GENERATION: %s account=%s gen=%d current=%d",
+                    p.transaction_type,
+                    p.account,
+                    p.account_generation,
+                    rec.generation,
+                )
+                return {"engine_result": "STALE_GENERATION"}
+
         try:
             p.attempts += 1
             log.debug(
@@ -1217,7 +1253,12 @@ class Workload:
                     _actual = _ai.result["account_data"]["Sequence"]
                     log.debug(
                         "tefPAST_SEQ detail: %s %s submitted_seq=%d current_ledger_seq=%d delta=%d next_seq_before=%s",
-                        p.transaction_type, p.account, p.sequence, _actual, _actual - p.sequence, rec.next_seq,
+                        p.transaction_type,
+                        p.account,
+                        p.sequence,
+                        _actual,
+                        _actual - p.sequence,
+                        rec.next_seq,
                     )
                 except Exception as _e:
                     log.debug("tefPAST_SEQ detail: fetch failed: %s", _e)
@@ -1670,14 +1711,25 @@ async def periodic_dex_metrics(w: Workload, stop: asyncio.Event, poll_interval_l
 
 
 async def periodic_finality_check(w: Workload, stop: asyncio.Event, interval: int = 5):
+    """Fallback finality check for txns that WS missed (e.g., during reconnect).
+
+    Primary validation comes from the WS accounts stream. This function only
+    does RPC lookups for txns past their LastLedgerSequence that are still in
+    SUBMITTED state — these are txns where WS should have delivered a validation
+    event but didn't. Also handles periodic cleanup of terminal txns.
+    """
     iteration = 0
     while not stop.is_set():
         try:
-            for p in w.find_by_state(C.TxState.SUBMITTED, C.TxState.RETRYABLE, C.TxState.FAILED_NET):
-                try:
-                    await w.check_finality(p)
-                except Exception:
-                    log.exception("[finality] check failed for %s", getattr(p, "tx_hash", p))
+            # Only check txns past their LLS — WS handles the rest
+            latest = w.latest_ledger_index
+            if latest > 0:
+                for p in w.find_by_state(C.TxState.SUBMITTED, C.TxState.FAILED_NET):
+                    if p.last_ledger_seq and p.last_ledger_seq < latest:
+                        try:
+                            await w.check_finality(p)
+                        except Exception:
+                            log.exception("[finality] check failed for %s", getattr(p, "tx_hash", p))
 
             iteration += 1
             if iteration % 10 == 0:

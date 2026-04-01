@@ -6,7 +6,7 @@ import tomllib
 
 from gl.compose import ComposeConfig, write_compose_file
 from gl.ledger import LedgerConfig, write_ledger_file
-from gl.rippled_cfg import RippledConfigSpec
+from gl.xrpld_cfg import XrpldConfigSpec
 
 from workload.compose import write_workload_compose
 
@@ -71,14 +71,15 @@ def run_gen(
     write_ledger_file(config=ledger_cfg)
 
     # --- Rippled configs ---
-    rippled_cfg = RippledConfigSpec(
+    xrpld_cfg = XrpldConfigSpec(
         num_validators=num_validators,
         base_dir=base_dir / "volumes",
         reference_fee=ledger_cfg.fee_cfg.base_fee_drops,
         account_reserve=ledger_cfg.fee_cfg.reserve_base_drops,
         owner_reserve=ledger_cfg.fee_cfg.reserve_increment_drops,
+        peer_port=2459,  # Must match the template's [port_peer] port
     )
-    rippled_cfg.write()
+    xrpld_cfg.write()
 
     # --- testnet docker-compose.yml ---
     compose_cfg = ComposeConfig(

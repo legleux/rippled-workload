@@ -116,15 +116,20 @@ Supported transaction types (38): Payment, OfferCreate, OfferCancel, TrustSet, A
 Two concurrent paths to validation (see workload/ws-architecture.md):
 
 1. **WebSocket** (primary): `ws_listener` → event queue → `ws_processor` → `record_validated(src=WS)`
-   - Subscribes to `accounts_proposed` (early engine_result feedback) + `transactions` stream (catches newly-created accounts)
+   - Subscribes to `accounts` (validated txns per-account) + `accounts_proposed` (early engine_result feedback)
+   - Account subscription is deferred until genesis accounts are loaded (`accounts_ready` event in bootstrap.py)
    - `ledgerClosed` events provide `txn_count`, `fee_base`, `reserve_base`, `reserve_inc` — eliminates RPC calls
-2. **RPC Polling** (fallback): `periodic_finality_check` every 5s → `record_validated(src=POLL)`
+   - `ledgerClosed` also triggers `expire_past_lls()` to expire txns past their LastLedgerSequence
+   - Dedicated logger: `workload.ws.accounts` logs all subscription and validation events
+2. **RPC Polling** (fallback): `periodic_finality_check` every 5s — only checks txns past their LLS (overdue), not all pending
 
 Both paths deduplicate by `(tx_hash, ledger_index)`. See `workload/ws-architecture.md` and `workload/ws-architecture.excalidraw` for the full architecture diagram.
 
+**Known issue (2026-03-31):** `_subscribe_accounts()` reads the next WS message as the subscription ack. On reconnect, a `ledgerClosed` event can arrive first, causing the subscription to report failure. Needs message-id filtering. See TODO.
+
 ### Submission Architecture
 
-Single unified loop in `continuous_workload()` (workload_runner.py). Two-phase build: sync compose, then parallel alloc_seq + sign via TaskGroup. Token-bucket rate limiter (`target_tps`, 0=unlimited). No queue, no producer-consumer split. Submissions are not gated on ledger close — txns go to rippled's internal queue immediately. `submission_set_size` caps txns built per iteration; `max_pending_per_account` controls how many in-flight txns an account can have (default 1). Self-healing via `expire_past_lls()` when all accounts are blocked. Account sequences are pre-warmed in parallel on startup via `warm_sequences()`.
+Single unified loop in `continuous_workload()` (workload_runner.py). Two-phase build: sync compose, then parallel alloc_seq + sign via TaskGroup. Token-bucket rate limiter (`target_tps`, 0=unlimited). No queue, no producer-consumer split. Submissions are not gated on ledger close — txns go to rippled's internal queue immediately. `submission_set_size` caps txns built per iteration; `max_pending_per_account` is locked to 1 (multi-pending causes cascading tefPAST_SEQ). Self-healing via `expire_past_lls()` when all accounts are blocked — resets `next_seq=None` and bumps `generation` to invalidate pre-signed txns. Generation guard in `submit_pending()` catches stale txns. Account sequences are pre-warmed in parallel on startup via `warm_sequences()`.
 
 ### Intentionally Invalid Transactions
 

@@ -104,14 +104,9 @@ async def continuous_workload(wl: Workload) -> None:
                         await asyncio.sleep(0.05)
                         continue
 
-                # ── Find free accounts ──────────────────────────────────
-                max_p = wl.max_pending_per_account
+                # ── Find free accounts (max_pending=1: free == 0 pending == clean) ──
                 pending_counts = wl.get_pending_txn_counts_by_account()
-                # Clean accounts (0 pending) can receive any intent including INVALID
-                clean_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
-                # Partial accounts (>0 but below max) can only receive VALID intent
-                partial_accounts = [addr for addr in wl.wallets if 0 < pending_counts.get(addr, 0) < max_p]
-                free_accounts = clean_accounts + partial_accounts
+                free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
                 n_free = len(free_accounts)
 
                 if n_free == 0:
@@ -133,9 +128,7 @@ async def continuous_workload(wl: Workload) -> None:
                                 batch_ledger,
                             )
                             pending_counts = wl.get_pending_txn_counts_by_account()
-                            clean_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
-                            partial_accounts = [addr for addr in wl.wallets if 0 < pending_counts.get(addr, 0) < max_p]
-                            free_accounts = clean_accounts + partial_accounts
+                            free_accounts = [addr for addr in wl.wallets if pending_counts.get(addr, 0) == 0]
                             n_free = len(free_accounts)
                             if n_free > 0:
                                 log.info("workload: self-heal freed %d accounts", n_free)
@@ -171,7 +164,7 @@ async def continuous_workload(wl: Workload) -> None:
                 build_start = perf_counter()
 
                 # Type-first: roll types, assign eligible accounts, determine intent
-                assignments = compose_submission_set(free_accounts, clean_accounts, target, wl.ctx, wl.config)
+                assignments = compose_submission_set(free_accounts, free_accounts, target, wl.ctx, wl.config)
 
                 # Phase 1: Build txn dicts (sync, no RPC)
                 built: list[tuple[Wallet, Transaction, bool]] = []

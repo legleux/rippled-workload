@@ -313,6 +313,57 @@ wheels = [
 ]
 
 [[package]]
+name = "generate-ledger"
+version = "0.0.6"
+source = { editable = "../../generate_ledger" }
+dependencies = [
+    { name = "base58" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "ruamel-yaml" },
+    { name = "typer" },
+    { name = "xrpl-py" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "base58", specifier = ">=2.1.1" },
+    { name = "pydantic", specifier = ">=2.11.7" },
+    { name = "pydantic-settings", specifier = ">=2.10.1" },
+    { name = "ruamel-yaml", specifier = ">=0.18.14" },
+    { name = "typer", specifier = ">=0.17.4" },
+    { name = "xrpl-py", specifier = ">=4.2.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "complexipy", specifier = ">=5.2.0" },
+    { name = "mkdocs-material", specifier = ">=9.6.0" },
+    { name = "pre-commit", specifier = ">=4.2.0" },
+    { name = "pytest", specifier = ">=8.4.1" },
+    { name = "pytest-cov", specifier = ">=6.0" },
+    { name = "radon", specifier = ">=6.0.1" },
+    { name = "ruff", specifier = ">=0.12.11" },
+]
+fast = [
+    { name = "coincurve", specifier = ">=20.0.0,<21.0.0" },
+    { name = "pynacl", specifier = ">=1.5.0" },
+]
+gpu = [
+    { name = "cupy-cuda12x", specifier = ">=13.0.0" },
+    { name = "nvidia-cuda-nvcc-cu12", specifier = ">=12.9.86" },
+    { name = "nvidia-cuda-nvrtc-cu12", specifier = ">=12.9.86" },
+]
+lint = [
+    { name = "pre-commit", specifier = ">=4.2.0" },
+    { name = "ruff", specifier = ">=0.12.11" },
+]
+test = [
+    { name = "pytest", specifier = ">=8.4.1" },
+    { name = "pytest-cov", specifier = ">=6.0" },
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1136,6 +1187,9 @@ dependencies = [
 dev = [
     { name = "pre-commit" },
 ]
+gen = [
+    { name = "generate-ledger" },
+]
 lint = [
     { name = "ruff" },
 ]
@@ -1157,6 +1211,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [{ name = "pre-commit", specifier = ">=4.3.0" }]
+gen = [{ name = "generate-ledger", editable = "../../generate_ledger" }]
 lint = [{ name = "ruff", specifier = ">=0.14.1" }]
 
 [[package]]

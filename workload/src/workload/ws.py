@@ -1,9 +1,10 @@
 """
 WebSocket listener that:
 1. Maintains persistent connection to rippled WS endpoint
-2. Subscribes to transaction and ledger streams
+2. Subscribes to account streams for validated + proposed txns
 3. Publishes events to a queue for workload processing
 4. Handles reconnection with exponential backoff
+5. Defers account subscription until accounts are loaded (accounts_ready event)
 """
 
 import asyncio
@@ -15,6 +16,7 @@ from typing import Literal
 import websockets
 
 log = logging.getLogger("workload.ws")
+ws_accounts_log = logging.getLogger("workload.ws.accounts")
 
 RECV_TIMEOUT = 90.0
 RECONNECT_BASE = 1.0
@@ -23,11 +25,35 @@ RECONNECT_MAX = 10.0
 EventType = Literal["tx_validated", "tx_proposed", "tx_response", "ledger_closed", "server_status", "raw"]
 
 
+async def _subscribe_accounts(ws, accounts: list[str]) -> bool:
+    """Send a subscribe command for accounts + accounts_proposed. Returns True on success."""
+    subscribe_msg = {
+        "id": 2,
+        "command": "subscribe",
+        "accounts": accounts,
+        "accounts_proposed": accounts,
+    }
+    ws_accounts_log.info("Subscribing to %d accounts + accounts_proposed", len(accounts))
+    await ws.send(json.dumps(subscribe_msg))
+    try:
+        ack = await asyncio.wait_for(ws.recv(), timeout=10)
+        ack_obj = json.loads(ack)
+        if ack_obj.get("status") != "success":
+            ws_accounts_log.error("Account subscription failed: %s", ack)
+            return False
+        ws_accounts_log.info("Account subscription successful (%d accounts)", len(accounts))
+        return True
+    except asyncio.TimeoutError:
+        ws_accounts_log.warning("Account subscription ack timeout, continuing anyway")
+        return True
+
+
 async def ws_listener(
     stop: asyncio.Event,
     ws_url: str,
     event_queue: asyncio.Queue,
     accounts_provider: Callable | None = None,
+    accounts_ready: asyncio.Event | None = None,
 ) -> None:
     """
     Connect to rippled WebSocket, subscribe to streams, and publish events to queue.
@@ -43,6 +69,10 @@ async def ws_listener(
     accounts_provider:
         Optional callable that returns list of account addresses to subscribe to.
         If None, subscribes to all transactions (inefficient but simple).
+    accounts_ready:
+        Optional event that signals accounts have been loaded (genesis/db).
+        WS subscribes to ledger+server immediately but defers account subscription
+        until this event is set.
     """
     backoff = RECONNECT_BASE
 
@@ -51,47 +81,42 @@ async def ws_listener(
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20, close_timeout=1) as ws:
                 log.info("WS connected: %s", ws_url)
 
-                accounts = None
-                if accounts_provider:
-                    try:
-                        accounts = accounts_provider()
-                        if accounts:
-                            log.debug(f"Got {len(accounts)} accounts from provider")
-                        else:
-                            log.debug("No accounts available yet (likely during startup)")
-                    except Exception as e:
-                        log.warning(f"Failed to get accounts from provider: {e}, falling back to transaction stream")
-
-                if accounts:
-                    # accounts_proposed gives us early feedback (engine_result before validation)
-                    # transactions stream catches txns for accounts added after subscribe
-                    streams = ["transactions", "ledger", "server"]
-                    subscribe_msg = {
-                        "id": 1,
-                        "command": "subscribe",
-                        "streams": streams,
-                        "accounts_proposed": accounts,
-                    }
-                    log.info(
-                        "Subscribing to transactions + ledger + server streams + %d accounts_proposed",
-                        len(accounts),
-                    )
-                else:
-                    subscribe_msg = {"id": 1, "command": "subscribe", "streams": ["transactions", "ledger", "server"]}
-                    log.info(
-                        "Subscribing to ALL transactions + ledger + server (fallback - will switch to accounts after init/reconnect)"
-                    )
-
-                await ws.send(json.dumps(subscribe_msg))
-
+                # Phase 1: Subscribe to ledger + server streams immediately
+                base_msg = {"id": 1, "command": "subscribe", "streams": ["ledger", "server"]}
+                await ws.send(json.dumps(base_msg))
                 try:
                     ack = await asyncio.wait_for(ws.recv(), timeout=10)
                     ack_obj = json.loads(ack)
                     if ack_obj.get("status") != "success":
-                        raise RuntimeError(f"subscribe failed: {ack}")
-                    log.info("WS subscription successful")
+                        raise RuntimeError(f"base subscribe failed: {ack}")
+                    log.info("WS base subscription successful (ledger + server)")
                 except asyncio.TimeoutError:
-                    log.warning("WS subscription ack timeout, continuing anyway")
+                    log.warning("WS base subscription ack timeout, continuing anyway")
+
+                # Phase 2: Wait for accounts to be ready, then subscribe
+                if accounts_ready and not accounts_ready.is_set():
+                    ws_accounts_log.info("Waiting for accounts_ready before subscribing to accounts...")
+                    # Wait for accounts_ready OR stop, whichever comes first
+                    ready_task = asyncio.create_task(accounts_ready.wait())
+                    halt_task = asyncio.create_task(stop.wait())
+                    done, pending = await asyncio.wait({ready_task, halt_task}, return_when=asyncio.FIRST_COMPLETED)
+                    for t in pending:
+                        t.cancel()
+                    if halt_task in done or stop.is_set():
+                        log.info("WS listener received stop signal while waiting for accounts")
+                        return
+                    ws_accounts_log.info("accounts_ready fired, proceeding with account subscription")
+
+                # Now subscribe to accounts
+                if accounts_provider:
+                    try:
+                        accounts = accounts_provider()
+                        if accounts:
+                            await _subscribe_accounts(ws, accounts)
+                        else:
+                            ws_accounts_log.warning("accounts_provider returned empty list")
+                    except Exception as e:
+                        ws_accounts_log.error("Failed to get accounts from provider: %s", e)
 
                 backoff = RECONNECT_BASE
 
@@ -164,19 +189,13 @@ async def _process_message(raw_msg: str, queue: asyncio.Queue) -> None:
 
     if msg_type == "transaction":
         if obj.get("validated"):
-            log.debug(
-                "WS tx_validated: hash=%s ledger=%s",
-                obj.get("hash") or obj.get("transaction", {}).get("hash"),
-                obj.get("ledger_index"),
-            )
+            tx_hash = obj.get("hash") or obj.get("transaction", {}).get("hash")
+            account = obj.get("transaction", {}).get("Account", "?")
+            ws_accounts_log.debug("validated: hash=%s account=%s ledger=%s", tx_hash, account, obj.get("ledger_index"))
             await queue.put(("tx_validated", obj))
         elif obj.get("engine_result"):
-            # Proposed transaction from accounts_proposed — immediate submission feedback
-            log.debug(
-                "WS tx_proposed: hash=%s result=%s",
-                obj.get("hash") or obj.get("transaction", {}).get("hash"),
-                obj.get("engine_result"),
-            )
+            tx_hash = obj.get("hash") or obj.get("transaction", {}).get("hash")
+            ws_accounts_log.debug("proposed: hash=%s result=%s", tx_hash, obj.get("engine_result"))
             await queue.put(("tx_proposed", obj))
         return
 
