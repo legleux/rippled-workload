@@ -36,6 +36,27 @@
 - [x] **File logging** — `workload.log` at DEBUG, console at INFO, rotating 50MB × 5
 - [x] **Invariants doc** — `workload/docs/invariants.md` with 12 invariants
 
+## P0: WS Connection Stability — Drops Every 1-2 Minutes Under Load
+**Discovered:** 2026-04-01 lifecycle test run (55% success rate, 1,818 expired in 120s)
+
+The WS connection drops every 1-2 minutes when subscribed to 1005 accounts. Each reconnect creates a gap where validated txns aren't seen, causing mass LLS expiry (150-515 txns per event) and account blocking. The seq fixes are working; this is now the dominant failure mode.
+
+**Unknown: is this our WS module (websockets library, asyncio backpressure, read loop stalling) or rippled dropping the connection?** Hopefully it's us — rippled's default `websocket_max_connections` is 500 (we only use 1 connection with 1005 subscribed accounts), so rippled should handle this fine.
+
+- [ ] **Determine which side drops the connection** — check rippled logs for WS close reason. Add close code + reason logging to our `ws.py` reconnect handler. Is our read loop falling behind? Is the websockets library buffering and then disconnecting?
+- [ ] **Add dedicated WS accounts log file** — `workload.ws.accounts` logger exists but writes to shared `workload.log`. Add a file handler in `logging_config.py` for isolated analysis.
+- [ ] **Reduce reconnect gap impact** — faster resubscription, or buffer/replay missed events during reconnect window.
+- [ ] **If it's us**: profile the event loop during high throughput — are we blocking the WS read task? Is `ws_processor` keeping up with the event queue?
+- [ ] **If it's rippled**: consider splitting into multiple WS connections with smaller account sets, or file a rippled issue.
+
+**Evidence from 2026-04-01 run:**
+- 7 WS disconnects in 16 minutes
+- `expire_past_lls` force-expiring 150-515 txns per event
+- 876/1004 accounts blocked at end of 120s monitoring window
+- WS validation working when connected: 8,448 by WS, 0 by poll
+
+---
+
 ## P0: Sequence Management & Submission Fix
 **Full plan:** `workload/docs/todo/seq-management-fix-plan.md` (2026-03-31)
 

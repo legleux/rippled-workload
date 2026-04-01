@@ -24,6 +24,19 @@ def main() -> None:
     compose_p = subs.add_parser("compose", help="Write docker-compose.yml for existing testnet")
     compose_p.add_argument("-o", "--output-dir", default="testnet", help="Testnet directory (default: testnet)")
 
+    # --- test (lifecycle: clean -> gen -> up -> monitor -> report) ---
+    test_p = subs.add_parser("test", help="Run lifecycle test: monitor (default), opt-in to clean/gen/up")
+    test_p.add_argument("--clean", action="store_true", help="Stop network and delete testnet/ before starting")
+    test_p.add_argument("--gen", action="store_true", help="Generate testnet config (implies --clean)")
+    test_p.add_argument("--up", action="store_true", help="Build and start network (implies --gen --clean)")
+    test_p.add_argument("--no-clean", action="store_true", help="Override: skip clean even with --gen/--up")
+    test_p.add_argument("--duration", type=int, default=300, help="Monitoring window in seconds (default: 300)")
+    test_p.add_argument("--api-url", default="http://localhost:8000", help="Workload API URL")
+    test_p.add_argument("-v", "--validators", type=int, default=5, help="Number of validators (default: 5)")
+    test_p.add_argument("--boot-timeout", type=int, default=180, help="Max seconds to wait for bootstrap")
+    test_p.add_argument("--intent-invalid", type=float, default=0.0, help="Invalid txn ratio (default: 0.0)")
+    test_p.add_argument("--focus", nargs="*", default=[], help="Extra API endpoints to snapshot")
+
     args = parser.parse_args()
 
     match args.command:
@@ -56,6 +69,26 @@ def main() -> None:
             write_workload_compose(args.output_dir)
             print(f"Wrote docker-compose.yml (includes {args.output_dir}/)")
             print("\nTo start: docker compose up -d --build")
+        case "test":
+            from workload.test_cmd import TestConfig, run_test
+
+            # Implication chain: --up implies --gen implies --clean (unless --no-clean)
+            do_gen = args.gen or args.up
+            do_clean = (args.clean or do_gen) and not args.no_clean
+
+            cfg = TestConfig(
+                duration=args.duration,
+                do_clean=do_clean,
+                do_gen=do_gen,
+                do_up=args.up,
+                api_url=args.api_url,
+                output_dir="testnet",
+                validators=args.validators,
+                boot_timeout=args.boot_timeout,
+                intent_invalid=args.intent_invalid,
+                focus=args.focus or [],
+            )
+            run_test(cfg)
         case "run" | None:
             import uvicorn
 

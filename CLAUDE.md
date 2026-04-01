@@ -30,6 +30,7 @@ rippled-workload/
 │       ├── constants.py           # Transaction types, states, timeouts
 │       ├── fee_info.py            # Fee escalation data
 │       ├── randoms.py             # SystemRandom for Antithesis determinism
+│       ├── test_cmd.py            # Lifecycle test CLI (clean → gen → up → monitor → report)
 │       └── config.toml            # Configuration (accounts, currencies, tx weights, etc.)
 ├── sidecar/                 # Antithesis monitoring sidecar (separate container)
 ├── test_composer/           # Curl-based load test scripts
@@ -127,6 +128,8 @@ Both paths deduplicate by `(tx_hash, ledger_index)`. See `workload/ws-architectu
 
 **Known issue (2026-03-31):** `_subscribe_accounts()` reads the next WS message as the subscription ack. On reconnect, a `ledgerClosed` event can arrive first, causing the subscription to report failure. Needs message-id filtering. See TODO.
 
+**Known issue (2026-04-01):** WS connection drops every 1-2 minutes under 1005-account subscription load. Unknown whether the drop originates from our WS module (websockets lib, asyncio backpressure, read loop stalling) or rippled. Each reconnect gap causes mass LLS expiry (150-515 txns). This is now the dominant failure mode (55% success rate). See P0 in TODO.
+
 ### Submission Architecture
 
 Single unified loop in `continuous_workload()` (workload_runner.py). Two-phase build: sync compose, then parallel alloc_seq + sign via TaskGroup. Token-bucket rate limiter (`target_tps`, 0=unlimited). No queue, no producer-consumer split. Submissions are not gated on ledger close — txns go to rippled's internal queue immediately. `submission_set_size` caps txns built per iteration; `max_pending_per_account` is locked to 1 (multi-pending causes cascading tefPAST_SEQ). Self-healing via `expire_past_lls()` when all accounts are blocked — resets `next_seq=None` and bumps `generation` to invalidate pre-signed txns. Generation guard in `submit_pending()` catches stale txns. Account sequences are pre-warmed in parallel on startup via `warm_sequences()`.
@@ -204,6 +207,29 @@ On startup the workload will:
 2. Wait for ledger closes to confirm the network is progressing
 3. Load state (SQLite → genesis → full init, whichever is available)
 4. Start continuous transaction submission
+
+### Lifecycle Test (`workload test`)
+
+```bash
+cd workload
+
+# Full lifecycle: clean → gen → up → monitor (5min) → report
+uv run workload test --up
+
+# Full lifecycle, shorter monitoring window
+uv run workload test --up --duration 60
+
+# Monitor-only (network already running)
+uv run workload test --duration 120
+
+# Include extra endpoints in the report
+uv run workload test --focus dex/amm-pools
+
+# Rebuild without wiping testnet
+uv run workload test --up --no-clean
+```
+
+Reports are written to `docs/todo/{YYYY-MM-DD-HHMM}-test-results.md`.
 
 ### Network Setup (via generate_ledger)
 
@@ -349,11 +375,12 @@ New accounts are adopted into `self.users` after validation of their funding Pay
 
 ## Current Priorities
 
-See `workload/docs/todo/TODO.md` for the full list. The three P0 items are:
+See `workload/docs/todo/TODO.md` for the full list. The P0 items are:
 
-1. **Code health**: Dead code cleanup, modularization, modern Python 3.13+ conventions. No backwards compatibility — use StrEnum, match, type parameter syntax, TaskGroup, etc.
-2. **Public network support**: The workload must easily target the public XRPL devnet or testnet (faucet-funded), not just local docker networks.
-3. **XRP accounting / fund recovery**: On shutdown or Ctrl-C, sweep all XRP back to the funding source. The only permanently consumed XRP should be transaction fees (burned) and account reserves. Stretch: AccountDelete to reclaim reserves.
+1. **WS connection stability**: WS drops every 1-2 minutes under 1005-account subscription load, causing mass expiry and 55% success rate. Unknown if it's our WS module or rippled — first step is determining which side drops.
+2. **Code health**: Dead code cleanup, modularization, modern Python 3.13+ conventions. No backwards compatibility — use StrEnum, match, type parameter syntax, TaskGroup, etc.
+3. **Public network support**: The workload must easily target the public XRPL devnet or testnet (faucet-funded), not just local docker networks.
+4. **XRP accounting / fund recovery**: On shutdown or Ctrl-C, sweep all XRP back to the funding source. The only permanently consumed XRP should be transaction fees (burned) and account reserves. Stretch: AccountDelete to reclaim reserves.
 
 ## Active Technologies
 - Python 3.14 (3.13+ required) + FastAPI, xrpl-py 4.5.0, uvicorn, asyncio.TaskGroup
